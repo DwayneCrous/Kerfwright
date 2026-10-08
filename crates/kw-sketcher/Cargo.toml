@@ -1,0 +1,19 @@
+[package]
+name = "kw-sketcher"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Interactive 2D sketcher (egui) on top of kw-sketch and kw-dxf"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+kw-sketch.workspace = true
+kw-dxf.workspace = true
+
+[lib]
+name = "kw_sketcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kw-sketcher"
+path = "src/main.rs"

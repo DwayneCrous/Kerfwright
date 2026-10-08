@@ -14,8 +14,6 @@ Assumptions: a team of ~8–12 senior engineers (2 kernel, 1 solver/numerics, 1 
 ---
 
 ## Phase 1 — Core math foundation (months 0–4)
-**Status: implemented — see [phase1-report.md](phase1-report.md) for results per criterion and known gaps.**
-
 **Build:** `kw-math` (tolerance, predicates, transforms), `kw-nurbs` (curve/surface eval to order 3, knot insertion/removal, degree elevation, Bézier extraction, fitting, closest point), `kw-brep` topology store (slotmap arenas, coedge/radial ring, validation, Euler–Poincaré), primitive builders (box, cylinder, sphere, cone, torus), tessellator v1, `wgpu` viewer (PBR, edges, ID-buffer picking), STL/OBJ/glTF export, CI + benchmark harness.
 
 **Acceptance criteria**
@@ -27,6 +25,8 @@ Assumptions: a team of ~8–12 senior engineers (2 kernel, 1 solver/numerics, 1 
 - Exported glTF/STL/OBJ load without warnings in two independent third-party viewers.
 
 ## Phase 2 — Sketcher & constraint solver (months 4–8)
+**Status: implemented 2026-10-08** — results, deviations and caveats in [`phase2-report.md`](phase2-report.md); reproduce with `scripts/phase2_acceptance.sh`.
+
 **Build:** `kw-sketch` entities and full constraint library (including G0–G2), analytic sparse Jacobians, component + DM decomposition, clustered LM/dog-leg/BFGS solver on `faer`, DOF/redundancy/conflict analysis, drag solver, sketch UI (create/edit/dimension/trim/offset), DXF import/export.
 
 **Acceptance criteria**

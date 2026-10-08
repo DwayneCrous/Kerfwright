@@ -8,6 +8,8 @@ members = [
     "crates/kw-io",
     "crates/kw-viewer",
     "crates/kw-sketch",
+    "crates/kw-dxf",
+    "crates/kw-sketcher",
     "crates/kw-feature",
     "crates/kw-app",
 ]
@@ -35,6 +37,7 @@ kw-brep = { path = "crates/kw-brep" }
 kw-tess = { path = "crates/kw-tess" }
 kw-io = { path = "crates/kw-io" }
 kw-sketch = { path = "crates/kw-sketch" }
+kw-dxf = { path = "crates/kw-dxf" }
 kw-feature = { path = "crates/kw-feature" }
 
 [profile.release]

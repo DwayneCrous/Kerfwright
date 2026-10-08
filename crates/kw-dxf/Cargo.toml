@@ -1,0 +1,17 @@
+[package]
+name = "kw-dxf"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+kw-sketch.workspace = true
+kw-nurbs.workspace = true
+kw-math.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+dxf = "0.6"

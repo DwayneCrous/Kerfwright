@@ -7,7 +7,7 @@ new_key_type! {
 }
 
 /// Index into `VarStore::values`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VarId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +27,9 @@ pub enum EntityKind {
         center: EntityId,
         radius: VarId,
     },
-    /// Counter-clockwise arc from `start` to `end` about `center`.
+    /// Counter-clockwise arc from `start` to `end` about `center`. The radius
+    /// is implicit (`|start − center|`); `|end − center|` is kept equal by an
+    /// implicit consistency equation.
     Arc {
         center: EntityId,
         start: EntityId,
@@ -38,13 +40,12 @@ pub enum EntityKind {
         major_end: EntityId,
         minor_radius: VarId,
     },
-    /// Degree-`degree` B-spline; control points are point entities.
+    /// Clamped uniform non-rational B-spline of `degree`; control points are point entities.
     Spline {
         degree: usize,
         control: Vec<EntityId>,
-        weights: Vec<VarId>,
     },
-    /// Fit-point spline interpolating the listed points.
+    /// Fit-point spline interpolating the listed points (geometry only; not solved).
     FitSpline {
         points: Vec<EntityId>,
     },

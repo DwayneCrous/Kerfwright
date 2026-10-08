@@ -9,3 +9,16 @@ bench = false
 
 [dependencies]
 slotmap.workspace = true
+nalgebra.workspace = true
+rayon.workspace = true
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
+kw-math.workspace = true
+kw-nurbs.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "solver"
+harness = false

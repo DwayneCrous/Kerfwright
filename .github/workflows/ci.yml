@@ -34,6 +34,40 @@ jobs:
         env:
           PROPTEST_CASES: "1000000"
 
+  sketch-acceptance:
+    # Phase 2 acceptance: Jacobian oracles, classification, branch flips,
+    # determinism across thread counts, performance SLAs (release builds).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-sketch --test jacobians --release
+        env:
+          PROPTEST_CASES: "1000000"
+      - run: cargo test -p kw-sketch --release --test classification --test branch_flip --test determinism
+      - run: cargo test -p kw-sketch --release --test perf_sla -- --test-threads=1
+
+  dxf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-dxf --release
+        env:
+          PROPTEST_CASES: "20000"
+
+  sketcher-ui:
+    # egui front end driven by synthetic events (no display needed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libx11-dev
+      - run: cargo test -p kw-sketcher --release
+
   bench:
     runs-on: ubuntu-latest
     steps:
