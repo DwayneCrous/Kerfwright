@@ -2,7 +2,11 @@
 resolver = "2"
 members = [
     "crates/kw-math",
+    "crates/kw-nurbs",
     "crates/kw-brep",
+    "crates/kw-tess",
+    "crates/kw-io",
+    "crates/kw-viewer",
     "crates/kw-sketch",
     "crates/kw-feature",
     "crates/kw-app",
@@ -19,7 +23,22 @@ slotmap = "1"
 petgraph = "0.6"
 rayon = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+robust = "1"
+spade = "2"
+proptest = "1"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+approx = "0.5"
+bytemuck = { version = "1", features = ["derive"] }
 kw-math = { path = "crates/kw-math" }
+kw-nurbs = { path = "crates/kw-nurbs" }
 kw-brep = { path = "crates/kw-brep" }
+kw-tess = { path = "crates/kw-tess" }
+kw-io = { path = "crates/kw-io" }
 kw-sketch = { path = "crates/kw-sketch" }
 kw-feature = { path = "crates/kw-feature" }
+
+[profile.release]
+debug = 1
+
+[profile.bench]
+debug = 1

@@ -18,7 +18,10 @@ impl CancelToken {
     /// Supersede all in-flight work and return a token for the new request.
     pub fn next(&self) -> CancelToken {
         let generation = self.current.fetch_add(1, Ordering::SeqCst) + 1;
-        CancelToken { current: Arc::clone(&self.current), mine: generation }
+        CancelToken {
+            current: Arc::clone(&self.current),
+            mine: generation,
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {

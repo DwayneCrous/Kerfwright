@@ -15,11 +15,19 @@ pub enum Origin {
     Preserved(EntityRef),
     Modified(EntityRef),
     /// New entity generated from `from` in `role` (e.g. side face from a profile edge).
-    Generated { from: EntityRef, role: &'static str },
+    Generated {
+        from: EntityRef,
+        role: &'static str,
+    },
     /// k-th fragment of a split entity.
-    SplitFrom { parent: EntityRef, ordinal: u32 },
+    SplitFrom {
+        parent: EntityRef,
+        ordinal: u32,
+    },
     MergedFrom(Vec<EntityRef>),
-    New { role: &'static str },
+    New {
+        role: &'static str,
+    },
 }
 
 /// Every kernel operation returns one of these next to the new body so the

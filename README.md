@@ -3,7 +3,7 @@
 > *kerf* — the width of material a cutting tool removes; *-wright* — a maker (shipwright, wheelwright).
 > **Kerfwright**: a pure-Rust, clean-room CAD/CAM/CAE/ECAD suite.
 
-This repository currently holds the **research, specification, and architecture blueprint** plus a Cargo workspace of domain-model skeletons. There is no working application yet.
+This repository holds the **research, specification and architecture blueprint** plus a Cargo workspace. **Phase 1 (math foundation, kernel skeleton, tessellator, exporters, wgpu viewer) is implemented** — see [`docs/phase1-report.md`](docs/phase1-report.md) for results against the acceptance criteria and a list of known gaps. Phases 2–6 are not started.
 
 ## Read in this order
 | # | File | What it is |
@@ -22,14 +22,30 @@ This repository currently holds the **research, specification, and architecture 
 ## Workspace layout
 ```
 crates/
-  kw-math      tolerance, NURBS data types, knot-vector basis functions
-  kw-brep      slotmap-keyed B-rep topology (coedge + radial ring), geometry enums, shape history
-  kw-sketch    sketch entities, constraints, DOF report, solver traits
-  kw-feature   feature DAG, persistent topological names, references, evaluator traits
-  kw-app       Rayon ⇄ Tokio bridge, command/event types, cancellation
+  kw-math      tolerance, frames, transforms, AABB, robust predicates
+  kw-nurbs     knot vectors, NURBS curves/surfaces (derivatives, insertion/removal,
+               elevation, Bézier extraction, fitting, closest point), analytic geometry
+  kw-brep      slotmap B-rep (coedge + radial ring), validation, primitive builders, shape history
+  kw-tess      crack-free edge-first tessellator
+  kw-io        STL / OBJ+MTL / glTF / GLB writers
+  kw-viewer    wgpu viewer (PBR, edges, ID-buffer picking); windowed + headless
+  kw-sketch    sketch entities, constraints, DOF report, solver traits   (Phase 2 skeleton)
+  kw-feature   feature DAG, persistent topological names, evaluator trait (Phase 4 skeleton)
+  kw-app       Rayon ⇄ Tokio bridge, command/event types                (skeleton)
+```
+
+## Try it
+```bash
+# needs Rust (rustup) and a Vulkan/Metal/DX12 GPU
+cargo run --release -p kw-viewer                       # window: drag = orbit, right-drag = pan, wheel = zoom, E = edges, F = frame
+cargo run --release -p kw-viewer -- --scene million    # 1M-triangle scene
+cargo run --release -p kw-viewer -- --headless --scene primitives --pick-test
+cargo run -p kw-io --example export_primitives -- out/ # STL / OBJ / glTF / GLB of every primitive
+scripts/phase1_acceptance.sh                           # every automated Phase 1 check
 ```
 
 ## Status / caveats
-* The Rust crates are **type and trait definitions with a few small algorithms**. They were written without a Rust toolchain on the authoring machine, so **they have not been compiled yet** — run `cargo check --workspace` first and fix whatever the compiler finds.
+* Phase 1 is complete against its automated criteria; the exceptions (published Piegl–Tiller examples beyond Ex. 2.3, opening exports in third-party viewers, "reference GPU" undefined) are listed in the Phase 1 report.
+* `kw-sketch`, `kw-feature` and `kw-app` are still type/trait skeletons from the blueprint stage.
 * Statements about proprietary kernels (ASM, Parasolid, ACIS) are labelled **[Public]** or **[Inferred]** in the research docs; nothing here is derived from Autodesk code or binaries.
-* Performance numbers in the PRD are targets, not measurements.
+* Performance numbers in the PRD are targets; measured Phase 1 numbers are in the report.

@@ -1,0 +1,20 @@
+[package]
+name = "kw-io"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+nalgebra.workspace = true
+serde_json = "1"
+kw-math.workspace = true
+kw-tess.workspace = true
+
+[dev-dependencies]
+kw-brep.workspace = true
+stl_io = "0.11"
+tobj = "4"
+gltf = "1"

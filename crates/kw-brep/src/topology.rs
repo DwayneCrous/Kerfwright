@@ -37,6 +37,14 @@ pub struct Edge {
     pub first_coedge: Option<CoedgeId>,
 }
 
+impl Edge {
+    /// Degenerate edges (sphere poles, cone apex) collapse to a point and have
+    /// no 3D curve; they do not count towards Euler–Poincaré.
+    pub fn is_degenerate(&self) -> bool {
+        self.curve.is_none()
+    }
+}
+
 /// Oriented use of an edge within a face loop. Plays the role of the
 /// half-edge (ACIS "coedge", Parasolid "fin").
 #[derive(Debug, Clone)]

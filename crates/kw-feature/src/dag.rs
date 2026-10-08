@@ -8,7 +8,10 @@ pub type NodeId = NodeIndex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
-    Parameter { name: String, expression: String },
+    Parameter {
+        name: String,
+        expression: String,
+    },
     Sketch,
     Extrude,
     Revolve,
@@ -76,8 +79,14 @@ impl FeatureDag {
     }
 
     /// Declare that `dependent` reads the output of `dependency`.
-    pub fn add_dependency(&mut self, dependency: NodeId, dependent: NodeId) -> Result<(), DagError> {
-        if self.graph.node_weight(dependency).is_none() || self.graph.node_weight(dependent).is_none() {
+    pub fn add_dependency(
+        &mut self,
+        dependency: NodeId,
+        dependent: NodeId,
+    ) -> Result<(), DagError> {
+        if self.graph.node_weight(dependency).is_none()
+            || self.graph.node_weight(dependent).is_none()
+        {
             return Err(DagError::UnknownNode);
         }
         let edge = self.graph.add_edge(dependency, dependent, ());
@@ -89,7 +98,9 @@ impl FeatureDag {
     }
 
     pub fn dependencies(&self, id: NodeId) -> Vec<NodeId> {
-        self.graph.neighbors_directed(id, Direction::Incoming).collect()
+        self.graph
+            .neighbors_directed(id, Direction::Incoming)
+            .collect()
     }
 
     /// Evaluation order: dependencies before dependents.

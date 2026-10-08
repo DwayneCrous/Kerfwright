@@ -7,6 +7,4 @@ pub mod naming;
 
 pub use dag::{DagError, DagNode, EvalState, FeatureDag, NodeId, NodeKind};
 pub use eval::{EvalError, EvalOutput, FeatureEvaluator, InputHash};
-pub use naming::{
-    GeomFingerprint, NameMap, NameOrigin, Reference, ResolveOutcome, TopoName,
-};
+pub use naming::{GeomFingerprint, NameMap, NameOrigin, Reference, ResolveOutcome, TopoName};

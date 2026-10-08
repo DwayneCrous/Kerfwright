@@ -4,5 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+bench = false
+
 [dependencies]
 nalgebra.workspace = true
+robust.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+approx.workspace = true

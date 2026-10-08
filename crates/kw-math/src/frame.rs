@@ -23,7 +23,11 @@ impl Frame3 {
     /// Frame at `origin` with normal `z` (normalised); `x` is any perpendicular.
     pub fn from_origin_normal(origin: Point3<f64>, normal: Vector3<f64>) -> Self {
         let z = normal.normalize();
-        let helper = if z.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
+        let helper = if z.x.abs() < 0.9 {
+            Vector3::x()
+        } else {
+            Vector3::y()
+        };
         let x = helper.cross(&z).normalize();
         let y = z.cross(&x);
         Self { origin, x, y, z }

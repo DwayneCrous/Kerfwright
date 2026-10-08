@@ -19,15 +19,35 @@ pub struct PointVars {
 #[derive(Debug, Clone)]
 pub enum EntityKind {
     Point(PointVars),
-    Line { p1: EntityId, p2: EntityId },
-    Circle { center: EntityId, radius: VarId },
+    Line {
+        p1: EntityId,
+        p2: EntityId,
+    },
+    Circle {
+        center: EntityId,
+        radius: VarId,
+    },
     /// Counter-clockwise arc from `start` to `end` about `center`.
-    Arc { center: EntityId, start: EntityId, end: EntityId },
-    Ellipse { center: EntityId, major_end: EntityId, minor_radius: VarId },
+    Arc {
+        center: EntityId,
+        start: EntityId,
+        end: EntityId,
+    },
+    Ellipse {
+        center: EntityId,
+        major_end: EntityId,
+        minor_radius: VarId,
+    },
     /// Degree-`degree` B-spline; control points are point entities.
-    Spline { degree: usize, control: Vec<EntityId>, weights: Vec<VarId> },
+    Spline {
+        degree: usize,
+        control: Vec<EntityId>,
+        weights: Vec<VarId>,
+    },
     /// Fit-point spline interpolating the listed points.
-    FitSpline { points: Vec<EntityId> },
+    FitSpline {
+        points: Vec<EntityId>,
+    },
 }
 
 #[derive(Debug, Clone)]

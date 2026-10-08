@@ -13,8 +13,16 @@ pub enum Priority {
 /// UI/collab → engine.
 #[derive(Debug, Clone)]
 pub enum Command {
-    EditParameter { node: NodeId, name: String, expression: String },
-    DragSketchVar { sketch: NodeId, var: usize, target: f64 },
+    EditParameter {
+        node: NodeId,
+        name: String,
+        expression: String,
+    },
+    DragSketchVar {
+        sketch: NodeId,
+        var: usize,
+        target: f64,
+    },
     RollbackTo(NodeId),
     Undo,
     Redo,

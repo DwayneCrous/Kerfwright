@@ -8,9 +8,15 @@ use std::collections::HashMap;
 pub enum NameOrigin {
     /// Created from a persistent sketch entity (e.g. side face of an extrude
     /// from a profile segment).
-    SketchEdge { entity: SketchEntityId, role: &'static str },
+    SketchEdge {
+        entity: SketchEntityId,
+        role: &'static str,
+    },
     /// Generated from another named entity (fillet face from its edge, ...).
-    Generated { from: Box<TopoName>, role: &'static str },
+    Generated {
+        from: Box<TopoName>,
+        role: &'static str,
+    },
     /// k-th fragment of a split entity, ordered canonically.
     Split { parent: Box<TopoName>, ordinal: u32 },
     /// Merge of several entities; children sorted by their stable hash.
@@ -60,8 +66,13 @@ pub enum ResolveOutcome {
     /// Entity was split; caller decides if one-to-many is acceptable.
     Split(Vec<EntityRef>),
     /// Matched geometrically with sufficient score and margin.
-    Matched { entity: EntityRef, score: f64 },
+    Matched {
+        entity: EntityRef,
+        score: f64,
+    },
     /// More than one plausible candidate: surface a repair prompt, never guess.
-    Ambiguous { candidates: Vec<(EntityRef, f64)> },
+    Ambiguous {
+        candidates: Vec<(EntityRef, f64)>,
+    },
     Broken,
 }

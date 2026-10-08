@@ -14,6 +14,8 @@ Assumptions: a team of ~8–12 senior engineers (2 kernel, 1 solver/numerics, 1 
 ---
 
 ## Phase 1 — Core math foundation (months 0–4)
+**Status: implemented — see [phase1-report.md](phase1-report.md) for results per criterion and known gaps.**
+
 **Build:** `kw-math` (tolerance, predicates, transforms), `kw-nurbs` (curve/surface eval to order 3, knot insertion/removal, degree elevation, Bézier extraction, fitting, closest point), `kw-brep` topology store (slotmap arenas, coedge/radial ring, validation, Euler–Poincaré), primitive builders (box, cylinder, sphere, cone, torus), tessellator v1, `wgpu` viewer (PBR, edges, ID-buffer picking), STL/OBJ/glTF export, CI + benchmark harness.
 
 **Acceptance criteria**

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  properties:
+    # Phase 1 acceptance: >= 10^6 proptest cases per property
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-nurbs --test properties --release
+        env:
+          PROPTEST_CASES: "1000000"
+      - run: cargo test -p kw-brep --test fuzz --release
+        env:
+          PROPTEST_CASES: "1000000"
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --workspace -- --quick
+
+  viewer-headless:
+    # Software Vulkan (lavapipe): verifies the ID-buffer pick test; the
+    # frame-rate SLA must be measured on real hardware.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libwayland-dev libxkbcommon-dev libx11-dev
+      - run: cargo run --release -p kw-viewer -- --headless --scene primitives --pick-test --width 1280 --height 720

@@ -1,6 +1,6 @@
 # Kerfwright — Rust Technical Architecture
 
-Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions referenced here are real code in `crates/` (not yet compiled — see README); this document shows the key ones in condensed form plus the diagrams.
+Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions referenced here are real code in `crates/` (compiled and tested; `kw-math`, `kw-nurbs`, `kw-brep`, `kw-tess`, `kw-io`, `kw-viewer` are implemented in Phase 1, `kw-sketch`/`kw-feature`/`kw-app` are still skeletons); this document shows the key ones in condensed form plus the diagrams.
 
 ## 1. Crate map and dependency direction
 ```
@@ -17,10 +17,12 @@ Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions refe
               └────┬─────┘   └─────┬─────┘
                    │               │
                    │         ┌─────▼─────┐
-                   └────────►│  kw-math  │  Tolerance, KnotVector, NURBS, analytic geometry
+                   └────────►│ kw-nurbs  │  KnotVector, NURBS, analytic geometry (Phase 1)
+                             │ ▲ kw-math │  Tolerance, Frame3, Transform3, predicates
                              └───────────┘
- planned: kw-nurbs kw-ssi kw-boolean kw-blend kw-step kw-iges kw-subd kw-sheet
-          kw-cam kw-voronoi kw-mesh3d kw-fem kw-ecad kw-render kw-collab kw-ui
+ implemented in Phase 1: kw-nurbs (between kw-math and kw-brep), kw-tess, kw-io, kw-viewer
+ planned: kw-ssi kw-boolean kw-blend kw-step kw-iges kw-subd kw-sheet
+          kw-cam kw-voronoi kw-mesh3d kw-fem kw-ecad kw-collab kw-ui
 ```
 Rule: arrows only point downward; `kw-math` has no kernel knowledge; UI and renderer depend on read-only snapshots, never on mutable kernel state.
 

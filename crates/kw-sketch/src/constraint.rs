@@ -47,20 +47,55 @@ pub enum CurveEnd {
 
 #[derive(Debug, Clone)]
 pub enum ConstraintKind {
-    Coincident { a: EntityId, b: EntityId },
-    PointOnCurve { point: EntityId, curve: EntityId },
+    Coincident {
+        a: EntityId,
+        b: EntityId,
+    },
+    PointOnCurve {
+        point: EntityId,
+        curve: EntityId,
+    },
     Horizontal(EntityId),
     Vertical(EntityId),
-    Parallel { a: EntityId, b: EntityId },
-    Perpendicular { a: EntityId, b: EntityId },
-    Collinear { a: EntityId, b: EntityId },
-    Concentric { a: EntityId, b: EntityId },
-    EqualLength { a: EntityId, b: EntityId },
-    EqualRadius { a: EntityId, b: EntityId },
-    Midpoint { point: EntityId, line: EntityId },
-    Symmetric { a: EntityId, b: EntityId, axis: EntityId },
+    Parallel {
+        a: EntityId,
+        b: EntityId,
+    },
+    Perpendicular {
+        a: EntityId,
+        b: EntityId,
+    },
+    Collinear {
+        a: EntityId,
+        b: EntityId,
+    },
+    Concentric {
+        a: EntityId,
+        b: EntityId,
+    },
+    EqualLength {
+        a: EntityId,
+        b: EntityId,
+    },
+    EqualRadius {
+        a: EntityId,
+        b: EntityId,
+    },
+    Midpoint {
+        point: EntityId,
+        line: EntityId,
+    },
+    Symmetric {
+        a: EntityId,
+        b: EntityId,
+        axis: EntityId,
+    },
     Fix(EntityId),
-    Tangent { a: EntityId, b: EntityId, branch: TangentBranch },
+    Tangent {
+        a: EntityId,
+        b: EntityId,
+        branch: TangentBranch,
+    },
     /// Continuity joint between two curves at the given ends.
     Joint {
         a: EntityId,
@@ -72,10 +107,26 @@ pub enum ConstraintKind {
         branch: TangentBranch,
     },
     // Dimensional: `value` is a driving variable so expressions can bind to it.
-    Distance { a: EntityId, b: EntityId, value: VarId, branch: TangentBranch },
-    Angle { a: EntityId, b: EntityId, value: VarId, branch: TangentBranch },
-    Radius { circle: EntityId, value: VarId },
-    Diameter { circle: EntityId, value: VarId },
+    Distance {
+        a: EntityId,
+        b: EntityId,
+        value: VarId,
+        branch: TangentBranch,
+    },
+    Angle {
+        a: EntityId,
+        b: EntityId,
+        value: VarId,
+        branch: TangentBranch,
+    },
+    Radius {
+        circle: EntityId,
+        value: VarId,
+    },
+    Diameter {
+        circle: EntityId,
+        value: VarId,
+    },
 }
 
 #[derive(Debug, Clone)]

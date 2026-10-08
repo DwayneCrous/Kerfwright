@@ -12,7 +12,10 @@ pub struct Tolerance {
 
 impl Default for Tolerance {
     fn default() -> Self {
-        Self { linear: 1e-6, angular: 1e-10 }
+        Self {
+            linear: 1e-6,
+            angular: 1e-10,
+        }
     }
 }
 

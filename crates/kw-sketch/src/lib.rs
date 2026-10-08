@@ -7,9 +7,13 @@ pub mod entity;
 pub mod solver;
 
 pub use analysis::{DofReport, SketchStatus};
-pub use constraint::{Constraint, ConstraintId, ConstraintKind, Continuity, CurveEnd, TangentBranch};
+pub use constraint::{
+    Constraint, ConstraintId, ConstraintKind, Continuity, CurveEnd, TangentBranch,
+};
 pub use entity::{Entity, EntityId, EntityKind, PointVars, VarId};
-pub use solver::{ConstraintSolver, Residual, SolveOptions, SolveOutcome, SolveStatus, SparseEntry};
+pub use solver::{
+    ConstraintSolver, Residual, SolveOptions, SolveOutcome, SolveStatus, SparseEntry,
+};
 
 use slotmap::SlotMap;
 
