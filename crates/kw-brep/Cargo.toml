@@ -1,0 +1,10 @@
+[package]
+name = "kw-brep"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nalgebra.workspace = true
+slotmap.workspace = true
+kw-math.workspace = true

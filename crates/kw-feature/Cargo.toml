@@ -1,0 +1,11 @@
+[package]
+name = "kw-feature"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+petgraph.workspace = true
+slotmap.workspace = true
+kw-brep.workspace = true
+kw-sketch.workspace = true

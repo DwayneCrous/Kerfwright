@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kw-math",
+    "crates/kw-brep",
+    "crates/kw-sketch",
+    "crates/kw-feature",
+    "crates/kw-app",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+nalgebra = "0.33"
+slotmap = "1"
+petgraph = "0.6"
+rayon = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+kw-math = { path = "crates/kw-math" }
+kw-brep = { path = "crates/kw-brep" }
+kw-sketch = { path = "crates/kw-sketch" }
+kw-feature = { path = "crates/kw-feature" }

@@ -1,0 +1,10 @@
+[package]
+name = "kw-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rayon.workspace = true
+tokio.workspace = true
+kw-feature.workspace = true
