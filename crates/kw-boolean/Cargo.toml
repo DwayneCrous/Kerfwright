@@ -1,0 +1,23 @@
+[package]
+name = "kw-boolean"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "B-rep Boolean operations: imprint, classify, select, stitch, verify"
+
+[lib]
+bench = false
+
+[dependencies]
+nalgebra.workspace = true
+rayon.workspace = true
+kw-math.workspace = true
+kw-nurbs.workspace = true
+kw-brep.workspace = true
+kw-ssi.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+kw-tess.workspace = true
+kw-model.workspace = true

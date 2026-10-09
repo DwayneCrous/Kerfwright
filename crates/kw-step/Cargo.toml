@@ -1,0 +1,23 @@
+[package]
+name = "kw-step"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "ISO 10303-21 (STEP) reader/writer for B-rep solids: AP203 / AP214 / AP242 geometry subset"
+
+[lib]
+bench = false
+
+[dependencies]
+nalgebra.workspace = true
+kw-math.workspace = true
+kw-nurbs.workspace = true
+kw-brep.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+kw-model.workspace = true
+kw-blend.workspace = true
+kw-boolean.workspace = true
+kw-tess.workspace = true
+criterion.workspace = true

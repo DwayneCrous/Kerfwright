@@ -86,3 +86,73 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libwayland-dev libxkbcommon-dev libx11-dev
       - run: cargo run --release -p kw-viewer -- --headless --scene primitives --pick-test --width 1280 --height 720
+
+  ssi:
+    # Phase 3 acceptance (3): labelled branch suite + 10,000 analytic / spline pairs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-ssi --release -- --nocapture
+        env:
+          SSI_PAIRS: "10000"
+
+  boolean-fuzz:
+    # Phase 3 acceptance (1) and (2): 100,000 random pairs, inclusion-exclusion volumes
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-boolean --release --test primitives --test basic
+      - run: cargo test -p kw-boolean --release --test fuzz -- --nocapture
+        env:
+          KW_BOOL_FUZZ_PAIRS: "100000"
+      - run: cargo test -p kw-model --release --test fuzz_models -- --nocapture
+        env:
+          KW_MODEL_FUZZ_PAIRS: "2000"
+
+  fillet-bench:
+    # Phase 3 acceptance (4): 500-part fillet / chamfer benchmark; histories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-blend --release --test benchmark -- --nocapture
+        env:
+          KW_BLEND_PARTS: "500"
+      - run: cargo test -p kw-blend --release --test basic --test history
+
+  step-iges:
+    # Phase 3 acceptance (5): STEP / IGES readers and writers (the external-tool and public-corpus
+    # checks need the dev-only oracle environment, see docs/phase3-report.md)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-step --release --test roundtrip
+        env:
+          PROPTEST_CASES: "2000"
+      - run: cargo test -p kw-iges --release --test import
+        env:
+          PROPTEST_CASES: "2000"
+      - run: cargo test -p kw-step --release --test perf -- --nocapture
+
+  kernel-perf:
+    # Phase 3 acceptance (6): reported, not asserted (hardware dependent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kw-boolean --release --test perf -- --nocapture --test-threads=1
+        env:
+          KW_PERF_SIZES: "1600,3200"
+      - run: cargo test -p kw-blend --release --test perf -- --nocapture --test-threads=1
+        env:
+          KW_BLEND_PERF_N: "2000"
+          KW_BLEND_PERF_EDGES: "50"

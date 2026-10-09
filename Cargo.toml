@@ -7,6 +7,12 @@ members = [
     "crates/kw-tess",
     "crates/kw-io",
     "crates/kw-viewer",
+    "crates/kw-ssi",
+    "crates/kw-boolean",
+    "crates/kw-model",
+    "crates/kw-blend",
+    "crates/kw-step",
+    "crates/kw-iges",
     "crates/kw-sketch",
     "crates/kw-dxf",
     "crates/kw-sketcher",
@@ -38,6 +44,12 @@ kw-tess = { path = "crates/kw-tess" }
 kw-io = { path = "crates/kw-io" }
 kw-sketch = { path = "crates/kw-sketch" }
 kw-dxf = { path = "crates/kw-dxf" }
+kw-ssi = { path = "crates/kw-ssi" }
+kw-boolean = { path = "crates/kw-boolean" }
+kw-model = { path = "crates/kw-model" }
+kw-blend = { path = "crates/kw-blend" }
+kw-step = { path = "crates/kw-step" }
+kw-iges = { path = "crates/kw-iges" }
 kw-feature = { path = "crates/kw-feature" }
 
 [profile.release]

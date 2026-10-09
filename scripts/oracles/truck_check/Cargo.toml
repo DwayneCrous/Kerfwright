@@ -1,0 +1,14 @@
+[package]
+name = "truck_check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Dev-only oracle: parses Kerfwright STEP exports with the independent `truck` kernel's STEP reader.
+# Deliberately NOT a member of the Kerfwright workspace and never linked into shipping crates.
+[workspace]
+
+[dependencies]
+truck-stepio = "0.3"
+truck-modeling = "0.6"
+truck-topology = "0.6"

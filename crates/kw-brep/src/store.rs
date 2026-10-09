@@ -253,3 +253,64 @@ impl BRep {
         out
     }
 }
+
+impl BRep {
+    /// Remove edges that no loop uses, then vertices that no remaining edge references, and curves
+    /// that nothing references. Returns the number of edges removed.
+    pub fn prune_orphans(&mut self) -> usize {
+        let orphan_edges: Vec<EdgeId> = self
+            .edges
+            .iter()
+            .filter(|(_, e)| e.first_coedge.is_none())
+            .map(|(id, _)| id)
+            .collect();
+        for e in &orphan_edges {
+            self.edges.remove(*e);
+        }
+        let mut used_v = std::collections::HashSet::new();
+        let mut used_c = std::collections::HashSet::new();
+        for e in self.edges.values() {
+            used_v.insert(e.start);
+            used_v.insert(e.end);
+            if let Some(c) = e.curve {
+                used_c.insert(c);
+            }
+        }
+        for c in self.coedges.values() {
+            if let Some(p) = c.pcurve {
+                used_c.insert(p);
+            }
+        }
+        let dead_v: Vec<VertexId> = self
+            .vertices
+            .keys()
+            .filter(|v| !used_v.contains(v))
+            .collect();
+        for v in dead_v {
+            self.vertices.remove(v);
+        }
+        let dead_c: Vec<CurveId> = self.curves.keys().filter(|c| !used_c.contains(c)).collect();
+        for c in dead_c {
+            self.curves.remove(c);
+        }
+        orphan_edges.len()
+    }
+}
+
+impl BRep {
+    /// Move the lumps of `others` into `target` (which then represents their disjoint union) and
+    /// delete the emptied bodies. The caller guarantees the bodies do not overlap.
+    pub fn merge_bodies(&mut self, target: BodyId, others: &[BodyId]) {
+        for &o in others {
+            if o == target {
+                continue;
+            }
+            let lumps = std::mem::take(&mut self.bodies[o].lumps);
+            for l in lumps {
+                self.lumps[l].body = target;
+                self.bodies[target].lumps.push(l);
+            }
+            self.bodies.remove(o);
+        }
+    }
+}

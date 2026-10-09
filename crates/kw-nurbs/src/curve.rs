@@ -406,7 +406,9 @@ impl NurbsCurve {
             .map(|(k, _)| k)
             .filter(|k| *k >= a && *k <= b)
             .collect();
-        let per_span = 4 * (p + 1);
+        // dense Hermite-like curves have hundreds of spans: fewer samples per span suffice there
+        let nspans = spans.len().saturating_sub(1);
+        let per_span = if nspans > 48 { 2 } else { 4 * (p + 1) };
         let mut samples: Vec<(f64, f64)> = Vec::new();
         for w in spans.windows(2) {
             for s in 0..per_span {
@@ -432,7 +434,7 @@ impl NurbsCurve {
                 seeds.push(samples[i]);
             }
         }
-        seeds.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
+        seeds.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
         seeds.truncate(6);
         let mut best = CurveProjection {
             u: a,

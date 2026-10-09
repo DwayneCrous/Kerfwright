@@ -1,0 +1,22 @@
+[package]
+name = "kw-model"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Feature-level solid modelling: extrude, revolve, sweep, loft, shell, offset, draft"
+
+[lib]
+bench = false
+
+[dependencies]
+nalgebra.workspace = true
+kw-math.workspace = true
+kw-nurbs.workspace = true
+kw-brep.workspace = true
+kw-boolean.workspace = true
+kw-ssi.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+kw-tess.workspace = true
+rayon.workspace = true

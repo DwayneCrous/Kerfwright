@@ -10,19 +10,16 @@ pub enum NameOrigin {
     /// from a profile segment).
     SketchEdge {
         entity: SketchEntityId,
-        role: &'static str,
+        role: String,
     },
     /// Generated from another named entity (fillet face from its edge, ...).
-    Generated {
-        from: Box<TopoName>,
-        role: &'static str,
-    },
+    Generated { from: Box<TopoName>, role: String },
     /// k-th fragment of a split entity, ordered canonically.
     Split { parent: Box<TopoName>, ordinal: u32 },
     /// Merge of several entities; children sorted by their stable hash.
     Merge(Vec<TopoName>),
     /// Kernel primitive output with a fixed role ("top-cap", "bottom-cap", ...).
-    Primitive { role: &'static str },
+    Primitive { role: String },
 }
 
 /// Persistent identity of a B-rep entity. This — not `FaceId`/`EdgeId` — is

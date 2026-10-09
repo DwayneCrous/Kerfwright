@@ -3,7 +3,7 @@
 > *kerf* — the width of material a cutting tool removes; *-wright* — a maker (shipwright, wheelwright).
 > **Kerfwright**: a pure-Rust, clean-room CAD/CAM/CAE/ECAD suite.
 
-This repository holds the **research, specification and architecture blueprint** plus a Cargo workspace. **Phase 1 (math foundation, kernel skeleton, tessellator, exporters, wgpu viewer) is implemented** — see [`docs/phase1-report.md`](docs/phase1-report.md) for results against the acceptance criteria and a list of known gaps. **Phase 2 (sketcher & constraint solver, DXF, egui sketcher app) is implemented** — see [`docs/phase2-report.md`](docs/phase2-report.md). Phases 3–6 are not started.
+This repository holds the **research, specification and architecture blueprint** plus a Cargo workspace. **Phase 1 (math foundation, kernel skeleton, tessellator, exporters, wgpu viewer) is implemented** — see [`docs/phase1-report.md`](docs/phase1-report.md) for results against the acceptance criteria and a list of known gaps. **Phase 2 (sketcher & constraint solver, DXF, egui sketcher app) is implemented** — see [`docs/phase2-report.md`](docs/phase2-report.md). **Phase 3 (B-rep modelling kernel: SSI, Booleans, extrude/revolve/sweep/loft, fillet/chamfer, shell/offset/draft, mass properties, STEP, IGES) is implemented** — see [`docs/phase3-report.md`](docs/phase3-report.md) for the measured results, the criteria that are only partly met, and the oracle set-up. Phases 4–6 are not started.
 
 ## Read in this order
 | # | File | What it is |
@@ -34,7 +34,13 @@ crates/
                trim/extend/offset, toolkit-independent Editor
   kw-dxf       ASCII DXF (R2000) reader/writer + sketch adapters
   kw-sketcher  egui sketcher application (binary)
-  kw-feature   feature DAG, persistent topological names, evaluator trait (Phase 4 skeleton)
+  kw-ssi       surface–surface intersection (exact quadric cases + certified level-set tracing, signed-distance field for free-form surfaces, pcurves on both surfaces)
+  kw-boolean   union / intersect / subtract (imprint, arrangement, classification, stitching, ShapeHistory)
+  kw-model     profiles → extrude / revolve / sweep / loft (open and closed); shell, offset, draft; rebuild engine
+  kw-blend     constant- and variable-radius (any law) fillets, vertex blends, chamfers (swept-tool Booleans)
+  kw-step      ISO 10303-21 parser, AP203/214/242 B-rep import and export (`step_tool` example for oracle checks)
+  kw-iges      IGES 5.3 import (trimmed surfaces → sewn solids)
+  kw-feature   feature DAG, persistent topological names, evaluator trait, Phase 3 kernel evaluator
   kw-app       Rayon ⇄ Tokio bridge, command/event types                (skeleton)
 ```
 
@@ -48,11 +54,13 @@ cargo run -p kw-io --example export_primitives -- out/ # STL / OBJ / glTF / GLB 
 scripts/phase1_acceptance.sh                           # every automated Phase 1 check
 cargo run --release -p kw-sketcher -- --demo           # 2D sketcher (L line, R rectangle, C circle, D dimension, Ctrl+Z undo)
 scripts/phase2_acceptance.sh                           # every automated Phase 2 check
+scripts/phase3_acceptance.sh                           # every automated Phase 3 check (100,000-pair Boolean fuzz: ~25 min)
 ```
 
 ## Status / caveats
+* Phase 3: Boolean fuzz (99.80 % on valid-expected cases, 0 invalid outputs), free-form-body fuzz (99.83 %), SSI (including spline/spline), fillet benchmark, vertex blends, variable-radius fillets, STEP/IGES and public-corpus criteria are met or measured as described in the Phase 3 report, and the Boolean (500 ms) and fillet (300 ms) performance SLAs are met at the stated sizes. Not done: vertex blends beyond three equal-radius planar faces (other corners meet in a mitre), variable radius on curved edges that are not circular rims, setback, and "≥ 3 external CAD tools" is satisfied by OpenCASCADE, Gmsh (OpenCASCADE-based) and the independent truck reader — see the report for exactly what each tool verified.
 * Phase 2 meets all six automated criteria; the drag-latency SLA is asserted on decomposable sketches and is exceeded on row-coupled ones (8.6 ms p99 at 500 entities), G3/mirror/pattern are not done, and the sketcher window has been smoke-tested but not visually reviewed — details in the Phase 2 report.
 * Phase 1 is complete against its automated criteria; the exceptions (published Piegl–Tiller examples beyond Ex. 2.3, opening exports in third-party viewers, "reference GPU" undefined) are listed in the Phase 1 report.
-* `kw-feature` and `kw-app` are still type/trait skeletons from the blueprint stage.
+* `kw-app` is still a skeleton and `kw-feature` has only the thin Phase 3 kernel adapter (the parametric engine is Phase 4).
 * Statements about proprietary kernels (ASM, Parasolid, ACIS) are labelled **[Public]** or **[Inferred]** in the research docs; nothing here is derived from Autodesk code or binaries.
 * Performance numbers in the PRD are targets; measured Phase 1 numbers are in the report.

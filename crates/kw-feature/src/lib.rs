@@ -3,8 +3,10 @@
 
 pub mod dag;
 pub mod eval;
+pub mod kernel;
 pub mod naming;
 
 pub use dag::{DagError, DagNode, EvalState, FeatureDag, NodeId, NodeKind};
 pub use eval::{EvalError, EvalOutput, FeatureEvaluator, InputHash};
+pub use kernel::{sketch_profile, EdgeSel, FeatureOp, KernelEvaluator};
 pub use naming::{GeomFingerprint, NameMap, NameOrigin, Reference, ResolveOutcome, TopoName};

@@ -12,3 +12,11 @@ petgraph.workspace = true
 slotmap.workspace = true
 kw-brep.workspace = true
 kw-sketch.workspace = true
+kw-math.workspace = true
+kw-nurbs.workspace = true
+kw-boolean.workspace = true
+kw-model.workspace = true
+kw-blend.workspace = true
+
+[dev-dependencies]
+kw-tess.workspace = true

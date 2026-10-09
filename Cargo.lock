@@ -1893,6 +1893,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "kw-blend"
+version = "0.0.1"
+dependencies = [
+ "kw-boolean",
+ "kw-brep",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
+ "kw-tess",
+ "nalgebra",
+ "rayon",
+]
+
+[[package]]
+name = "kw-boolean"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "kw-brep",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
+ "kw-ssi",
+ "kw-tess",
+ "nalgebra",
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "kw-brep"
 version = "0.0.1"
 dependencies = [
@@ -1920,10 +1950,28 @@ dependencies = [
 name = "kw-feature"
 version = "0.0.1"
 dependencies = [
+ "kw-blend",
+ "kw-boolean",
  "kw-brep",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
  "kw-sketch",
+ "kw-tess",
  "petgraph",
  "slotmap",
+]
+
+[[package]]
+name = "kw-iges"
+version = "0.0.1"
+dependencies = [
+ "kw-brep",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
+ "nalgebra",
+ "proptest",
 ]
 
 [[package]]
@@ -1948,6 +1996,21 @@ dependencies = [
  "nalgebra",
  "proptest",
  "robust",
+]
+
+[[package]]
+name = "kw-model"
+version = "0.0.1"
+dependencies = [
+ "kw-boolean",
+ "kw-brep",
+ "kw-math",
+ "kw-nurbs",
+ "kw-ssi",
+ "kw-tess",
+ "nalgebra",
+ "proptest",
+ "rayon",
 ]
 
 [[package]]
@@ -1982,6 +2045,32 @@ dependencies = [
  "eframe",
  "kw-dxf",
  "kw-sketch",
+]
+
+[[package]]
+name = "kw-ssi"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "kw-math",
+ "kw-nurbs",
+ "nalgebra",
+]
+
+[[package]]
+name = "kw-step"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "kw-blend",
+ "kw-boolean",
+ "kw-brep",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
+ "kw-tess",
+ "nalgebra",
+ "proptest",
 ]
 
 [[package]]

@@ -338,6 +338,12 @@ impl Surface for SurfaceGeom {
             | SurfaceGeom::Cone(_)
             | SurfaceGeom::Sphere(_)
             | SurfaceGeom::Torus(_) => Some(TAU),
+            // a surface of revolution whose profile is a full circle / ellipse is periodic in u too
+            SurfaceGeom::Revolution { profile, .. }
+                if matches!(**profile, CurveGeom::Circle(_) | CurveGeom::Ellipse(_)) =>
+            {
+                Some(TAU)
+            }
             _ => None,
         }
     }

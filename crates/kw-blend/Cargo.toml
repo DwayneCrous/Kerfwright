@@ -1,0 +1,21 @@
+[package]
+name = "kw-blend"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Edge blends: constant-radius fillets and chamfers"
+
+[lib]
+bench = false
+
+[dependencies]
+nalgebra.workspace = true
+kw-math.workspace = true
+kw-nurbs.workspace = true
+kw-brep.workspace = true
+kw-boolean.workspace = true
+kw-model.workspace = true
+
+[dev-dependencies]
+kw-tess.workspace = true
+rayon.workspace = true

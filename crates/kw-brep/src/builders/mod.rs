@@ -13,8 +13,10 @@
 //! | sphere | 2 | 1 | 1 | 0 | 1 | 0 |
 //! | torus | 1 | 2 | 1 | 0 | 1 | 1 |
 
+mod auto;
 mod primitives;
 
+pub use auto::{add_face_auto, LoopSpec};
 pub use primitives::{make_box, make_cone, make_cylinder, make_sphere, make_torus};
 
 use crate::history::ShapeHistory;

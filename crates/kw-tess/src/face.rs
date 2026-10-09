@@ -43,10 +43,11 @@ fn steps(
             grid_u: None,
             grid_v: None,
         },
+        // interior points are only used for non-rectangular (trimmed) faces; see `mesh_face`
         SurfaceGeom::Cylinder(c) => Steps {
             ang_u: Some(circle_step(c.radius, opts)),
-            grid_u: None,
-            grid_v: None,
+            grid_u: Some(circle_step(c.radius, opts) / SAFETY),
+            grid_v: Some(((v1 - v0) / 6.0).max(1e-9)),
         },
         SurfaceGeom::Cone(c) => {
             let t = c.half_angle.tan();
@@ -56,8 +57,8 @@ fn steps(
                 .max(rmax);
             Steps {
                 ang_u: Some(circle_step(r, opts)),
-                grid_u: None,
-                grid_v: None,
+                grid_u: Some(circle_step(r, opts) / SAFETY),
+                grid_v: Some(((v1 - v0) / 6.0).max(1e-9)),
             }
         }
         SurfaceGeom::Sphere(s) => {
@@ -97,8 +98,8 @@ fn steps(
         }
         SurfaceGeom::Extrusion { .. } => Steps {
             ang_u: None,
-            grid_u: None,
-            grid_v: None,
+            grid_u: Some(((u1 - u0) / 16.0).max(1e-9)),
+            grid_v: Some(((v1 - v0) / 8.0).max(1e-9)),
         },
         SurfaceGeom::Revolution { profile, .. } => {
             let straight = matches!(**profile, kw_nurbs::CurveGeom::Line(_));
@@ -197,9 +198,11 @@ pub(crate) fn mesh_face(
             let co = &brep.coedges[rc.cid];
             let edge = &brep.edges[co.edge];
             let pc = brep.curves.get(co.pcurve.unwrap()).unwrap();
+            // snap parameter noise (~1e-16) so exactly collinear boundary points stay collinear
+            let snap = |x: f64| (x * 1e12).round() / 1e12;
             let uv = |t: f64| {
                 let p = pc.point_at(t);
-                (p.x, p.y)
+                (snap(p.x), snap(p.y))
             };
             if edge.is_degenerate() {
                 let vtx = brep
@@ -322,7 +325,17 @@ pub(crate) fn mesh_face(
     let boundary_count = uvs.len();
 
     // ---- interior grid -------------------------------------------------------
-    if let (Some(du), Some(dv)) = (st.grid_u, st.grid_v) {
+    // cylinders, cones and extrusions are rectangular in parameter space when untrimmed: no interior points
+    let grid = if is_rect
+        && matches!(
+            surface,
+            SurfaceGeom::Cylinder(_) | SurfaceGeom::Cone(_) | SurfaceGeom::Extrusion { .. }
+        ) {
+        None
+    } else {
+        st.grid_u.zip(st.grid_v)
+    };
+    if let Some((du, dv)) = grid {
         let nu = (((u1 - u0) / du).ceil() as usize).max(1);
         let nv = (((v1 - v0) / dv).ceil() as usize).max(1);
         if nu * nv > 8_000_000 {
@@ -401,6 +414,19 @@ pub(crate) fn mesh_face(
             index_of_handle[vs[1].index()],
             index_of_handle[vs[2].index()],
         ];
+        {
+            let q: Vec<(f64, f64)> = vs
+                .iter()
+                .map(|v| (v.position().x, v.position().y))
+                .collect();
+            let a2 = (q[1].0 - q[0].0) * (q[2].1 - q[0].1) - (q[2].0 - q[0].0) * (q[1].1 - q[0].1);
+            let sc = q
+                .iter()
+                .fold(1.0f64, |m, p| m.max(p.0.abs()).max(p.1.abs()));
+            if a2.abs() < 1e-14 * sc * sc {
+                continue;
+            }
+        }
         if !is_rect {
             let p: Vec<(f64, f64)> = vs
                 .iter()

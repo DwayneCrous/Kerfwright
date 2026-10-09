@@ -13,9 +13,13 @@
 
 pub mod build;
 pub mod curve;
+pub mod fit;
 pub mod geom;
 pub mod hom;
+pub mod intersect;
 pub mod knots;
+pub mod pcurve;
+pub mod proj;
 pub mod surface;
 
 pub use curve::{CurveProjection, NurbsCurve, NurbsError};

@@ -24,7 +24,7 @@ fn new_solid(brep: &mut BRep) -> (BodyId, ShellId) {
 }
 
 fn note_face(h: &mut ShapeHistory, f: FaceId, role: &'static str) {
-    h.record(EntityRef::Face(f), Origin::New { role });
+    h.record(EntityRef::Face(f), Origin::New { role: role.into() });
 }
 
 /// Axis-aligned (in `frame`) box centred at `frame.origin` with the given
@@ -121,7 +121,12 @@ pub fn make_box(brep: &mut BRep, frame: &Frame3, dx: f64, dy: f64, dz: f64) -> B
         }
     }
     for e in new_edges {
-        history.record(EntityRef::Edge(e), Origin::New { role: "box-edge" });
+        history.record(
+            EntityRef::Edge(e),
+            Origin::New {
+                role: "box-edge".into(),
+            },
+        );
     }
     BuildResult { body, history }
 }
@@ -194,10 +199,15 @@ fn make_frustum(brep: &mut BRep, frame: &Frame3, r0: f64, r1: f64, h: f64) -> Bu
     history.record(
         EntityRef::Edge(e_bot),
         Origin::New {
-            role: "bottom-circle",
+            role: "bottom-circle".into(),
         },
     );
-    history.record(EntityRef::Edge(e_seam), Origin::New { role: "seam" });
+    history.record(
+        EntityRef::Edge(e_seam),
+        Origin::New {
+            role: "seam".into(),
+        },
+    );
 
     // side face -------------------------------------------------------------
     let side_surf = brep.add_surface(side_surface);
@@ -220,7 +230,12 @@ fn make_frustum(brep: &mut BRep, frame: &Frame3, r0: f64, r1: f64, h: f64) -> Bu
     ];
     if apex {
         let e_apex = brep.add_edge(vt, vt, None, (0.0, 1.0));
-        history.record(EntityRef::Edge(e_apex), Origin::New { role: "apex" });
+        history.record(
+            EntityRef::Edge(e_apex),
+            Origin::New {
+                role: "apex".into(),
+            },
+        );
         let pc_apex = line2(brep, (0.0, h), (TAU, 0.0));
         uses.push(CoedgeSpec {
             edge: e_apex,
@@ -242,7 +257,12 @@ fn make_frustum(brep: &mut BRep, frame: &Frame3, r0: f64, r1: f64, h: f64) -> Bu
             radius: r1,
         }));
         let e_top = brep.add_edge(vt, vt, Some(top_curve), (0.0, TAU));
-        history.record(EntityRef::Edge(e_top), Origin::New { role: "top-circle" });
+        history.record(
+            EntityRef::Edge(e_top),
+            Origin::New {
+                role: "top-circle".into(),
+            },
+        );
         let pc_top = line2(brep, (0.0, h), (1.0, 0.0));
         uses.push(CoedgeSpec {
             edge: e_top,
@@ -331,7 +351,12 @@ pub fn make_sphere(brep: &mut BRep, frame: &Frame3, radius: f64) -> BuildResult 
     let e_seam = brep.add_edge(south, north, Some(meridian), (-FRAC_PI_2, FRAC_PI_2));
     let e_south = brep.add_edge(south, south, None, (0.0, 1.0));
     let e_north = brep.add_edge(north, north, None, (0.0, 1.0));
-    history.record(EntityRef::Edge(e_seam), Origin::New { role: "meridian" });
+    history.record(
+        EntityRef::Edge(e_seam),
+        Origin::New {
+            role: "meridian".into(),
+        },
+    );
 
     let surf = brep.add_surface(SurfaceGeom::Sphere(Sphere {
         frame: *frame,
@@ -393,8 +418,18 @@ pub fn make_torus(brep: &mut BRep, frame: &Frame3, major: f64, minor: f64) -> Bu
     }));
     let e_u = brep.add_edge(v, v, Some(cu), (0.0, TAU));
     let e_v = brep.add_edge(v, v, Some(cv), (0.0, TAU));
-    history.record(EntityRef::Edge(e_u), Origin::New { role: "major-seam" });
-    history.record(EntityRef::Edge(e_v), Origin::New { role: "minor-seam" });
+    history.record(
+        EntityRef::Edge(e_u),
+        Origin::New {
+            role: "major-seam".into(),
+        },
+    );
+    history.record(
+        EntityRef::Edge(e_v),
+        Origin::New {
+            role: "minor-seam".into(),
+        },
+    );
     let surf = brep.add_surface(SurfaceGeom::Torus(Torus {
         frame: *frame,
         major_radius: major,

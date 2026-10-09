@@ -338,7 +338,7 @@ impl NurbsSurface {
                 }
             }
         }
-        seeds.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        seeds.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
         seeds.truncate(6);
         let mut best = SurfaceProjection {
             u: ua,

@@ -78,6 +78,19 @@ impl ValidationReport {
     }
 }
 
+/// A parameter-space gap is harmless if it is small and the two surface points it separates are
+/// within the 3D tolerance (the parameterisation can be very contracted, e.g. near a cone apex).
+fn uv_gap_is_geometrically_closed(
+    surface: &kw_nurbs::SurfaceGeom,
+    a: (f64, f64),
+    b: (f64, f64),
+    uv_gap: f64,
+    tol: f64,
+) -> bool {
+    use kw_nurbs::Surface;
+    uv_gap < 1e-4 && (surface.point_at(a.0, a.1) - surface.point_at(b.0, b.1)).norm() <= tol
+}
+
 impl BRep {
     /// Full validation: topology followed by geometry.
     pub fn validate(&self) -> ValidationReport {
@@ -435,7 +448,7 @@ impl BRep {
                 let end = uv(range.1);
                 if let Some(pe) = prev_end {
                     let d = ((pe.0 - start.0).powi(2) + (pe.1 - start.1).powi(2)).sqrt();
-                    if d > 1e-8 {
+                    if d > 1e-8 && !uv_gap_is_geometrically_closed(surface, pe, start, d, tol) {
                         rep.errors.push(ValidationError::Geometry {
                             what: "uv discontinuity in loop",
                             id: format!("{cid:?}"),
@@ -476,7 +489,7 @@ impl BRep {
             }
             if let (Some(pe), Some(fs)) = (prev_end, first_start) {
                 let d = ((pe.0 - fs.0).powi(2) + (pe.1 - fs.1).powi(2)).sqrt();
-                if d > 1e-8 {
+                if d > 1e-8 && !uv_gap_is_geometrically_closed(surface, pe, fs, d, tol) {
                     rep.errors.push(ValidationError::Geometry {
                         what: "uv loop not closed",
                         id: format!("{lid:?}"),
