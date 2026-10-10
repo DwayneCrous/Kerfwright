@@ -31,6 +31,63 @@ pub fn contains(f: &FaceRec, p: &Point3<f64>, tol: f64) -> Cont {
     }
 }
 
+/// Distance from `p` to the edge `e` (to the curve within its range, or to an end point).
+fn dist_to_edge(e: &EdgeRec, p: &Point3<f64>) -> f64 {
+    let Some(c) = &e.curve else {
+        return (e.p0 - p).norm();
+    };
+    let mid = 0.5 * (e.range.0 + e.range.1);
+    let r = kw_nurbs::proj::curve_param_of(c, p, Some(mid));
+    let (lo, hi) = (e.range.0.min(e.range.1), e.range.0.max(e.range.1));
+    let mut best = (e.p0 - p).norm().min((e.p1 - p).norm());
+    let period = match c {
+        CurveGeom::Circle(_) | CurveGeom::Ellipse(_) => Some(std::f64::consts::TAU),
+        _ => None,
+    };
+    let t = match period {
+        Some(per) => lo + (r.t - lo).rem_euclid(per),
+        None => r.t,
+    };
+    if t >= lo - 1e-12 && t <= hi + 1e-12 {
+        best = best.min(r.distance);
+    }
+    best
+}
+
+/// [`contains`] with the boundary decided against the face's actual edge curves near it: the parameter
+/// polygon of a free-form boundary approximates it only to the polygon's chord error, which can exceed
+/// the boundary tolerance, so a point that lies on the boundary (a cut running along an edge) could be
+/// judged outside.
+pub fn contains_exact(w: &Work, fi: usize, p: &Point3<f64>) -> Cont {
+    let f = &w.faces[fi];
+    let base = contains(f, p, w.tol);
+    if base == Cont::Boundary {
+        return base;
+    }
+    let reach = 20.0 * w.tol;
+    let ids = &w.face_edge_ids[fi];
+    let mut cand: Vec<u32> = Vec::new();
+    match &w.face_edge_grid[fi] {
+        Some(g) => {
+            let mut near = kw_math::Aabb::from_points(&[*p]);
+            near.min -= kw_math::Vector3::repeat(reach);
+            near.max += kw_math::Vector3::repeat(reach);
+            g.query(&near, ids.len(), &mut cand);
+        }
+        None => cand.extend(0..ids.len() as u32),
+    }
+    for &k in &cand {
+        let e = &w.edges[&ids[k as usize]];
+        if !e.bbox.contains(p, reach) {
+            continue;
+        }
+        if dist_to_edge(e, p) <= reach {
+            return Cont::Boundary;
+        }
+    }
+    base
+}
+
 fn window(f: &FaceRec) -> Window {
     let widen = |lo: f64, hi: f64, period: Option<f64>| -> (f64, f64) {
         let span = hi - lo;
@@ -106,12 +163,22 @@ fn restrict_range(w: &Work, c: &SsiCurve, fa: usize, fb: usize) -> Option<(f64, 
             len += (q - prev).norm();
             prev = q;
         }
-        let small = boxes
-            .iter()
-            .map(|b| b.diagonal())
-            .fold(f64::INFINITY, f64::min)
-            .max(1e-9);
-        ((len / (0.2 * small)).ceil() as usize).clamp(coarse, 200_000)
+        // the curve must not be able to step over the region where both boxes overlap
+        let lo = kw_math::Vector3::new(
+            boxes[0].min.x.max(boxes[1].min.x),
+            boxes[0].min.y.max(boxes[1].min.y),
+            boxes[0].min.z.max(boxes[1].min.z),
+        );
+        let hi = kw_math::Vector3::new(
+            boxes[0].max.x.min(boxes[1].max.x),
+            boxes[0].max.y.min(boxes[1].max.y),
+            boxes[0].max.z.min(boxes[1].max.z),
+        );
+        if (hi - lo).amin() < 0.0 {
+            return None;
+        }
+        let thin = (hi - lo).amin().max(1e-9);
+        ((len / (0.5 * thin)).ceil() as usize).clamp(coarse, 200_000)
     };
     let inside = (0..=n).any(|i| {
         let p = c.curve.point_at(r0 + (r1 - r0) * i as f64 / n as f64);
@@ -168,14 +235,10 @@ pub fn coalesce_overlaps(
             let t = hits[i].t1;
             let to_start = (c1.point_at(t) - c1.point_at(win1.0)).norm();
             let to_end = (c1.point_at(t) - c1.point_at(win1.1)).norm();
-            // a hit that only marks the far end of a grazing stretch leading to a window end that itself
-            // lies on the edge (the curve ends on the edge, tangentially)
-            let end_on_edge = |w: f64| {
-                kw_nurbs::proj::curve_param_of(c2, &c1.point_at(w), Some(mid2)).distance
-                    <= 3.0 * tol
-            };
-            let sliver = (to_start > 5.0 * tol && end_on_edge(win1.0) && grazes(win1.0, t))
-                || (to_end > 5.0 * tol && end_on_edge(win1.1) && grazes(t, win1.1));
+            // a hit that only marks the far end of a short stretch that grazes the edge, starting at a window
+            // end (the curve ends on the edge, at a shallow angle): the window end is the crossing
+            let sliver = (to_start > 5.0 * tol && grazes(win1.0, t))
+                || (to_end > 5.0 * tol && grazes(t, win1.1));
             if !sliver {
                 out.push(hits[i]);
             }
@@ -260,7 +323,10 @@ fn clip(w: &Work, c: &SsiCurve, fa: usize, fb: usize) -> Vec<(f64, f64)> {
         // keep one breakpoint per cluster (cluster = within 20 tolerances of the previous one in 3D)
         let last = brk.last().copied().unwrap();
         let apart = (c.curve.point_at(t) - c.curve.point_at(last)).norm() > 20.0 * w.tol;
-        if t > last + eps && t < r1 - eps && apart {
+        // a hit that is the far end of a grazing stretch reaching the window's end is that end, not a new
+        // breakpoint (it would leave a sliver piece of the cut)
+        let clear_of_end = (c.curve.point_at(t) - c.curve.point_at(r1)).norm() > 20.0 * w.tol;
+        if t > last + eps && t < r1 - eps && apart && clear_of_end {
             brk.push(t);
         }
     }
@@ -270,8 +336,7 @@ fn clip(w: &Work, c: &SsiCurve, fa: usize, fb: usize) -> Vec<(f64, f64)> {
             return false;
         }
         let p = c.curve.point_at(0.5 * (ta + tb));
-        contains(&w.faces[fa], &p, w.tol) != Cont::Out
-            && contains(&w.faces[fb], &p, w.tol) != Cont::Out
+        contains_exact(w, fa, &p) != Cont::Out && contains_exact(w, fb, &p) != Cont::Out
     };
     // Note: the intervals on either side of a closed curve's parameter origin are deliberately NOT
     // merged — pcurves are generally not periodic in the curve parameter, and an extra vertex at the
@@ -419,21 +484,10 @@ fn pair_cuts(w: &Work, fa: usize, fb: usize) -> Result<PairOutcome, BooleanError
             // surfaces coincide: only relevant if the trims overlap (decided by imprinting)
             res.coincident = Some((fa, fb, same_normal));
         }
-        SsiOutcome::Points(pts) => {
-            for p in pts {
-                let (ca, cb) = (
-                    contains(&w.faces[fa], &p, w.tol),
-                    contains(&w.faces[fb], &p, w.tol),
-                );
-                // a tangent point that lies on the boundary of both faces (a corner of a blend patch
-                // touching the face it is tangent to) changes nothing: the boundaries meet there anyway
-                if ca != Cont::Out
-                    && cb != Cont::Out
-                    && !(ca == Cont::Boundary && cb == Cont::Boundary)
-                {
-                    return Err(BooleanError::Tangent("point contact between faces"));
-                }
-            }
+        SsiOutcome::Points(_) => {
+            // Isolated tangent points (a sphere resting on a plane, two spheres touching): the surfaces
+            // touch without crossing, so the arrangement is unchanged and the shells simply meet at a
+            // point. Classification of the faces decides the result.
         }
         SsiOutcome::Curves { curves, tangent } => {
             for c in &curves {
@@ -441,8 +495,13 @@ fn pair_cuts(w: &Work, fa: usize, fb: usize) -> Result<PairOutcome, BooleanError
                 // Tangent contact along a curve (e.g. a fillet cylinder meeting its support plane) is
                 // treated like any other cut: the arrangement splits both faces there. Contacts that
                 // would make the result non-manifold are rejected later by the usage check.
-                let _ = tangent;
                 for (t0, t1) in ivs {
+                    // a stretch shorter than a few merge tolerances is a point, not a curve
+                    let span = (c.curve.point_at(t1) - c.curve.point_at(t0)).norm();
+                    let arc = (c.curve.point_at(0.5 * (t0 + t1)) - c.curve.point_at(t0)).norm();
+                    if span.max(2.0 * arc) < 10.0 * w.tol {
+                        continue;
+                    }
                     let tm = 0.5 * (t0 + t1);
                     let pa = shift_to_face(&w.faces[fa], &c.pcurve_a, tm);
                     let pb = shift_to_face(&w.faces[fb], &c.pcurve_b, tm);
@@ -457,6 +516,7 @@ fn pair_cuts(w: &Work, fa: usize, fb: usize) -> Result<PairOutcome, BooleanError
                         fb,
                         pcurve_a: pa,
                         pcurve_b: pb,
+                        tangent,
                     });
                 }
             }

@@ -36,6 +36,10 @@ fn perp_frame(origin: Point3<f64>, axis: Vector3<f64>) -> Frame3 {
     Frame3::from_origin_normal(origin, axis)
 }
 
+pub fn circle_curve(origin: Point3<f64>, axis: Vector3<f64>, radius: f64) -> RawCurve {
+    circle(origin, axis, radius)
+}
+
 fn circle(origin: Point3<f64>, axis: Vector3<f64>, radius: f64) -> RawCurve {
     RawCurve {
         curve: CurveGeom::Circle(Circle {
@@ -538,6 +542,43 @@ pub fn coincident(a: &SurfaceGeom, b: &SurfaceGeom) -> Option<bool> {
 }
 
 /// Exact intersection when a closed form exists for this pair.
+/// A plane tangent to a cone along one generator (it passes through the apex at the tangent angle): the
+/// whole intersection is that line. The junction of a planar chamfer and the conical chamfer of a
+/// tangent arc.
+fn plane_cone_tangent(p: &Plane, c: &Cone, eps: f64) -> Option<Exact> {
+    let ta = c.half_angle.tan();
+    if ta.abs() < 1e-9 || !ta.is_finite() {
+        return None;
+    }
+    let n = p.frame.z;
+    let z = c.frame.z;
+    let sin_a = c.half_angle.sin();
+    if (n.dot(&z).abs() - sin_a.abs()).abs() > 1e-9 {
+        return None;
+    }
+    let apex = c.frame.origin - z * (c.radius_at_origin / ta);
+    if (apex - p.frame.origin).dot(&n).abs() > eps {
+        return None;
+    }
+    // n = s (tan a ẑ - ρ̂) cos a, with s chosen so that s n·ẑ = sin a
+    let s = if n.dot(&z) * sin_a >= 0.0 { 1.0 } else { -1.0 };
+    let k = 1.0 / c.half_angle.cos();
+    let rho = z * ta - n * (s * k);
+    let g = rho * ta + z;
+    Some(Exact {
+        curves: vec![RawCurve {
+            curve: CurveGeom::Line(Line {
+                origin: apex,
+                dir: g.normalize(),
+            }),
+            range: (f64::NEG_INFINITY, f64::INFINITY),
+            closed: false,
+        }],
+        tangent: true,
+        ..Default::default()
+    })
+}
+
 pub fn exact(a: &SurfaceGeom, b: &SurfaceGeom) -> Option<Exact> {
     let eps = 1e-9 * (1.0 + scale_of(a).max(scale_of(b)));
     if let Some(same) = coincident(a, b) {
@@ -553,6 +594,11 @@ pub fn exact(a: &SurfaceGeom, b: &SurfaceGeom) -> Option<Exact> {
             return Some(plane_cylinder(p, c, eps))
         }
         (Plane(p), Sphere(s)) | (Sphere(s), Plane(p)) => return Some(plane_sphere(p, s, eps)),
+        (Plane(p), Cone(c)) | (Cone(c), Plane(p)) => {
+            if let Some(e) = plane_cone_tangent(p, c, eps) {
+                return Some(e);
+            }
+        }
         (Sphere(s), Sphere(t)) => return Some(sphere_sphere(s, t, eps)),
         (Cylinder(c), Cylinder(d)) => {
             if let Some(e) = cylinder_cylinder_parallel(c, d, eps) {

@@ -137,8 +137,17 @@ pub fn curve_curve(
             (key(lo.z - slack), key(hi.z + slack)),
         )
     };
-    let count =
-        |r: &CellRange| (r.0 .1 - r.0 .0 + 1) * (r.1 .1 - r.1 .0 + 1) * (r.2 .1 - r.2 .0 + 1);
+    // (a long segment against tiny cells would overflow an i64 product: count in f64)
+    let count = |r: &CellRange| -> i64 {
+        let c = (r.0 .1 - r.0 .0 + 1) as f64
+            * (r.1 .1 - r.1 .0 + 1) as f64
+            * (r.2 .1 - r.2 .0 + 1) as f64;
+        if c > 1e15 {
+            i64::MAX
+        } else {
+            c as i64
+        }
+    };
     let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<usize>> =
         std::collections::HashMap::new();
     let mut long2: Vec<usize> = Vec::new();

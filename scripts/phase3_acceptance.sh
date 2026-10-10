@@ -3,7 +3,7 @@
 # Usage: scripts/phase3_acceptance.sh [out_dir]
 #
 # Sizes can be reduced for a quick run, e.g.
-#   BOOL_PAIRS=2000 SSI_PAIRS=2000 BLEND_PARTS=100 scripts/phase3_acceptance.sh
+#   BOOL_PAIRS=2000 MODEL_PAIRS=1000 SSI_PAIRS=2000 BLEND_PARTS=100 scripts/phase3_acceptance.sh
 #
 # External-tool checks (OpenCASCADE / Gmsh / truck, public STEP corpus) need the dev-only oracle
 # environment described in docs/phase3-report.md; they run when ORACLE_PY (a python with cadquery-ocp and
@@ -16,7 +16,7 @@ mkdir -p "$OUT"
 BOOL_PAIRS="${BOOL_PAIRS:-100000}"
 SSI_PAIRS="${SSI_PAIRS:-10000}"
 BLEND_PARTS="${BLEND_PARTS:-500}"
-MODEL_PAIRS="${MODEL_PAIRS:-2000}"
+MODEL_PAIRS="${MODEL_PAIRS:-100000}"
 CORNER_PARTS="${CORNER_PARTS:-200}"
 
 step() { printf '\n=== %s ===\n' "$*"; }
@@ -37,6 +37,9 @@ cargo test -p kw-boolean --release --test primitives --test basic
 step "(1) Boolean fuzz: ${BOOL_PAIRS} pairs x 3 operations, 0 invalid outputs, success rate on valid-expected cases (release)"
 KW_BOOL_FUZZ_PAIRS="$BOOL_PAIRS" cargo test -p kw-boolean --release --test fuzz -- --nocapture | tee "$OUT/boolean_fuzz.log"
 
+step "Boolean: tangent contact between solids, merged coplanar result faces (release)"
+cargo test -p kw-boolean --release --test tangent --test merge
+
 step "extrude / revolve / sweep / loft / shell / offset / draft + model fuzz (release)"
 cargo test -p kw-model --release --test extrude --test revolve --test offset --test skin --test tangent_tool --test nurbs_nurbs
 # free-form operands (spline extrusions, revolutions, lofts): every non-analytic pair goes through the distance-field tracer
@@ -52,6 +55,9 @@ cargo test -p kw-blend --release --test basic --test history
 step "(4) vertex blends: rolling-ball sphere patches at three-face corners (exact Steiner volume of the rounded box; ${CORNER_PARTS}-part corner benchmark)"
 cargo test -p kw-blend --release --test vertex
 KW_CORNER_MIN_SUCCESS=0.95 KW_CORNER_PARTS="$CORNER_PARTS" cargo test -p kw-blend --release --test corners -- --nocapture | tee "$OUT/corner_benchmark.log"
+
+step "(4) tangent chains: rounded outlines, slots, L plates, pockets, chamfers; exact Pappus volumes"
+cargo test -p kw-blend --release --test chains
 
 step "(4) variable-radius fillets: arbitrary laws, straight edges (planes, plane/cylinder), circular rims (cylinder, cone, concave collar)"
 cargo test -p kw-blend --release --test variable

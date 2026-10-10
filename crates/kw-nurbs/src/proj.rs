@@ -395,6 +395,11 @@ pub fn surface_param_of(
                 }
             }
             let u = 0.5 * (l + r);
+            // a closed periodic profile (circle, ellipse): continue the caller's branch across the seam
+            let u = match (hu, s.period_u()) {
+                (Some(h), Some(per)) => wrap_near(u, h, per),
+                _ => u,
+            };
             // angle between the profile point's radial direction and p's radial direction
             let w = profile.point_at(u) - axis_origin;
             let pr = w - axis * w.dot(&axis);

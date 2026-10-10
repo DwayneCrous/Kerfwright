@@ -98,6 +98,7 @@ fn boolean_scaling() {
                 op,
                 &BoolOptions {
                     verify: true,
+                    merge_faces: std::env::var("KW_PERF_NOMERGE").is_err(),
                     ..Default::default()
                 },
             );

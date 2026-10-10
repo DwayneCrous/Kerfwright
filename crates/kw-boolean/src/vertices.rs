@@ -122,6 +122,7 @@ pub fn build(w: &mut Work) -> Result<(), BooleanError> {
             v_start: vs,
             v_end: ve,
             splits: Vec::new(),
+            tangent: false,
         });
     }
     for fi in 0..w.faces.len() {
@@ -183,6 +184,7 @@ pub fn build(w: &mut Work) -> Result<(), BooleanError> {
             v_start: vs,
             v_end: ve,
             splits: Vec::new(),
+            tangent: c.tangent,
         });
     }
     if std::env::var("KW_BOOL_DEBUG").is_ok() {
@@ -333,7 +335,62 @@ pub fn build(w: &mut Work) -> Result<(), BooleanError> {
             w.pieces_of_face[u.face].push((pi, ui));
         }
     }
+    check_cut_ends(w);
     Ok(())
+}
+
+/// Local consistency of the cut network. At a vertex that is strictly inside a face (no boundary edge of
+/// that face meets there) an even number of intersection curves must meet (a tangent contact counts
+/// twice): a curve that arrives has to leave again. An odd count means a neighbouring cut was lost (a
+/// short stretch judged outside a face, a crossing missed by a tolerance), and such an arrangement can
+/// give a valid solid that is missing volume. The Boolean is then marked *suspect*; the caller verifies
+/// the result by ray casting around the cuts and these junctions before trusting it.
+fn check_cut_ends(w: &mut Work) {
+    // (face, vertex) -> (cut pieces, boundary pieces)
+    let mut counts: HashMap<(usize, usize), (u32, u32)> = HashMap::new();
+    for (pi, p) in w.pieces.iter().enumerate() {
+        if p.canon != pi || w.gedges[p.gedge].curve.is_none() || p.v0 == p.v1 {
+            continue;
+        }
+        let weight = if w.gedges[p.gedge].tangent { 2 } else { 1 };
+        for u in &p.uses {
+            for v in [p.v0, p.v1] {
+                let e = counts.entry((u.face, v)).or_default();
+                if u.boundary_fwd.is_none() {
+                    e.0 += weight;
+                } else {
+                    e.1 += 1;
+                }
+            }
+        }
+    }
+    let mut bad: Vec<usize> = counts
+        .iter()
+        .filter(|(_, &(cuts, bdry))| bdry == 0 && cuts % 2 == 1)
+        .map(|(&(_, v), _)| v)
+        .collect();
+    bad.sort_unstable();
+    bad.dedup();
+    if bad.is_empty() {
+        return;
+    }
+    w.suspect = true;
+    let reach = 1e-3 * w.scale.max(1.0);
+    for v in bad {
+        let p = w.reg.pts[v];
+        for dir in [
+            kw_math::Vector3::x(),
+            kw_math::Vector3::y(),
+            kw_math::Vector3::z(),
+            kw_math::Vector3::new(1.0, 1.0, 1.0).normalize(),
+            kw_math::Vector3::new(1.0, -1.0, 1.0).normalize(),
+            kw_math::Vector3::new(1.0, 1.0, -1.0).normalize(),
+            kw_math::Vector3::new(-1.0, 1.0, 1.0).normalize(),
+        ] {
+            w.probes.push(p + dir * reach);
+            w.probes.push(p - dir * reach);
+        }
+    }
 }
 
 /// Boundary pieces of one face that lie inside a coincident partner face become cuts there.
@@ -449,13 +506,15 @@ fn canonicalize(w: &mut Work) {
             .or_default()
             .push(i);
     }
-    let mut keys: Vec<_> = groups.keys().copied().collect();
+    // only pieces that share both end vertices can coincide
+    let mut keys: Vec<_> = groups
+        .iter()
+        .filter(|(_, v)| v.len() >= 2)
+        .map(|(k, _)| *k)
+        .collect();
     keys.sort();
     for k in keys {
         let list = groups[&k].clone();
-        if list.len() < 2 {
-            continue;
-        }
         let mut reps: Vec<usize> = Vec::new();
         for &q in &list {
             let mut merged = false;

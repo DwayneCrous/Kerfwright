@@ -22,6 +22,7 @@ use implicit::Implicit;
 use kw_nurbs::geom::*;
 use kw_nurbs::pcurve::pcurve_on;
 use nalgebra::Point3;
+use std::f64::consts::FRAC_PI_2;
 
 /// Finite parameter window of a surface (required for unbounded directions; for a periodic
 /// direction a window of at least one period means "the whole period").
@@ -101,6 +102,11 @@ fn line_interval(s: &SurfaceGeom, w: Window, l: &Line) -> Option<Option<(f64, f6
             clamp(q.dot(&p.frame.y), l.dir.dot(&p.frame.y), w.v.0, w.v.1);
         }
         SurfaceGeom::Cylinder(c) => {
+            let q = l.origin - c.frame.origin;
+            clamp(q.dot(&c.frame.z), l.dir.dot(&c.frame.z), w.v.0, w.v.1);
+        }
+        SurfaceGeom::Cone(c) => {
+            // the cone's `v` is the axial coordinate
             let q = l.origin - c.frame.origin;
             clamp(q.dot(&c.frame.z), l.dir.dot(&c.frame.z), w.v.0, w.v.1);
         }
@@ -333,6 +339,100 @@ fn analytic_edge_contact(
     (!out.is_empty()).then_some(out)
 }
 
+/// A cylinder that is the straight continuation of a torus tube: equal radii, its axis tangent to the
+/// torus's major circle (in the mid-plane). The surfaces touch along the tube's circle there. This is the
+/// junction of a fillet along a line and the fillet around a tangent arc, glued at a common cap. Tracing
+/// cannot resolve such a contact, so the circle is returned directly when it is the whole intersection
+/// within the windows. `None` unless the geometry and the windows fit.
+fn tube_contact(
+    a: &SurfaceGeom,
+    wa: Window,
+    b: &SurfaceGeom,
+    wb: Window,
+    tol: f64,
+) -> Option<Result<SsiOutcome, SsiError>> {
+    let (cyl, tor) = match (a, b) {
+        (SurfaceGeom::Cylinder(c), SurfaceGeom::Torus(t)) => (c, t),
+        (SurfaceGeom::Torus(t), SurfaceGeom::Cylinder(c)) => (c, t),
+        _ => return None,
+    };
+    let scale = 1.0
+        + cyl
+            .frame
+            .origin
+            .coords
+            .amax()
+            .max(tor.frame.origin.coords.amax())
+            .max(tor.major_radius);
+    let eps = 1e-9 * scale;
+    if (cyl.radius - tor.minor_radius).abs() > eps {
+        return None;
+    }
+    let t = cyl.frame.z;
+    if t.dot(&tor.frame.z).abs() > 1e-9 {
+        return None;
+    }
+    let c = tor.frame.origin;
+    let foot = cyl.frame.origin + t * (c - cyl.frame.origin).dot(&t);
+    if ((foot - c).norm() - tor.major_radius).abs() > eps
+        || (foot - c).dot(&tor.frame.z).abs() > eps
+    {
+        return None;
+    }
+    // Besides the circle the full surfaces cross along two branches on the inner half of the tube (where
+    // cos ψ < 0, at axial offset s = ±2 √(R ρ |cos ψ|), growing out of the circle's top and bottom
+    // points). If none of them runs through the interior of both windows (shrunk by the widening the
+    // caller applied to its face extents), the circle is the whole intersection.
+    let radial = (foot - c) / tor.major_radius;
+    let up = tor.frame.z;
+    let shrunk = |s: &SurfaceGeom, w: Window| -> Option<Window> {
+        if !(w.u.0.is_finite() && w.u.1.is_finite() && w.v.0.is_finite() && w.v.1.is_finite()) {
+            return None;
+        }
+        let sh = |lo: f64, hi: f64, per: Option<f64>| match per {
+            Some(p) if hi - lo >= p - 1e-9 => (lo, hi),
+            _ => {
+                let m = 0.0455 * (hi - lo);
+                (lo + m, hi - m)
+            }
+        };
+        Some(Window {
+            u: sh(w.u.0, w.u.1, s.period_u()),
+            v: sh(w.v.0, w.v.1, s.period_v()),
+        })
+    };
+    let inside = |s: &SurfaceGeom, w: &Window, p: &Point3<f64>| -> bool {
+        let q = kw_nurbs::proj::surface_param_of(s, p, None);
+        let within = |x: f64, lo: f64, hi: f64, per: Option<f64>| match per {
+            Some(per) => {
+                let x0 = lo + (x - lo).rem_euclid(per);
+                x0 <= hi || hi - lo >= per
+            }
+            None => x >= lo && x <= hi,
+        };
+        within(q.u, w.u.0, w.u.1, s.period_u()) && within(q.v, w.v.0, w.v.1, s.period_v())
+    };
+    let (core_a, core_b) = (shrunk(a, wa)?, shrunk(b, wb)?);
+    let n = 720;
+    for k in 0..=n {
+        let psi = FRAC_PI_2 + std::f64::consts::PI * k as f64 / n as f64;
+        let off = (radial * psi.cos() + up * psi.sin()) * cyl.radius;
+        let s = 2.0 * (tor.major_radius * cyl.radius * (-psi.cos()).max(0.0)).sqrt();
+        for sgn in [1.0, -1.0] {
+            let p = foot + t * (sgn * s) + off;
+            if inside(a, &core_a, &p) && inside(b, &core_b, &p) {
+                return None;
+            }
+        }
+    }
+    let ex = exact::Exact {
+        curves: vec![exact::circle_curve(foot, t, cyl.radius)],
+        tangent: true,
+        ..Default::default()
+    };
+    Some(build_exact(a, wa, b, wb, ex, tol))
+}
+
 /// Intersect two surfaces within the given parameter windows.
 pub fn intersect(
     a: &SurfaceGeom,
@@ -356,6 +456,9 @@ pub fn intersect(
         if !huge {
             return build_exact(a, wa, b, wb, ex, tol);
         }
+    }
+    if let Some(r) = tube_contact(a, wa, b, wb, tol) {
+        return r;
     }
     // a spline face tangent to a plane along its boundary
     match (a, b) {

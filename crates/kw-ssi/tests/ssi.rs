@@ -670,3 +670,81 @@ fn random_nurbs_pairs_curves_are_on_both_surfaces() {
     assert!(worst < 1e-8, "a curve is off the surfaces by {worst}");
     assert!(errors * 20 <= n, "too many failures: {errors}/{n}");
 }
+
+#[test]
+fn plane_tangent_to_a_cone_along_a_generator() {
+    // cone of half-angle 0.4 and radius 1.5 at its frame origin; the plane through the apex tangent along
+    // the generator at azimuth 0.9 meets the cone in exactly that line
+    let a: f64 = 0.4;
+    let fr = frame([0.3, -0.2, 0.1], [0.2, -0.3, 1.0], 0.2);
+    let r0 = 1.5;
+    let c = SurfaceGeom::Cone(Cone {
+        frame: fr,
+        radius_at_origin: r0,
+        half_angle: a,
+    });
+    let apex = fr.origin - fr.z * (r0 / a.tan());
+    let th: f64 = 0.9;
+    let rho = fr.x * th.cos() + fr.y * th.sin();
+    let g = rho * a.tan() + fr.z;
+    let n = (fr.z * a.tan() - rho).normalize();
+    let p = SurfaceGeom::Plane(Plane {
+        frame: Frame3::from_origin_normal(apex, n),
+    });
+    let cw = Window {
+        u: (0.5, 1.4),
+        v: (0.2, 2.5),
+    };
+    let pw = Window {
+        u: (-6.0, 6.0),
+        v: (-6.0, 6.0),
+    };
+    match intersect(&p, pw, &c, cw, DEFAULT_TOL).unwrap() {
+        SsiOutcome::Curves { curves, tangent } => {
+            assert!(tangent);
+            assert_eq!(curves.len(), 1);
+            let w = check_curves(&p, &c, &curves);
+            assert!(w < 1e-9, "off the surfaces by {w}");
+            let q = curves[0]
+                .curve
+                .point_at(0.5 * (curves[0].range.0 + curves[0].range.1));
+            assert!(((q - apex).normalize().cross(&g.normalize())).norm() < 1e-9);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cylinder_continuing_a_torus_tube_touches_it_along_a_circle() {
+    // torus (R = 1, ρ = 0.5) about z; a cylinder of radius 0.5 whose axis is the tangent line of the major
+    // circle at azimuth 0.6. Faces on opposite sides of the contact plane meet in the tube circle only.
+    let t = tor([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 0.5);
+    let SurfaceGeom::Torus(tk) = &t else { panic!() };
+    let phi: f64 = 0.6;
+    let radial = tk.frame.x * phi.cos() + tk.frame.y * phi.sin();
+    let tangent = tk.frame.z.cross(&radial);
+    let foot = tk.frame.origin + radial;
+    let c = SurfaceGeom::Cylinder(Cylinder {
+        frame: Frame3::from_origin_normal(foot, tangent),
+        radius: 0.5,
+    });
+    // cylinder face: 0 ≤ s ≤ 3 along the tangent (quarter of the tube); torus face: the same sweep backwards
+    let cw = Window {
+        u: (0.0, FRAC_PI_2),
+        v: (-0.15, 3.15),
+    };
+    let tw = Window {
+        u: (phi - FRAC_PI_2 - 0.08, phi + 0.08),
+        v: (-0.08, FRAC_PI_2 + 0.08),
+    };
+    match intersect(&c, cw, &t, tw, DEFAULT_TOL).unwrap() {
+        SsiOutcome::Curves { curves, tangent } => {
+            assert!(tangent);
+            assert_eq!(curves.len(), 1);
+            assert!(curves[0].closed);
+            let w = check_curves(&c, &t, &curves);
+            assert!(w < 1e-9, "off the surfaces by {w}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

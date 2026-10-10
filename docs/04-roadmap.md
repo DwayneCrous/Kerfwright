@@ -38,7 +38,7 @@ Assumptions: a team of ~8–12 senior engineers (2 kernel, 1 solver/numerics, 1 
 - DXF round-trip of 2D entities within 1e-6.
 
 ## Phase 3 — B-rep modelling kernel (months 8–18)
-**Status: implemented; see [`phase3-report.md`](phase3-report.md) for results against these criteria (all criteria met as measured except the "≥ 3 external CAD tools" part of the STEP criterion, which is only partly met; vertex blends cover three-face corners with equal radii).**
+**Status: implemented; see [`phase3-report.md`](phase3-report.md) for results against these criteria (all six met as measured, with the caveats listed there: vertex blends cover three-face corners with equal radii and convexity, variable radius covers straight and circular-rim edges, one fuzz seed is unexplained).**
 
 **Build:** `kw-ssi` (analytic + marching + subdivision), `kw-boolean` (imprint/classify/stitch/heal), extrude/revolve/sweep/loft, `kw-blend` (constant-radius fillet + chamfer, then variable), shell/offset/draft, mass properties, STEP AP203/214/242 import/export, IGES import, `ShapeHistory` reporting from every op.
 

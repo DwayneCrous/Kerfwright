@@ -44,6 +44,10 @@ fn internal(sgn: f64, p: UV) -> UV {
     (p.0, sgn * p.1)
 }
 
+pub fn cycle_poly_pub(fedges: &[FEdge], cyc: &[He]) -> Vec<UV> {
+    cycle_poly(fedges, cyc)
+}
+
 fn cycle_poly(fedges: &[FEdge], cyc: &[He]) -> Vec<UV> {
     let mut pts = Vec::new();
     for h in cyc {
@@ -147,7 +151,60 @@ pub fn interior_point(outer: &[UV], holes: &[&[UV]]) -> Option<UV> {
             break;
         }
     }
-    // thin regions: probe just inside the midpoints of the boundary edges
+    // thin regions: probe the middle of the band at boundary edges (a ray from the edge midpoint to the
+    // nearest boundary on the other side, halved), then just inside the midpoints of the boundary edges
+    if best.is_none() || best.unwrap().0 < 1e-3 * (hi.0 - lo.0).max(hi.1 - lo.1) {
+        let total: usize = polys.iter().map(|p| p.len()).sum();
+        let stride = (total / 64).max(1);
+        let mut count = 0usize;
+        for poly in &polys {
+            let m = poly.len();
+            for i in 0..m {
+                count += 1;
+                if !count.is_multiple_of(stride) {
+                    continue;
+                }
+                let (a, b) = (poly[i], poly[(i + 1) % m]);
+                let mid = (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1));
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let l = dx.hypot(dy);
+                if l < 1e-14 {
+                    continue;
+                }
+                for s in [1.0, -1.0] {
+                    let d = (-s * dy / l, s * dx / l);
+                    // nearest crossing of the ray with any boundary segment (other than the edge itself)
+                    let mut tmin = f64::INFINITY;
+                    for q in &polys {
+                        let n = q.len();
+                        for k in 0..n {
+                            let (c, e) = (q[k], q[(k + 1) % n]);
+                            let (ex, ey) = (e.0 - c.0, e.1 - c.1);
+                            let den = d.0 * ey - d.1 * ex;
+                            if den.abs() < 1e-18 {
+                                continue;
+                            }
+                            let (wx, wy) = (c.0 - mid.0, c.1 - mid.1);
+                            let t = (wx * ey - wy * ex) / den;
+                            let u = (wx * d.1 - wy * d.0) / den;
+                            if t > 1e-9 * extent && (0.0..=1.0).contains(&u) && t < tmin {
+                                tmin = t;
+                            }
+                        }
+                    }
+                    if tmin.is_finite() {
+                        let p = (mid.0 + d.0 * 0.5 * tmin, mid.1 + d.1 * 0.5 * tmin);
+                        if inside(p) {
+                            let c = clearance(p);
+                            if best.is_none_or(|b| c > b.0) {
+                                best = Some((c, p));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if best.is_none() || best.unwrap().0 < 1e-3 * (hi.0 - lo.0).max(hi.1 - lo.1) {
         for poly in &polys {
             let m = poly.len();
@@ -215,7 +272,35 @@ pub fn build(w: &mut Work) -> Result<(), BooleanError> {
     for frags in per_face {
         w.fragments.extend(frags?);
     }
+    if has_slits(w) {
+        w.suspect = true;
+    }
     Ok(())
+}
+
+/// A fragment that runs along an intersection curve in both directions has a slit: the curve ends inside
+/// the face instead of separating it, i.e. a neighbouring cut was lost. Whatever the operation selects,
+/// such an arrangement is suspect (it can give a valid solid that is missing volume), so the caller
+/// verifies the result before trusting it.
+fn has_slits(w: &Work) -> bool {
+    for fr in &w.fragments {
+        let mut seen: std::collections::HashMap<usize, u8> = std::collections::HashMap::new();
+        for cyc in std::iter::once(&fr.outer).chain(fr.holes.iter()) {
+            for h in cyc {
+                let fe = &fr.fedges[h.fe];
+                let piece = &w.pieces[fe.piece];
+                if !matches!(w.gedges[piece.gedge].src, GSrc::Cut) {
+                    continue;
+                }
+                let e = seen.entry(fe.piece).or_default();
+                *e |= if h.fwd { 1u8 } else { 2u8 };
+                if *e == 3 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn arrange_face(w: &Work, fi: usize) -> Result<Vec<Fragment>, BooleanError> {

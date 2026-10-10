@@ -37,7 +37,7 @@ crates/
   kw-ssi       surface–surface intersection (exact quadric cases + certified level-set tracing, signed-distance field for free-form surfaces, pcurves on both surfaces)
   kw-boolean   union / intersect / subtract (imprint, arrangement, classification, stitching, ShapeHistory)
   kw-model     profiles → extrude / revolve / sweep / loft (open and closed); shell, offset, draft; rebuild engine
-  kw-blend     constant- and variable-radius (any law) fillets, vertex blends, chamfers (swept-tool Booleans)
+  kw-blend     constant- and variable-radius (any law) fillets, tangent chains, vertex blends, chamfers (swept-tool Booleans)
   kw-step      ISO 10303-21 parser, AP203/214/242 B-rep import and export (`step_tool` example for oracle checks)
   kw-iges      IGES 5.3 import (trimmed surfaces → sewn solids)
   kw-feature   feature DAG, persistent topological names, evaluator trait, Phase 3 kernel evaluator
@@ -54,11 +54,11 @@ cargo run -p kw-io --example export_primitives -- out/ # STL / OBJ / glTF / GLB 
 scripts/phase1_acceptance.sh                           # every automated Phase 1 check
 cargo run --release -p kw-sketcher -- --demo           # 2D sketcher (L line, R rectangle, C circle, D dimension, Ctrl+Z undo)
 scripts/phase2_acceptance.sh                           # every automated Phase 2 check
-scripts/phase3_acceptance.sh                           # every automated Phase 3 check (100,000-pair Boolean fuzz: ~25 min)
+scripts/phase3_acceptance.sh                           # every automated Phase 3 check (both 100,000-pair Boolean fuzzes: ~2.5 h)
 ```
 
 ## Status / caveats
-* Phase 3: Boolean fuzz (99.80 % on valid-expected cases, 0 invalid outputs), free-form-body fuzz (99.83 %), SSI (including spline/spline), fillet benchmark, vertex blends, variable-radius fillets, STEP/IGES and public-corpus criteria are met or measured as described in the Phase 3 report, and the Boolean (500 ms) and fillet (300 ms) performance SLAs are met at the stated sizes. Not done: vertex blends beyond three equal-radius planar faces (other corners meet in a mitre), variable radius on curved edges that are not circular rims, setback, and "≥ 3 external CAD tools" is satisfied by OpenCASCADE, Gmsh (OpenCASCADE-based) and the independent truck reader — see the report for exactly what each tool verified.
+* Phase 3 meets its six acceptance criteria as measured (details and caveats in [`docs/phase3-report.md`](docs/phase3-report.md)): Boolean fuzz 100,000 pairs (99.90 % on valid-expected cases, 0 invalid outputs, 0 wrong results found by an independent point-classification check), free-form-body fuzz 100,000 pairs (99.61 %, 0 invalid, 0 identity violations), SSI (including spline/spline), fillet / chamfer benchmark 500/500 with tangent chains, vertex blends, variable-radius fillets, STEP round trip with OpenCASCADE, truck and Gmsh, 259/259 public-corpus files, and the Boolean (500 ms) and fillet (300 ms) SLAs. A Boolean *heal* stage retries failed or doubtful operations and only returns verified results. Not done: vertex blends beyond three equal-radius planar faces (other corners meet in a mitre by design), variable radius on ellipse / spline edges and on sphere / torus / spline faces, setback, and one fuzz seed (34267) where the point oracle and a free-form Boolean result disagree and the cause is not found.
 * Phase 2 meets all six automated criteria; the drag-latency SLA is asserted on decomposable sketches and is exceeded on row-coupled ones (8.6 ms p99 at 500 entities), G3/mirror/pattern are not done, and the sketcher window has been smoke-tested but not visually reviewed — details in the Phase 2 report.
 * Phase 1 is complete against its automated criteria; the exceptions (published Piegl–Tiller examples beyond Ex. 2.3, opening exports in third-party viewers, "reference GPU" undefined) are listed in the Phase 1 report.
 * `kw-app` is still a skeleton and `kw-feature` has only the thin Phase 3 kernel adapter (the parametric engine is Phase 4).

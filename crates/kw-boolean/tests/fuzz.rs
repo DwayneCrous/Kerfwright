@@ -78,10 +78,21 @@ fn run_case(seed: u64) -> (Case, Tally) {
                     t.first_failures
                         .push(format!("seed {seed} {op:?}: returned invalid body (v={v})"));
                 }
+                if let Some(msg) = sample_check(&rep, a, b, Some(r.body), op, seed) {
+                    t.identity_failures += 1;
+                    println!("SAMPLE seed {seed} {op:?}: {msg} {case:?}");
+                    t.first_failures.push(format!("seed {seed} {op:?}: {msg}"));
+                }
             }
             Ok(Err(BooleanError::Empty)) => {
                 t.empty += 1;
                 vols[i] = Some(0.0);
+                if let Some(msg) = sample_check(&rep, a, b, None, op, seed) {
+                    t.identity_failures += 1;
+                    println!("SAMPLE seed {seed} {op:?} (empty): {msg} {case:?}");
+                    t.first_failures
+                        .push(format!("seed {seed} {op:?} (empty): {msg}"));
+                }
             }
             Ok(Err(e)) => {
                 *t.errors.entry(kind_of(&e)).or_default() += 1;

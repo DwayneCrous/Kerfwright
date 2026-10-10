@@ -60,6 +60,116 @@ enum Kind {
     Cylinder,
     Cone,
     Turned,
+    /// Rounded-rectangle block: its outline is a closed tangent chain.
+    RoundedBlock,
+    /// Stadium plate: two lines and two half-circle arcs.
+    Slot,
+    /// L-shaped plate with every corner rounded (convex and concave arcs in one chain).
+    RoundedL,
+    /// Plate with a rounded-rectangle pocket: a concave tangent chain at the floor and at the rim.
+    Pocket,
+}
+
+/// Vertical (z-parallel) manifold line edges of a body, used to round the corners of a prism.
+fn vertical_edges(rep: &BRep, body: BodyId) -> Vec<EdgeId> {
+    eligible(rep, body)
+        .into_iter()
+        .filter(|e| {
+            let ed = &rep.edges[*e];
+            let (a, b) = (rep.vertices[ed.start].point, rep.vertices[ed.end].point);
+            (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9 && (a.z - b.z).abs() > 1e-6
+        })
+        .collect()
+}
+
+/// Parts whose blends follow tangent chains (one in four of the parts).
+fn build_chain_part(rep: &mut BRep, r: &mut Rng) -> (BodyId, Kind, f64) {
+    let kind = [Kind::RoundedBlock, Kind::Slot, Kind::RoundedL, Kind::Pocket][r.pick(4)];
+    match kind {
+        Kind::RoundedBlock => {
+            let (x, y, z) = (r.range(3.0, 5.0), r.range(2.5, 4.0), r.range(1.0, 2.5));
+            let rc = r.range(0.5, 1.0);
+            let b = make_box(rep, &world(), x, y, z).body;
+            let es = vertical_edges(rep, b);
+            let b = fillet(rep, b, &es, rc).expect("rounded block").body;
+            (b, kind, rc.min(0.5 * z))
+        }
+        Kind::Slot => {
+            let (len, rad, h) = (r.range(2.0, 4.0), r.range(0.8, 1.4), r.range(0.8, 2.0));
+            let at = |x: f64| Frame3 {
+                origin: Point3::new(x, 0.0, 0.0),
+                ..world()
+            };
+            let l = 0.5 * len;
+            let loop_ = ProfileLoop::new(vec![
+                ProfileEdge::line(Point3::new(-l, -rad, 0.0), Point3::new(l, -rad, 0.0)),
+                ProfileEdge::arc(
+                    &at(l),
+                    rad,
+                    -std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::FRAC_PI_2,
+                ),
+                ProfileEdge::line(Point3::new(l, rad, 0.0), Point3::new(-l, rad, 0.0)),
+                ProfileEdge::arc(
+                    &at(-l),
+                    rad,
+                    std::f64::consts::FRAC_PI_2,
+                    3.0 * std::f64::consts::FRAC_PI_2,
+                ),
+            ]);
+            let b = extrude(
+                rep,
+                &Profile::new(world(), loop_),
+                Vector3::new(0.0, 0.0, h),
+                &ExtrudeOptions::default(),
+            )
+            .unwrap()
+            .body;
+            (b, kind, rad.min(h))
+        }
+        Kind::RoundedL => {
+            let (a, w) = (r.range(4.0, 6.0), r.range(1.8, 2.6));
+            // the roundings of neighbouring corners must not overlap: keep them inside the shorter arms
+            let rc = r.range(0.4, 0.7).min(0.45 * (a - w)).min(0.45 * w);
+            let pts = [(0.0, 0.0), (a, 0.0), (a, w), (w, w), (w, a), (0.0, a)];
+            let b = extrude(
+                rep,
+                &Profile::polygon(world(), &pts),
+                Vector3::new(0.0, 0.0, r.range(1.0, 2.0)),
+                &ExtrudeOptions::default(),
+            )
+            .unwrap()
+            .body;
+            let es = vertical_edges(rep, b);
+            let b = fillet(rep, b, &es, rc).expect("rounded L").body;
+            (b, kind, rc)
+        }
+        Kind::Pocket => {
+            let (x, y, z) = (r.range(5.0, 7.0), r.range(4.0, 5.5), r.range(1.5, 2.5));
+            let rc = r.range(0.5, 0.9);
+            let plate = make_box(rep, &world(), x, y, z).body;
+            // tool block: rounded rectangle inset by 1 on every side, from the floor (z = -z/2 + depth) up
+            let depth = r.range(0.6, 1.0) * z * 0.6;
+            let tool_frame = Frame3 {
+                origin: Point3::new(0.0, 0.0, 0.5 * z - depth + 0.5 * z),
+                ..world()
+            };
+            let blk = make_box(rep, &tool_frame, x - 2.0, y - 2.0, z).body;
+            let es = vertical_edges(rep, blk);
+            let blk = fillet(rep, blk, &es, rc).expect("rounded tool").body;
+            let b = kw_boolean::boolean(
+                rep,
+                plate,
+                blk,
+                kw_boolean::Op::Subtract,
+                &kw_boolean::BoolOptions::default(),
+            )
+            .expect("pocket")
+            .body;
+            (b, kind, rc.min(depth))
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn build(rep: &mut BRep, r: &mut Rng) -> (BodyId, Kind, f64) {
@@ -125,6 +235,7 @@ fn build(rep: &mut BRep, r: &mut Rng) -> (BodyId, Kind, f64) {
             let (r0, r1, h) = (r.range(1.0, 2.0), r.range(0.4, 0.9), r.range(1.0, 2.5));
             (make_cone(rep, &world(), r0, r1, h).body, kind, r1.min(h))
         }
+        Kind::RoundedBlock | Kind::Slot | Kind::RoundedL | Kind::Pocket => unreachable!(),
         Kind::Turned => {
             // stepped shaft: cylinder with a collar (revolved)
             let (r0, r1, h0, h1) = (
@@ -164,7 +275,8 @@ fn build(rep: &mut BRep, r: &mut Rng) -> (BodyId, Kind, f64) {
     }
 }
 
-/// Eligible edges: manifold edges with a line or circle curve.
+/// Eligible edges: manifold edges with a line or circle curve between faces that meet at an angle
+/// (tangent-continuous seams are not edges one blends).
 fn eligible(rep: &BRep, body: BodyId) -> Vec<EdgeId> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -187,7 +299,7 @@ fn eligible(rep: &BRep, body: BodyId) -> Vec<EdgeId> {
                 {
                     // exclude cylinder / cone seams (both coedges in the same face)
                     let faces = rep.faces_around_edge(e);
-                    if faces[0] != faces[1] {
+                    if faces[0] != faces[1] && !smooth(rep, e, &faces) {
                         out.push(e);
                     }
                 }
@@ -195,6 +307,29 @@ fn eligible(rep: &BRep, body: BodyId) -> Vec<EdgeId> {
         }
     }
     out
+}
+
+/// Do the two faces of the edge continue each other tangentially along it (a seam, not an edge)?
+fn smooth(rep: &BRep, e: EdgeId, faces: &[FaceId]) -> bool {
+    use kw_nurbs::{Curve3, Surface};
+    let ed = &rep.edges[e];
+    let c = &rep.curves[ed.curve.unwrap()];
+    let p = c.point_at(0.5 * (ed.param_range.0 + ed.param_range.1));
+    let n: Vec<Vector3<f64>> = faces
+        .iter()
+        .map(|f| {
+            let face = &rep.faces[*f];
+            let s = &rep.surfaces[face.surface];
+            let r = kw_nurbs::proj::surface_param_of(s, &p, None);
+            let n = s.normal_at(r.u, r.v);
+            if face.sense == Sense::Forward {
+                n
+            } else {
+                -n
+            }
+        })
+        .collect();
+    n[0].dot(&n[1]) > 1.0 - 1e-6
 }
 
 #[derive(Default, Clone)]
@@ -210,7 +345,12 @@ struct Out {
 fn run(seed: u64) -> Out {
     let mut r = Rng::new(seed);
     let mut rep = BRep::new();
-    let (body, kind, feature) = build(&mut rep, &mut r);
+    // one part in four is a tangent-chain part (the others, and their random draws, are unchanged)
+    let (body, kind, feature) = if seed % 4 == 3 {
+        build_chain_part(&mut rep, &mut r)
+    } else {
+        build(&mut rep, &mut r)
+    };
     let mut o = Out::default();
     let v0 = rep.volume(body).unwrap();
     let mut edges = eligible(&rep, body);
@@ -223,6 +363,15 @@ fn run(seed: u64) -> Out {
     }
     let size = feature * r.range(0.08, 0.4);
     let chamfer_op = r.next() < 0.3;
+    if std::env::var("KW_BLEND_SEED").is_ok() {
+        use kw_nurbs::Curve3;
+        for e in &chosen {
+            let ed = &rep.edges[*e];
+            let c = &rep.curves[ed.curve.unwrap()];
+            let m = c.point_at(0.5 * (ed.param_range.0 + ed.param_range.1));
+            eprintln!("chosen edge {e:?} mid {m:?} kind {} size {size} chamfer {chamfer_op} feature {feature}", if matches!(c, kw_nurbs::CurveGeom::Line(_)) {"line"} else {"circle"});
+        }
+    }
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if chamfer_op {
             chamfer(&mut rep, body, &chosen, size, size * r.range(0.6, 1.0))

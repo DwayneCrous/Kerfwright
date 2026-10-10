@@ -29,25 +29,316 @@ fn oriented(fr: &Fragment, sel: &Selected) -> (Vec<He>, Vec<Vec<He>>) {
     (flip(&fr.outer), fr.holes.iter().map(flip).collect())
 }
 
+/// A halfedge of an output face: the canonical piece, its direction, and where its pcurve data comes from
+/// (selected fragment `si`, fragment edge `fe`).
+#[derive(Clone, Copy)]
+struct OutHe {
+    piece: usize,
+    fwd: bool,
+    si: usize,
+    fe: usize,
+}
+
+/// A face of the result: the selected fragment that lends it its surface, its loops and whether it was
+/// formed by merging fragments.
+struct OutFace {
+    base: usize,
+    outer: Vec<OutHe>,
+    holes: Vec<Vec<OutHe>>,
+    merged: bool,
+}
+
+fn out_cycle(w: &Work, selected: &[Selected], si: usize, cyc: &[He]) -> Vec<OutHe> {
+    let fr = &w.fragments[selected[si].fragment];
+    cyc.iter()
+        .map(|h| OutHe {
+            piece: fr.fedges[h.fe].piece,
+            fwd: h.fwd,
+            si,
+            fe: h.fe,
+        })
+        .collect()
+}
+
+/// Are two selected fragments parts of one geometric face? The same input face (cut apart by an imprint
+/// that did not separate the result) or two coplanar planar faces with the same outward normal.
+fn same_domain(w: &Work, selected: &[Selected], a: usize, b: usize, tol: f64) -> bool {
+    let (fa, fb) = (
+        &w.faces[w.fragments[selected[a].fragment].face],
+        &w.faces[w.fragments[selected[b].fragment].face],
+    );
+    if selected[a].flip != selected[b].flip {
+        return false;
+    }
+    if std::ptr::eq(fa, fb) {
+        return true;
+    }
+    use kw_nurbs::SurfaceGeom;
+    let (SurfaceGeom::Plane(pa), SurfaceGeom::Plane(pb)) = (&fa.surface, &fb.surface) else {
+        return false;
+    };
+    let sg = |f: &FaceRec| if f.sense == Sense::Forward { 1.0 } else { -1.0 };
+    let (na, nb) = (pa.frame.z * sg(fa), pb.frame.z * sg(fb));
+    na.dot(&nb) > 1.0 - 1e-12 && (pb.frame.origin - pa.frame.origin).dot(&na).abs() <= 10.0 * tol
+}
+
+/// Merge the selected fragments that are neighbours across a piece and lie in one geometric face into
+/// single faces. A group whose remaining boundary does not form simple loops (or, across different input
+/// faces, more than one loop) is left as it is.
+fn merge_fragments(w: &Work, selected: &[Selected]) -> Vec<OutFace> {
+    let n = selected.len();
+    let mut cycles: Vec<(Vec<OutHe>, Vec<Vec<OutHe>>)> = selected
+        .iter()
+        .enumerate()
+        .map(|(si, s)| {
+            let fr = &w.fragments[s.fragment];
+            let one = |cyc: &[He]| -> Vec<OutHe> {
+                let mk = |h: &He| OutHe {
+                    piece: fr.fedges[h.fe].piece,
+                    fwd: h.fwd != s.flip,
+                    si,
+                    fe: h.fe,
+                };
+                if s.flip {
+                    cyc.iter().rev().map(mk).collect()
+                } else {
+                    cyc.iter().map(mk).collect()
+                }
+            };
+            (one(&fr.outer), fr.holes.iter().map(|h| one(h)).collect())
+        })
+        .collect();
+    // piece → its uses
+    let mut uses: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+    for (si, (outer, holes)) in cycles.iter().enumerate() {
+        for cyc in std::iter::once(outer).chain(holes.iter()) {
+            for h in cyc {
+                uses.entry(h.piece).or_default().push((si, h.fwd));
+            }
+        }
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], x: usize) -> usize {
+        let mut r = x;
+        while p[r] != r {
+            r = p[r];
+        }
+        let mut c = x;
+        while p[c] != r {
+            let nx = p[c];
+            p[c] = r;
+            c = nx;
+        }
+        r
+    }
+    for u in uses.values() {
+        if let [(a, fa), (b, fb)] = u[..] {
+            if a != b && fa != fb && same_domain(w, selected, a, b, w.tol) {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                parent[ra] = rb;
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for si in 0..n {
+        let r = find(&mut parent, si);
+        groups.entry(r).or_default().push(si);
+    }
+    let mut out: Vec<OutFace> = Vec::new();
+    for (_, members) in groups {
+        let plain = |out: &mut Vec<OutFace>, cycles: &mut Vec<(Vec<OutHe>, Vec<Vec<OutHe>>)>| {
+            for &si in &members {
+                let (outer, holes) = std::mem::take(&mut cycles[si]);
+                out.push(OutFace {
+                    base: si,
+                    outer,
+                    holes,
+                    merged: false,
+                });
+            }
+        };
+        if members.len() == 1 {
+            plain(&mut out, &mut cycles);
+            continue;
+        }
+        let in_group = |si: usize| members.contains(&si);
+        // halfedges that remain: pieces used inside the group by two of its fragments vanish
+        let mut rest: Vec<OutHe> = Vec::new();
+        for &si in &members {
+            for cyc in std::iter::once(&cycles[si].0).chain(cycles[si].1.iter()) {
+                for h in cyc {
+                    let inner = uses[&h.piece].len() == 2
+                        && uses[&h.piece].iter().all(|(s2, _)| in_group(*s2));
+                    if !inner {
+                        rest.push(*h);
+                    }
+                }
+            }
+        }
+        let ends = |h: &OutHe| -> (usize, usize) {
+            let fe = &w.fragments[selected[h.si].fragment].fedges[h.fe];
+            if h.fwd {
+                (fe.v0, fe.v1)
+            } else {
+                (fe.v1, fe.v0)
+            }
+        };
+        let mut by_start: HashMap<usize, usize> = HashMap::new();
+        let mut ok = true;
+        for (k, h) in rest.iter().enumerate() {
+            if by_start.insert(ends(h).0, k).is_some() {
+                ok = false;
+            }
+        }
+        let mut loops: Vec<Vec<OutHe>> = Vec::new();
+        if ok {
+            let mut used = vec![false; rest.len()];
+            for k0 in 0..rest.len() {
+                if used[k0] {
+                    continue;
+                }
+                let mut cyc = Vec::new();
+                let mut k = k0;
+                loop {
+                    if used[k] {
+                        ok = false;
+                        break;
+                    }
+                    used[k] = true;
+                    cyc.push(rest[k]);
+                    match by_start.get(&ends(&rest[k]).1) {
+                        Some(&nk) => k = nk,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if k == k0 {
+                        break;
+                    }
+                }
+                if !ok {
+                    break;
+                }
+                loops.push(cyc);
+            }
+        }
+        let base = members[0];
+        let base_face = w.fragments[selected[base].fragment].face;
+        let one_face = members
+            .iter()
+            .all(|&si| w.fragments[selected[si].fragment].face == base_face);
+        if !ok || loops.is_empty() || (loops.len() > 1 && !one_face) {
+            plain(&mut out, &mut cycles);
+            continue;
+        }
+        let (outer, holes) = if loops.len() == 1 {
+            (loops.pop().unwrap(), Vec::new())
+        } else {
+            // one input face: the loops live in its internal parameter plane, where the outer boundary
+            // runs counter-clockwise and holes clockwise (the orientation flips for a flipped face)
+            let area = |cyc: &[OutHe]| -> f64 {
+                let fr = &w.fragments[selected[cyc[0].si].fragment];
+                let hes: Vec<He> = cyc
+                    .iter()
+                    .map(|h| He {
+                        fe: h.fe,
+                        fwd: h.fwd,
+                    })
+                    .collect();
+                let poly = crate::arrangement::cycle_poly_pub(&fr.fedges, &hes);
+                let mut a = 0.0;
+                for i in 0..poly.len() {
+                    let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+                    a += p.0 * q.1 - q.0 * p.1;
+                }
+                if selected[cyc[0].si].flip {
+                    -a
+                } else {
+                    a
+                }
+            };
+            let areas: Vec<f64> = loops.iter().map(|l| area(l)).collect();
+            let positive: Vec<usize> = (0..loops.len()).filter(|&i| areas[i] > 0.0).collect();
+            if positive.len() != 1 {
+                plain(&mut out, &mut cycles);
+                continue;
+            }
+            let o = positive[0];
+            let mut holes = Vec::new();
+            let mut outer = Vec::new();
+            for (i, l) in loops.into_iter().enumerate() {
+                if i == o {
+                    outer = l;
+                } else {
+                    holes.push(l);
+                }
+            }
+            (outer, holes)
+        };
+        out.push(OutFace {
+            base,
+            outer,
+            holes,
+            merged: true,
+        });
+    }
+    out
+}
+
 pub fn assemble(
     rep: &mut BRep,
     w: Work,
     selected: Vec<Selected>,
+    op: Op,
+    opts: &BoolOptions,
+) -> Result<BooleanResult, BooleanError> {
+    if opts.merge_faces {
+        // merging is cosmetic: whatever it cannot do, the plain assembly can
+        if let Ok(r) = assemble_with(rep, &w, &selected, op, opts, true) {
+            return Ok(r);
+        }
+    }
+    assemble_with(rep, &w, &selected, op, opts, false)
+}
+
+fn assemble_with(
+    rep: &mut BRep,
+    w: &Work,
+    selected: &[Selected],
     _op: Op,
     opts: &BoolOptions,
+    merge: bool,
 ) -> Result<BooleanResult, BooleanError> {
     let mut scratch = BRep::new();
     let mut history = ShapeHistory::default();
+    let out_faces: Vec<OutFace> = if merge {
+        merge_fragments(w, selected)
+    } else {
+        selected
+            .iter()
+            .enumerate()
+            .map(|(si, s)| {
+                let (outer, holes) = oriented(&w.fragments[s.fragment], s);
+                OutFace {
+                    base: si,
+                    outer: out_cycle(w, selected, si, &outer),
+                    holes: holes
+                        .iter()
+                        .map(|h| out_cycle(w, selected, si, h))
+                        .collect(),
+                    merged: false,
+                }
+            })
+            .collect()
+    };
 
     // ---- piece usage check
     let mut usage: BTreeMap<usize, (u32, u32)> = BTreeMap::new(); // piece → (forward uses, backward uses)
-    for s in &selected {
-        let fr = &w.fragments[s.fragment];
-        let (outer, holes) = oriented(fr, s);
-        for cyc in std::iter::once(&outer).chain(holes.iter()) {
+    for of in &out_faces {
+        for cyc in std::iter::once(&of.outer).chain(of.holes.iter()) {
             for h in cyc {
-                let pi = fr.fedges[h.fe].piece;
-                let e = usage.entry(pi).or_insert((0, 0));
+                let e = usage.entry(h.piece).or_insert((0, 0));
                 if h.fwd {
                     e.0 += 1;
                 } else {
@@ -141,10 +432,10 @@ pub fn assemble(
             (p.range.0 - g.range.0).abs() < 1e-12 && (p.range.1 - g.range.1).abs() < 1e-12;
         let origin = match g.src {
             GSrc::Orig(src) if whole_edge => {
-                Origin::Preserved(EntityRef::Edge(src_edge_id(&w, src)))
+                Origin::Preserved(EntityRef::Edge(src_edge_id(w, src)))
             }
             GSrc::Orig(src) => Origin::SplitFrom {
-                parent: EntityRef::Edge(src_edge_id(&w, src)),
+                parent: EntityRef::Edge(src_edge_id(w, src)),
                 ordinal: 0,
             },
             GSrc::Cut => Origin::New {
@@ -154,8 +445,8 @@ pub fn assemble(
         history.record(EntityRef::Edge(e), origin);
     }
 
-    // ---- shells by connectivity (union-find on fragments sharing pieces)
-    let mut parent: Vec<usize> = (0..selected.len()).collect();
+    // ---- shells by connectivity (union-find on faces sharing pieces)
+    let mut parent: Vec<usize> = (0..out_faces.len()).collect();
     fn find(p: &mut [usize], x: usize) -> usize {
         let mut r = x;
         while p[r] != r {
@@ -170,27 +461,25 @@ pub fn assemble(
         r
     }
     let mut owner: HashMap<usize, usize> = HashMap::new();
-    for (si, s) in selected.iter().enumerate() {
-        let fr = &w.fragments[s.fragment];
-        for cyc in std::iter::once(&fr.outer).chain(fr.holes.iter()) {
+    for (oi, of) in out_faces.iter().enumerate() {
+        for cyc in std::iter::once(&of.outer).chain(of.holes.iter()) {
             for h in cyc {
-                let pi = fr.fedges[h.fe].piece;
-                match owner.get(&pi) {
+                match owner.get(&h.piece) {
                     Some(&o) => {
-                        let (a, b) = (find(&mut parent, o), find(&mut parent, si));
+                        let (a, b) = (find(&mut parent, o), find(&mut parent, oi));
                         parent[a] = b;
                     }
                     None => {
-                        owner.insert(pi, si);
+                        owner.insert(h.piece, oi);
                     }
                 }
             }
         }
     }
     let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for si in 0..selected.len() {
-        let r = find(&mut parent, si);
-        comps.entry(r).or_default().push(si);
+    for oi in 0..out_faces.len() {
+        let r = find(&mut parent, oi);
+        comps.entry(r).or_default().push(oi);
     }
 
     // ---- faces
@@ -199,15 +488,18 @@ pub fn assemble(
     let lump0 = scratch.add_lump(body);
     let mut surface_of: HashMap<usize, kw_brep::SurfaceId> = HashMap::new();
     let mut frag_count: HashMap<usize, u32> = HashMap::new();
-    for s in &selected {
-        *frag_count.entry(w.fragments[s.fragment].face).or_default() += 1;
+    for of in &out_faces {
+        *frag_count
+            .entry(w.fragments[selected[of.base].fragment].face)
+            .or_default() += 1;
     }
     let mut ordinal: HashMap<usize, u32> = HashMap::new();
     for (_, members) in comps {
         let shell = scratch.add_shell(lump0);
         shells.push(shell);
-        for si in members {
-            let s = &selected[si];
+        for oi in members {
+            let of = &out_faces[oi];
+            let s = &selected[of.base];
             let fr = &w.fragments[s.fragment];
             let face = &w.faces[fr.face];
             let surf = *surface_of
@@ -219,19 +511,22 @@ pub fn assemble(
                 face.sense
             };
             let nf = scratch.add_face(shell, surf, sense);
-            let (outer, holes) = oriented(fr, s);
-            for (kind, cyc) in std::iter::once((LoopKind::Outer, &outer))
-                .chain(holes.iter().map(|h| (LoopKind::Inner, h)))
+            for (kind, cyc) in std::iter::once((LoopKind::Outer, &of.outer))
+                .chain(of.holes.iter().map(|h| (LoopKind::Inner, h)))
             {
                 let mut specs = Vec::new();
                 for h in cyc {
-                    let fe = &fr.fedges[h.fe];
-                    let pi = fe.piece;
-                    let piece = &w.pieces[pi];
-                    let pc = pcurve_for_use(&w, fe, piece, face)?;
+                    let src = &w.fragments[selected[h.si].fragment];
+                    let fe = &src.fedges[h.fe];
+                    let piece = &w.pieces[h.piece];
+                    let pc = if src.face == fr.face {
+                        pcurve_for_use(w, fe, piece, face)?
+                    } else {
+                        pcurve_on_face(w, piece, face)?
+                    };
                     let pcid = scratch.add_curve(pc);
                     specs.push(CoedgeSpec {
-                        edge: emap[&pi],
+                        edge: emap[&h.piece],
                         sense: if h.fwd {
                             Sense::Forward
                         } else {
@@ -242,7 +537,9 @@ pub fn assemble(
                 }
                 scratch.add_loop(nf, kind, &specs);
             }
-            let origin = if fr.whole && !s.flip {
+            let origin = if of.merged {
+                Origin::Modified(EntityRef::Face(face.id))
+            } else if fr.whole && !s.flip {
                 Origin::Preserved(EntityRef::Face(face.id))
             } else if frag_count[&fr.face] > 1 {
                 let o = ordinal.entry(fr.face).or_default();
@@ -270,7 +567,7 @@ pub fn assemble(
     }
 
     // ---- lumps: positive shells are lumps; void shells go into the lump that contains them
-    arrange_lumps(&mut scratch, body, lump0, &shells)?;
+    let total_volume = arrange_lumps(&mut scratch, body, lump0, &shells)?;
 
     // ---- verification
     if opts.verify {
@@ -280,9 +577,8 @@ pub fn assemble(
                 &errs[..errs.len().min(3)]
             )));
         }
-        let vol = scratch
-            .volume(body)
-            .ok_or_else(|| BooleanError::Invalid("volume not computable".into()))?;
+        // (the shell volumes were integrated once, by the lump arrangement)
+        let vol = total_volume;
         if vol.is_nan() || vol <= 0.0 {
             return Err(BooleanError::Invalid(format!("non-positive volume {vol}")));
         }
@@ -357,12 +653,39 @@ fn pcurve_for_use(
     )
 }
 
+/// pcurve of a canonical piece on `face`, which is a different input face than the one the piece was
+/// traced on (two coplanar faces merged into one).
+fn pcurve_on_face(w: &Work, piece: &Piece, face: &FaceRec) -> Result<CurveGeom, BooleanError> {
+    let g = &w.gedges[piece.gedge];
+    let curve = g
+        .curve
+        .as_ref()
+        .ok_or_else(|| BooleanError::Topology("merged degenerate piece".into()))?;
+    let q = kw_nurbs::proj::surface_param_of(&face.surface, &curve.point_at(piece.range.0), None);
+    let dev = (0..=16)
+        .map(|i| {
+            let t = piece.range.0 + (piece.range.1 - piece.range.0) * i as f64 / 16.0;
+            kw_nurbs::proj::surface_param_of(&face.surface, &curve.point_at(t), Some((q.u, q.v)))
+                .distance
+        })
+        .fold(0.0f64, f64::max);
+    let tol = (1e-9 * (1.0 + w.scale)).max(3.0 * dev);
+    if tol > 1e-6 * (1.0 + w.scale) {
+        return Err(BooleanError::Unsupported(
+            "merged edge does not lie on the face surface",
+        ));
+    }
+    pcurve_on(&face.surface, curve, piece.range, Some((q.u, q.v)), tol).ok_or(
+        BooleanError::Unsupported("could not express a pcurve on a merged face"),
+    )
+}
+
 fn arrange_lumps(
     rep: &mut BRep,
     body: BodyId,
     lump0: kw_brep::LumpId,
     shells: &[ShellId],
-) -> Result<(), BooleanError> {
+) -> Result<f64, BooleanError> {
     let vols: Vec<f64> = shells
         .iter()
         .map(|s| {
@@ -421,7 +744,7 @@ fn arrange_lumps(
         rep.lumps[l].shells.push(shells[v]);
         rep.shells[shells[v]].lump = l;
     }
-    Ok(())
+    Ok(vols.iter().sum())
 }
 
 #[allow(dead_code)]

@@ -33,6 +33,7 @@ pub fn classify_fragments(_rep: &BRep, w: &Work) -> Result<Vec<FragClass>, Boole
                 uv_lo: f.uv_lo,
                 uv_hi: f.uv_hi,
                 bbox: f.bbox,
+                poly_err: 0.0,
             })
             .collect();
         if prepared.is_empty() {

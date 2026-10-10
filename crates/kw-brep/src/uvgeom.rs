@@ -14,6 +14,31 @@ pub struct UvLoop {
     pub points: Vec<UV>,
 }
 
+/// Largest distance (uv) between the pcurve and its `n`-segment polygon, at the segment midpoints.
+fn polygon_deviation(pc: &CurveGeom, t0: f64, t1: f64, n: usize) -> f64 {
+    let at = |i: f64| {
+        let q = pc.point_at(t0 + (t1 - t0) * i / n as f64);
+        (q.x, q.y)
+    };
+    (0..n).fold(0.0f64, |w, i| {
+        let (a, b, m) = (at(i as f64), at(i as f64 + 1.0), at(i as f64 + 0.5));
+        w.max((m.0 - 0.5 * (a.0 + b.0)).hypot(m.1 - 0.5 * (a.1 + b.1)))
+    })
+}
+
+/// Samples of a pcurve segment: the default count times `density`; a free-form pcurve gets as many more
+/// as keep the polygon within 1e-6 of it (a coarse polygon makes the face's boundary disagree with its
+/// neighbours' by more than a point test can tell).
+fn polygon_samples(pc: &CurveGeom, t0: f64, t1: f64, density: usize) -> usize {
+    let mut n = samples_for(pc, t0, t1) * density.max(1);
+    if !matches!(pc, CurveGeom::Line(_)) {
+        while n < 8192 && polygon_deviation(pc, t0, t1, n) > 1e-6 {
+            n *= 2;
+        }
+    }
+    n
+}
+
 /// Number of samples for a pcurve segment.
 fn samples_for(c: &CurveGeom, a: f64, b: f64) -> usize {
     match c {
@@ -30,7 +55,7 @@ impl BRep {
         let c = self.coedges.get(co)?;
         let pc = self.curves.get(c.pcurve?)?;
         let (t0, t1) = self.coedge_param_range(co)?;
-        let n = samples_for(pc, t0, t1) * density.max(1);
+        let n = polygon_samples(pc, t0, t1, density);
         Some(
             (0..=n)
                 .map(|i| {
@@ -39,6 +64,35 @@ impl BRep {
                 })
                 .collect(),
         )
+    }
+
+    /// Largest distance (in uv) between a boundary pcurve of the face and the polyline that
+    /// [`BRep::loop_uv`] draws for it at `density`: the width of the band in which the polygon and the true
+    /// boundary can disagree.
+    pub fn face_poly_error(&self, f: FaceId, density: usize) -> f64 {
+        let mut worst = 0.0f64;
+        let Some(face) = self.faces.get(f) else {
+            return 0.0;
+        };
+        for lp in &face.loops {
+            for co in self.loop_coedges(*lp) {
+                let Some(c) = self.coedges.get(co) else {
+                    continue;
+                };
+                let Some(pc) = c.pcurve.and_then(|k| self.curves.get(k)) else {
+                    continue;
+                };
+                if matches!(pc, CurveGeom::Line(_)) {
+                    continue;
+                }
+                let Some((t0, t1)) = self.coedge_param_range(co) else {
+                    continue;
+                };
+                let n = polygon_samples(pc, t0, t1, density);
+                worst = worst.max(polygon_deviation(pc, t0, t1, n));
+            }
+        }
+        worst
     }
 
     /// The loop as a closed polyline in uv (last point not repeated).

@@ -95,6 +95,8 @@ pub struct GEdge {
     pub v_end: usize,
     /// Interior split points `(param, vertex)`.
     pub splits: Vec<(f64, usize)>,
+    /// A cut along which the two surfaces only touch.
+    pub tangent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +122,8 @@ pub struct CutSeg {
     pub fb: usize,
     pub pcurve_a: CurveGeom,
     pub pcurve_b: CurveGeom,
+    /// The two surfaces touch (rather than cross) along this curve.
+    pub tangent: bool,
 }
 
 #[derive(Debug, Default)]
@@ -222,6 +226,12 @@ pub struct Work {
     pub gedges: Vec<GEdge>,
     pub pieces: Vec<Piece>,
     pub fragments: Vec<crate::arrangement::Fragment>,
+    /// The cut network looks incomplete (a slit, an odd junction inside a face): the result must be
+    /// verified independently before it is trusted.
+    pub suspect: bool,
+    /// Points just beside the intersection curves and near suspicious junctions, used to verify a
+    /// suspect result by ray casting.
+    pub probes: Vec<Point3<f64>>,
 }
 
 impl Work {
@@ -400,6 +410,8 @@ impl Work {
             gedges: Vec::new(),
             pieces: Vec::new(),
             fragments: Vec::new(),
+            suspect: false,
+            probes: Vec::new(),
         })
     }
 }

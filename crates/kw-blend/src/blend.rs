@@ -188,10 +188,12 @@ enum Sweep {
         dir: Vector3<f64>,
         length: f64,
     },
-    /// Circular rim: revolve about the axis.
+    /// Circular rim: revolve about the axis; a partial arc (`span` = edge parameter range) is revolved
+    /// over its angular extent only.
     Rim {
         axis_origin: Point3<f64>,
         axis: Vector3<f64>,
+        span: Option<(f64, f64)>,
     },
 }
 
@@ -210,6 +212,9 @@ pub(crate) struct Section {
     end_planes: [Option<(Point3<f64>, Vector3<f64>)>; 2],
     /// Cross-sections of the two faces when at least one is a cylinder (straight edge, axis parallel to it).
     curved: Option<[Prof2; 2]>,
+    /// Does a tangent-continuous edge continue the edge at the start / end of the sweep? The tool then ends
+    /// exactly there (no extension, no trimming): the neighbouring tool's cap coincides with it.
+    chain_end: [bool; 2],
 }
 
 /// Cross-section of a face in the 2D frame of a section (origin at the edge point).
@@ -244,6 +249,184 @@ fn is_axisym(s: &SurfaceGeom) -> Option<(Point3<f64>, Vector3<f64>)> {
         SurfaceGeom::Cone(c) => Some((c.frame.origin, c.frame.z)),
         _ => None,
     }
+}
+
+/// Direction of `e` leaving `vertex` (unit), for a straight or circular edge.
+fn leaving_dir(rep: &BRep, e: EdgeId, vertex: VertexId) -> Option<Vector3<f64>> {
+    let edge = rep.edges.get(e)?;
+    let curve = rep.curves.get(edge.curve?)?;
+    let (t0, t1) = edge.param_range;
+    let vp = rep.vertices[vertex].point;
+    let t = if (curve.point_at(t0) - vp).norm() <= (curve.point_at(t1) - vp).norm() {
+        t0
+    } else {
+        t1
+    };
+    let d = curve.derivative(t);
+    if d.norm() < 1e-300 {
+        return None;
+    }
+    let d = d.normalize();
+    let inward = curve.point_at(0.5 * (t0 + t1)) - vp;
+    Some(if d.dot(&inward) >= 0.0 { d } else { -d })
+}
+
+/// The edge that continues `e` tangentially through `vertex`: at a vertex of three edges, the edge that
+/// shares one face with `e`, leaves in the opposite direction, and closes a tangent-continuous (smooth)
+/// third edge between the two remaining faces. The rounded-rectangle corner: top line, top arc and the
+/// vertical seam between the side plane and the corner cylinder.
+pub(crate) fn chain_neighbor(
+    rep: &BRep,
+    body: BodyId,
+    e: EdgeId,
+    vertex: VertexId,
+) -> Option<EdgeId> {
+    let mut inc: Vec<EdgeId> = Vec::new();
+    for (eid, ed) in rep.edges.iter() {
+        if (ed.start == vertex || ed.end == vertex) && ed.start != ed.end {
+            inc.push(eid);
+        }
+    }
+    if inc.len() != 3 || !inc.contains(&e) {
+        return None;
+    }
+    let body_faces = rep.body_faces(body);
+    let ring = |x: EdgeId| -> Option<[FaceId; 2]> {
+        let r = rep.faces_around_edge(x);
+        (r.len() == 2 && r[0] != r[1] && r.iter().all(|f| body_faces.contains(f)))
+            .then(|| [r[0], r[1]])
+    };
+    let fe = ring(e)?;
+    let de = leaving_dir(rep, e, vertex)?;
+    let vp = rep.vertices[vertex].point;
+    for &o in inc.iter().filter(|x| **x != e) {
+        let Some(fo) = ring(o) else { continue };
+        let shared: Vec<FaceId> = fe.iter().copied().filter(|f| fo.contains(f)).collect();
+        if shared.len() != 1 {
+            continue;
+        }
+        let b = *fe.iter().find(|f| **f != shared[0])?;
+        let c = *fo.iter().find(|f| **f != shared[0])?;
+        let Some(d_o) = leaving_dir(rep, o, vertex) else {
+            continue;
+        };
+        if de.dot(&d_o) > -1.0 + 1e-6 {
+            continue;
+        }
+        let (nb, nc) = (face_normal(rep, b, &vp), face_normal(rep, c, &vp));
+        if nb.dot(&nc) > 1.0 - 1e-6 {
+            return Some(o);
+        }
+    }
+    None
+}
+
+/// The tangent chain through `edges`: `edges` plus every edge reached from them across tangent-continuous
+/// junctions (see [`fillet`]). The order is the order of discovery. This is what a fillet or chamfer of
+/// `edges` blends; a UI can use it to show the selection that a click will really affect.
+pub fn tangent_chain(rep: &BRep, body: BodyId, edges: &[EdgeId]) -> Vec<EdgeId> {
+    expand_chains(rep, body, edges)
+}
+
+/// The two faces of `e` in the order the blend analysis uses for them (the radial ring).
+fn face_pair(rep: &BRep, e: EdgeId) -> Option<[FaceId; 2]> {
+    let ring = rep.radial_ring(e);
+    (ring.len() == 2).then(|| {
+        [
+            rep.loops[rep.coedges[ring[0]].owner_loop].face,
+            rep.loops[rep.coedges[ring[1]].owner_loop].face,
+        ]
+    })
+}
+
+/// `edges` plus every edge reached from them through tangent-continuous junctions, each with a flag that
+/// tells whether its two faces are in the opposite order to the ones of the edge it was reached from
+/// (so that "the first distance of a chamfer" stays on the same side of the chain).
+pub(crate) fn expand_chains_oriented(
+    rep: &BRep,
+    body: BodyId,
+    edges: &[EdgeId],
+) -> Vec<(EdgeId, bool)> {
+    let mut out: Vec<(EdgeId, bool)> = Vec::new();
+    for &root in edges {
+        if out.iter().any(|(e, _)| *e == root) {
+            continue;
+        }
+        let start = out.len();
+        out.push((root, false));
+        let mut k = start;
+        while k < out.len() {
+            let (e, flip) = out[k];
+            k += 1;
+            let Some(ed) = rep.edges.get(e) else { continue };
+            for v in [ed.start, ed.end] {
+                let Some(n) = chain_neighbor(rep, body, e, v) else {
+                    continue;
+                };
+                if out.iter().any(|(x, _)| *x == n) {
+                    continue;
+                }
+                let (Some(fe), Some(fnn)) = (face_pair(rep, e), face_pair(rep, n)) else {
+                    out.push((n, flip));
+                    continue;
+                };
+                let Some(shared) = fe.iter().position(|f| fnn.contains(f)) else {
+                    out.push((n, flip));
+                    continue;
+                };
+                let shared_face = fe[shared];
+                let in_n = if fnn[0] == shared_face { 0 } else { 1 };
+                out.push((n, flip ^ (in_n != shared)));
+            }
+        }
+    }
+    out
+}
+
+/// `edges` plus every edge reached from them through tangent-continuous junctions.
+pub(crate) fn expand_chains(rep: &BRep, body: BodyId, edges: &[EdgeId]) -> Vec<EdgeId> {
+    expand_chains_oriented(rep, body, edges)
+        .into_iter()
+        .map(|(e, _)| e)
+        .collect()
+}
+
+/// The planar face that closes `e` at `vertex` (the one face of the body there other than the two of `e`).
+fn closing_plane(
+    rep: &BRep,
+    body: BodyId,
+    e: EdgeId,
+    faces: [FaceId; 2],
+    vertex: VertexId,
+) -> Result<(Point3<f64>, Vector3<f64>), BlendError> {
+    let body_faces = rep.body_faces(body);
+    let mut third: Vec<FaceId> = Vec::new();
+    for (eid, other) in rep.edges.iter() {
+        if (other.start == vertex || other.end == vertex) && eid != e {
+            for f in rep.faces_around_edge(eid) {
+                if f != faces[0] && f != faces[1] && body_faces.contains(&f) && !third.contains(&f)
+                {
+                    third.push(f);
+                }
+            }
+        }
+    }
+    if third.len() != 1 {
+        return Err(err(
+            e,
+            BlendErrorKind::Unsupported("edge end vertices must join exactly three faces"),
+        ));
+    }
+    let SurfaceGeom::Plane(_) = &rep.surfaces[rep.faces[third[0]].surface] else {
+        return Err(err(
+            e,
+            BlendErrorKind::Unsupported(
+                "edge ends must be closed by planar faces (or continue tangentially)",
+            ),
+        ));
+    };
+    let vp = rep.vertices[vertex].point;
+    Ok((vp, face_normal(rep, third[0], &vp)))
 }
 
 pub(crate) fn analyse(rep: &BRep, body: BodyId, e: EdgeId) -> Result<Section, BlendError> {
@@ -309,39 +492,16 @@ pub(crate) fn analyse(rep: &BRep, body: BodyId, e: EdgeId) -> Result<Section, Bl
                 ));
             }
             // the face closing each end must be a plane; if it is not perpendicular to the edge the tool is
-            // trimmed against it
+            // trimmed against it. An end where a tangent-continuous edge goes on is a chain junction: the
+            // tool ends exactly there.
             let mut end_planes: [Option<(Point3<f64>, Vector3<f64>)>; 2] = [None, None];
+            let mut chain_v = [false; 2];
             for (k, vtx) in [edge.start, edge.end].into_iter().enumerate() {
-                let mut third: Vec<FaceId> = Vec::new();
-                for (eid, other) in rep.edges.iter() {
-                    if (other.start == vtx || other.end == vtx) && eid != e {
-                        for f in rep.faces_around_edge(eid) {
-                            if f != faces[0]
-                                && f != faces[1]
-                                && body_faces.contains(&f)
-                                && !third.contains(&f)
-                            {
-                                third.push(f);
-                            }
-                        }
-                    }
+                if chain_neighbor(rep, body, e, vtx).is_some() {
+                    chain_v[k] = true;
+                    continue;
                 }
-                if third.len() != 1 {
-                    return Err(err(
-                        e,
-                        BlendErrorKind::Unsupported(
-                            "edge end vertices must join exactly three faces",
-                        ),
-                    ));
-                }
-                let SurfaceGeom::Plane(_) = &rep.surfaces[rep.faces[third[0]].surface] else {
-                    return Err(err(
-                        e,
-                        BlendErrorKind::Unsupported("edge ends must be closed by planar faces"),
-                    ));
-                };
-                let vp = rep.vertices[vtx].point;
-                let n3 = face_normal(rep, third[0], &vp);
+                let (vp, n3) = closing_plane(rep, body, e, [faces[0], faces[1]], vtx)?;
                 if n3.cross(&d_curve).norm() > 1e-9 {
                     end_planes[k] = Some((vp, n3));
                 }
@@ -403,6 +563,11 @@ pub(crate) fn analyse(rep: &BRep, body: BodyId, e: EdgeId) -> Result<Section, Bl
                 },
                 end_planes,
                 curved,
+                chain_end: if origin == pa {
+                    chain_v
+                } else {
+                    [chain_v[1], chain_v[0]]
+                },
             })
         }
         CurveGeom::Circle(c) => {
@@ -425,11 +590,34 @@ pub(crate) fn analyse(rep: &BRep, body: BodyId, e: EdgeId) -> Result<Section, Bl
                     ),
                 ));
             }
-            if (t1 - t0 - TAU).abs() > 1e-9 {
-                return Err(err(
-                    e,
-                    BlendErrorKind::Unsupported("partial circular edges are not supported"),
-                ));
+            let full = (t1 - t0 - TAU).abs() < 1e-9;
+            // a partial arc ends at a tangent junction or at a plane perpendicular to it (through the axis)
+            let mut chain_end = [false; 2];
+            if !full {
+                for (k, tt) in [t0, t1].into_iter().enumerate() {
+                    let pe = curve.point_at(tt);
+                    let vtx = if (rep.vertices[edge.start].point - pe).norm()
+                        <= (rep.vertices[edge.end].point - pe).norm()
+                    {
+                        edge.start
+                    } else {
+                        edge.end
+                    };
+                    if chain_neighbor(rep, body, e, vtx).is_some() {
+                        chain_end[k] = true;
+                        continue;
+                    }
+                    let (_, n3) = closing_plane(rep, body, e, [faces[0], faces[1]], vtx)?;
+                    let tangent = curve.derivative(tt).normalize();
+                    if n3.cross(&tangent).norm() > 1e-6 {
+                        return Err(err(
+                            e,
+                            BlendErrorKind::Unsupported(
+                                "a partial circular edge must end at a tangent junction or at a plane perpendicular to it",
+                            ),
+                        ));
+                    }
+                }
             }
             let radial = (p - c.frame.origin) - axis * (p - c.frame.origin).dot(&axis);
             let x = radial.normalize();
@@ -446,9 +634,11 @@ pub(crate) fn analyse(rep: &BRep, body: BodyId, e: EdgeId) -> Result<Section, Bl
                 sweep: Sweep::Rim {
                     axis_origin: c.frame.origin,
                     axis,
+                    span: (!full).then_some((t0, t1)),
                 },
                 end_planes: [None, None],
                 curved: None,
+                chain_end,
             })
         }
         _ => Err(err(
@@ -742,18 +932,17 @@ fn build_tool(
     let tool = match &sec.sweep {
         Sweep::Line { start, dir, length } => {
             // concave blends *add* the tool, so it must not extend past the edge ends; convex ones subtract
-            // it, where extending clear of the end faces avoids coincident faces
+            // it, where extending clear of the end faces avoids coincident faces. A chain junction is not an
+            // end face: the tool stops exactly there.
             let ext = if sec.convex { (0.5 * size).max(m) } else { 0.0 };
-            let prof_frame = Frame3 {
-                origin: *start - *dir * ext - sec.p.coords + sec.p.coords,
-                ..frame
-            };
+            let ext0 = if sec.chain_end[0] { 0.0 } else { ext };
+            let ext1 = if sec.chain_end[1] { 0.0 } else { ext };
             // translate the profile (built at the edge midpoint) to the start of the extended edge
-            let shift = (*start - *dir * ext) - project_to_line(&sec.p, start, dir);
+            let shift = (*start - *dir * ext0) - project_to_line(&sec.p, start, dir);
             let moved = shift_loop(&loop_, shift);
             let prof = Profile::new(
                 Frame3 {
-                    origin: prof_frame.origin,
+                    origin: *start - *dir * ext0,
                     ..frame
                 },
                 moved,
@@ -761,12 +950,16 @@ fn build_tool(
             extrude(
                 rep,
                 &prof,
-                *dir * (*length + 2.0 * ext),
+                *dir * (*length + ext0 + ext1),
                 &ExtrudeOptions::default(),
             )
             .map_err(|er| err(e, BlendErrorKind::Model(er)))?
         }
-        Sweep::Rim { axis_origin, axis } => {
+        Sweep::Rim {
+            axis_origin,
+            axis,
+            span,
+        } => {
             // profile plane = meridian plane through the section point
             let o = *axis_origin + *axis * (sec.p - *axis_origin).dot(axis);
             let f = Frame3 {
@@ -776,8 +969,41 @@ fn build_tool(
                 z: sec.x.cross(axis),
             };
             // the polygon was built with y = axis already
-            let prof = Profile::new(f, loop_);
-            revolve(rep, &prof, o, *axis, TAU).map_err(|er| err(e, BlendErrorKind::Model(er)))?
+            match span {
+                None => {
+                    let prof = Profile::new(f, loop_);
+                    revolve(rep, &prof, o, *axis, TAU)
+                        .map_err(|er| err(e, BlendErrorKind::Model(er)))?
+                }
+                Some((t0, t1)) => {
+                    // the section was taken at the middle of the arc: rotate it back to the start of the sweep,
+                    // extended past ends that are closed by a plane (convex tools only)
+                    let radius = (sec.p - o).norm().max(1e-300);
+                    let ext = if sec.convex {
+                        ((0.5 * size).max(m) / radius).min(0.5)
+                    } else {
+                        0.0
+                    };
+                    let a0 = if sec.chain_end[0] { 0.0 } else { ext };
+                    let a1 = if sec.chain_end[1] { 0.0 } else { ext };
+                    let back = -(0.5 * (t1 - t0)) - a0;
+                    let rot = kw_math::Transform3::translation(-o.coords)
+                        .then(&kw_math::Transform3::rotation(*axis, back))
+                        .then(&kw_math::Transform3::translation(o.coords));
+                    let x = rot.apply_vector(&sec.x);
+                    let prof = Profile::new(
+                        Frame3 {
+                            origin: o,
+                            x,
+                            y: *axis,
+                            z: x.cross(axis),
+                        },
+                        transform_loop(&loop_, &rot),
+                    );
+                    revolve(rep, &prof, o, *axis, (t1 - t0) + a0 + a1)
+                        .map_err(|er| err(e, BlendErrorKind::Model(er)))?
+                }
+            }
         }
     };
     let tool_body = trim_to_end_planes(rep, body, e, &sec, tool.body)?;
@@ -835,6 +1061,14 @@ fn build_var_tool(
         return Err(err(e, BlendErrorKind::Size("radii must be positive")));
     }
     let op = if sec.convex { Op::Subtract } else { Op::Union };
+    if sec.chain_end.iter().any(|c| *c) {
+        return Err(err(
+            e,
+            BlendErrorKind::Unsupported(
+                "a radius law is not applied to an edge in a tangent chain",
+            ),
+        ));
+    }
     match &sec.sweep {
         Sweep::Line { start, dir, length } => {
             let (start, dir, length) = (*start, *dir, *length);
@@ -875,7 +1109,17 @@ fn build_var_tool(
             let tool_body = trim_to_end_planes(rep, body, e, sec, tool.body)?;
             Ok((tool_body, op))
         }
-        Sweep::Rim { axis_origin, axis } => {
+        Sweep::Rim {
+            axis_origin,
+            axis,
+            span,
+        } => {
+            if span.is_some() {
+                return Err(err(
+                    e,
+                    BlendErrorKind::Unsupported("a radius law needs a full circular edge"),
+                ));
+            }
             if (law.at(0.0) - law.at(1.0)).abs() > 1e-9 * rmax {
                 return Err(err(
                     e,
@@ -962,6 +1206,101 @@ fn shift_loop(l: &ProfileLoop, shift: Vector3<f64>) -> ProfileLoop {
     )
 }
 
+/// Unite the tools of tangent-connected edges (in chain order, so each touches the ones before it).
+fn unite_chains(
+    rep: &mut BRep,
+    body: BodyId,
+    tools: Vec<(EdgeId, BodyId, Op, kw_math::Aabb)>,
+    tool_face_edge: &mut std::collections::HashMap<FaceId, EntityRef>,
+) -> Result<Vec<(EdgeId, BodyId, Op, kw_math::Aabb)>, BlendError> {
+    let index_of = |e: EdgeId| tools.iter().position(|t| t.0 == e);
+    let mut done = vec![false; tools.len()];
+    let mut out: Vec<(EdgeId, BodyId, Op, kw_math::Aabb)> = Vec::new();
+    for start in 0..tools.len() {
+        if done[start] {
+            continue;
+        }
+        // breadth-first along the chain
+        let mut order = vec![start];
+        done[start] = true;
+        let mut k = 0;
+        while k < order.len() {
+            let e = tools[order[k]].0;
+            k += 1;
+            let Some(ed) = rep.edges.get(e) else { continue };
+            for v in [ed.start, ed.end] {
+                if let Some(n) = chain_neighbor(rep, body, e, v) {
+                    if let Some(i) = index_of(n) {
+                        if !done[i] {
+                            done[i] = true;
+                            order.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        if order.len() == 1 {
+            out.push(tools[start]);
+            continue;
+        }
+        let (e0, first, op, mut bb) = tools[order[0]];
+        for &i in &order[1..] {
+            if tools[i].2 != op {
+                return Err(err(
+                    tools[i].0,
+                    BlendErrorKind::Unsupported(
+                        "a tangent chain must be convex or concave all along",
+                    ),
+                ));
+            }
+            bb.min = bb.min.inf(&tools[i].3.min);
+            bb.max = bb.max.sup(&tools[i].3.max);
+        }
+        // The tools end in coincident caps: gluing them along those is exact. (A Boolean union of the same
+        // tools would also work but leaves numerical slivers around the tangent junctions in some cases;
+        // it remains the fallback.)
+        let bodies: Vec<BodyId> = order.iter().map(|&i| tools[i].1).collect();
+        let mut acc = first;
+        let glued_result = crate::glue::glue_tools(rep, &bodies);
+        if std::env::var("KW_BLEND_DEBUG").is_ok() {
+            eprintln!("GLUE {} tools -> {}", bodies.len(), glued_result.is_some());
+        }
+        if let Some((glued, origin)) = glued_result {
+            for (nf, old) in origin {
+                if let Some(l) = tool_face_edge.get(&old).cloned() {
+                    tool_face_edge.insert(nf, l);
+                }
+            }
+            acc = glued;
+        } else {
+            for &i in &order[1..] {
+                let (ei, ti, _, _) = tools[i];
+                let res = boolean(rep, acc, ti, Op::Union, &BoolOptions::default())
+                    .map_err(|be| err(ei, BlendErrorKind::Boolean(be)))?;
+                // the faces of the united tool keep the label of the edge they were generated for
+                for (k, o) in &res.history.origins {
+                    let EntityRef::Face(nf) = k else { continue };
+                    let src = match o {
+                        Origin::Preserved(EntityRef::Face(f))
+                        | Origin::Modified(EntityRef::Face(f))
+                        | Origin::SplitFrom {
+                            parent: EntityRef::Face(f),
+                            ..
+                        } => tool_face_edge.get(f).cloned(),
+                        _ => None,
+                    };
+                    if let Some(l) = src {
+                        tool_face_edge.insert(*nf, l);
+                    }
+                }
+                acc = res.body;
+            }
+        }
+        out.push((e0, acc, op, bb));
+    }
+    Ok(out)
+}
+
 fn run(
     rep: &mut BRep,
     body: BodyId,
@@ -972,13 +1311,44 @@ fn run(
         Style::Fillet(_) | Style::Law(_) => "fillet",
         Style::Chamfer(..) => "chamfer",
     };
+    // a blend follows a tangent chain to its end: the neighbour of a blended edge across a tangent
+    // junction is blended too. A chamfer keeps its first distance on the same side of the chain.
+    let propagate = !matches!(style, Style::Law(_));
+    let oriented: Vec<(EdgeId, bool)> = if propagate {
+        expand_chains_oriented(rep, body, edges)
+    } else {
+        edges.iter().map(|e| (*e, false)).collect()
+    };
+    let expanded: Vec<EdgeId> = oriented.iter().map(|(e, _)| *e).collect();
+    let edges = &expanded[..];
+    let style_of = |e: EdgeId| -> Style<'_> {
+        match style {
+            Style::Chamfer(d1, d2) if oriented.iter().any(|(x, f)| *x == e && *f) => {
+                Style::Chamfer(d2, d1)
+            }
+            other => other,
+        }
+    };
+    for &e in edges {
+        let Some(ed) = rep.edges.get(e) else { continue };
+        for v in [ed.start, ed.end] {
+            if chain_neighbor(rep, body, e, v).is_some_and(|n| !edges.contains(&n)) {
+                return Err(err(
+                    e,
+                    BlendErrorKind::Unsupported(
+                        "the tangent neighbour of the edge is not blended (it cannot be left out of a chain)",
+                    ),
+                ));
+            }
+        }
+    }
     // every tool is derived from the *original* body, so adjacent blends are independent of order and
     // meet in a mitre
     let mut tools: Vec<(EdgeId, BodyId, Op, kw_math::Aabb)> = Vec::new();
     let mut tool_face_edge: std::collections::HashMap<FaceId, EntityRef> =
         std::collections::HashMap::new();
     for &e in edges {
-        let (tool, op) = build_tool(rep, body, e, style)?;
+        let (tool, op) = build_tool(rep, body, e, style_of(e))?;
         for f in rep.body_faces(tool) {
             tool_face_edge.insert(f, EntityRef::Edge(e));
         }
@@ -988,6 +1358,9 @@ fn run(
         bb.max += Vector3::repeat(pad);
         tools.push((e, tool, op, bb));
     }
+    // The tools of one tangent chain are united into a single tool first: their end caps coincide, which is
+    // exact and clean between two tools but would leave coincident walls on the body if applied one by one.
+    let tools = unite_chains(rep, body, tools, &mut tool_face_edge)?;
     // Tools whose boxes are disjoint (and of the same operation) are applied together in one Boolean:
     // the cost of a Boolean is dominated by the faces of the body, which are processed once per batch.
     let mut batches: Vec<(Op, Vec<usize>)> = Vec::new();
@@ -1015,7 +1388,7 @@ fn run(
                 let mut hist = ShapeHistory::default();
                 for m in &members {
                     let e = tools[*m].0;
-                    let (t2, op2) = build_tool(rep, body, e, style)?;
+                    let (t2, op2) = build_tool(rep, body, e, style_of(e))?;
                     for f in rep.body_faces(t2) {
                         tool_face_edge.insert(f, EntityRef::Edge(e));
                     }
@@ -1129,6 +1502,13 @@ fn relabel_tool_faces(
 }
 
 /// Round each edge of `body` with a constant `radius`.
+///
+/// **Tangent chains.** A blend follows the edges that continue each other tangentially (the top outline
+/// of a rounded-rectangle block: straight edges and corner arcs): naming one edge blends the whole
+/// chain, as in other CAD systems ([`tangent_chain`] returns it). The blends of a chain meet in exact
+/// caps at the junctions, so the result is smooth there; chain ends are handled like any edge end (an end
+/// face perpendicular to the chain, or the mitre with an adjacent selected edge). Straight edges and
+/// partial or full circular arcs are supported; a chain may mix convex corners and concave ones.
 pub fn fillet(
     rep: &mut BRep,
     body: BodyId,

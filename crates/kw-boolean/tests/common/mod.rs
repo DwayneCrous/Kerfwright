@@ -250,3 +250,62 @@ pub fn gen_case(seed: u64) -> Case {
         }
     }
 }
+
+/// Independent check of a Boolean result: random points are classified against both operands and the
+/// result with the ray-casting index, which does not depend on the Boolean's arrangement. Points near
+/// any boundary are skipped.
+pub fn sample_check(
+    rep: &BRep,
+    a: BodyId,
+    b: BodyId,
+    res: Option<BodyId>,
+    op: kw_boolean::Op,
+    seed: u64,
+) -> Option<String> {
+    let (ia, ib) = (SolidIndex::new(rep, a)?, SolidIndex::new(rep, b)?);
+    let ir = match res {
+        Some(r) => Some(SolidIndex::new(rep, r)?),
+        None => None,
+    };
+    let bb = rep.body_bbox(a).union(&rep.body_bbox(b));
+    let mut rng = Rng::new(seed ^ 0x5eed_5eed);
+    let mut checked = 0;
+    for _ in 0..400 {
+        let p = Point3::new(
+            bb.min.x + (bb.max.x - bb.min.x) * rng.range(0.0, 1.0),
+            bb.min.y + (bb.max.y - bb.min.y) * rng.range(0.0, 1.0),
+            bb.min.z + (bb.max.z - bb.min.z) * rng.range(0.0, 1.0),
+        );
+        let (Ok(ca), Ok(cb)) = (ia.classify(&p, 1e-6), ib.classify(&p, 1e-6)) else {
+            continue;
+        };
+        let cr = match &ir {
+            Some(ir) => match ir.classify(&p, 1e-6) {
+                Ok(c) => c,
+                Err(_) => continue,
+            },
+            None => PointClass::Out,
+        };
+        if [ca, cb, cr].contains(&PointClass::On) {
+            continue;
+        }
+        let (in_a, in_b, in_r) = (
+            ca == PointClass::In,
+            cb == PointClass::In,
+            cr == PointClass::In,
+        );
+        let want = match op {
+            kw_boolean::Op::Union => in_a || in_b,
+            kw_boolean::Op::Intersect => in_a && in_b,
+            kw_boolean::Op::Subtract => in_a && !in_b,
+        };
+        checked += 1;
+        if want != in_r {
+            return Some(format!(
+                "point {p:?}: in A {in_a}, in B {in_b}, in result {in_r} but the operation says {want}"
+            ));
+        }
+    }
+    let _ = checked;
+    None
+}

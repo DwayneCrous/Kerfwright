@@ -163,3 +163,43 @@ fn offsets_are_at_constant_distance() {
         assert!(r.distance < 1e-9, "{s:?}: {}", r.distance);
     }
 }
+
+/// A surface of revolution whose profile is a full circle is periodic in `u`: a path that crosses the
+/// profile's parameter origin must be projected continuously (no jump of a period) when the previous
+/// parameter is given as the hint.
+#[test]
+fn revolution_of_a_circle_continues_across_the_profile_seam() {
+    use kw_math::Frame3;
+    use kw_nurbs::{Circle, CurveGeom, SurfaceGeom};
+    let s = SurfaceGeom::Revolution {
+        profile: Box::new(CurveGeom::Circle(Circle {
+            frame: Frame3 {
+                origin: Point3::new(0.0, 6.2, 4.7),
+                x: Vector3::new(0.0, 0.0, -1.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(1.0, 0.0, 0.0),
+            },
+            radius: 6.0,
+        })),
+        axis_origin: Point3::origin(),
+        axis_dir: Vector3::z(),
+    };
+    // walk the profile angle from -0.3 to 0.3 (through the seam at 0 = 2π), at a fixed rotation
+    let mut hint: Option<(f64, f64)> = None;
+    let mut prev_u = f64::NAN;
+    for k in 0..=60 {
+        let u = -0.3 + 0.6 * k as f64 / 60.0;
+        let p = s.point_at(u, 0.4);
+        let r = surface_param_of(&s, &p, hint.or(Some((-0.3, 0.4))));
+        assert!(r.distance < 1e-9);
+        if k > 0 {
+            assert!(
+                (r.u - prev_u).abs() < 0.05,
+                "u jumped from {prev_u} to {}",
+                r.u
+            );
+        }
+        prev_u = r.u;
+        hint = Some((r.u, r.v));
+    }
+}

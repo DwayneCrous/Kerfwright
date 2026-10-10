@@ -30,6 +30,8 @@ struct FaceData {
     uv_lo: UV,
     uv_hi: UV,
     bbox: Aabb,
+    /// Width (uv) of the band in which the boundary polygon and the true boundary may disagree.
+    poly_err: f64,
 }
 
 /// Bounding-volume hierarchy over the face boxes of a body: point and ray queries visit only the faces
@@ -141,6 +143,8 @@ pub struct PreparedFace {
     pub uv_lo: UV,
     pub uv_hi: UV,
     pub bbox: Aabb,
+    /// Polygon-to-boundary deviation in uv (0 when the boundary is polygonal or unknown).
+    pub poly_err: f64,
 }
 
 /// Precomputed per-face data of one body for repeated classification queries.
@@ -196,6 +200,7 @@ impl SolidIndex {
                 uv_lo,
                 uv_hi,
                 bbox: b,
+                poly_err: rep.face_poly_error(f, 2),
             });
         }
         Some(Self::from_prepared(prepared))
@@ -214,6 +219,7 @@ impl SolidIndex {
                 uv_lo: p.uv_lo,
                 uv_hi: p.uv_hi,
                 bbox: p.bbox,
+                poly_err: p.poly_err,
             });
         }
         let bvh = Bvh::build(&faces.iter().map(|f| f.bbox).collect::<Vec<_>>());
@@ -280,10 +286,10 @@ impl SolidIndex {
             } else {
                 votes_out += 1;
             }
-            if votes_in >= 3 && votes_out == 0 {
+            if votes_in >= 4 && votes_out == 0 {
                 return Ok(PointClass::In);
             }
-            if votes_out >= 3 && votes_in == 0 {
+            if votes_out >= 4 && votes_in == 0 {
                 return Ok(PointClass::Out);
             }
             if votes_in >= 1 && votes_out >= 1 && votes_in + votes_out >= 5 {
@@ -348,7 +354,11 @@ impl FaceData {
         let (su, sv) = self.surface.derivatives(uv.0, uv.1);
         let scale = su.norm().max(sv.norm()).max(1e-12);
         let inside = self.index.contains(uv);
-        let near = self.index.near(uv, (1e-6f64).max(10.0 * tol) / scale);
+        // within the band where the boundary polygon may disagree with the boundary the hit is not decided
+        let near = self.index.near(
+            uv,
+            ((1e-6f64).max(10.0 * tol) / scale).max(2.0 * self.poly_err),
+        );
         if !inside && !near {
             return None;
         }
