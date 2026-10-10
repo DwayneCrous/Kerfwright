@@ -51,6 +51,8 @@ Assumptions: a team of ~8–12 senior engineers (2 kernel, 1 solver/numerics, 1 
 - Performance SLAs for Boolean (500 ms) and fillet (300 ms) met.
 
 ## Phase 4 — Parametric engine, assemblies, sheet metal, SubD (months 18–26)
+**Status: implemented; see [`phase4-report.md`](phase4-report.md) for results against these criteria. Met as measured: naming corpus, determinism, no-op edits, cycle rejection, sheet metal, `.kwf` compatibility, SubD deviation and `validate()`. Met only in part: cold replay ≤ 2 s and tail edit ≤ 150 ms hold for a 200-feature model of independent parts (0.34 s / 53 ms) but not for one chain of 100 sequential Booleans on one growing body (8.7 s / 0.2 s); SubD G1 is measured (≤ 1.4°) and exact only where the cage is regular. The timeline is engine + API, with no egui panel.**
+
 **Build:** `kw-feature` DAG, expression engine with units, incremental evaluator with caching and early cutoff, topological naming (lineage names + fingerprints + repair UI), timeline UI (rollback/reorder/suppress), `.kwf` format v1, assemblies/joints, `kw-sheet` (flange/hem/unfold, DXF flat pattern), `kw-subd` (Catmull–Clark + creases, Finish→B-rep), scripting API.
 
 **Acceptance criteria**

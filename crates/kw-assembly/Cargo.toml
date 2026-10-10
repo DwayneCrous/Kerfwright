@@ -1,0 +1,18 @@
+[package]
+name = "kw-assembly"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+serde.workspace = true
+ciborium.workspace = true
+kw-expr.workspace = true
+kw-math.workspace = true
+kw-brep.workspace = true
+kw-boolean.workspace = true
+kw-feature.workspace = true
+kw-step.workspace = true

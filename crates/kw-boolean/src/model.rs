@@ -282,9 +282,16 @@ impl Work {
                         coedges: cos,
                     });
                 }
-                let uv_loops = rep
-                    .face_uv_loops(f, 3)
-                    .ok_or(BooleanError::BadInput("face without trim"))?;
+                // the loops of a face with many holes are sampled in parallel
+                let uv_loops: Vec<kw_brep::uvgeom::UvLoop> = if face.loops.len() > 8 {
+                    face.loops
+                        .par_iter()
+                        .map(|l| rep.loop_uv(*l, 3))
+                        .collect::<Option<Vec<_>>>()
+                } else {
+                    rep.face_uv_loops(f, 3)
+                }
+                .ok_or(BooleanError::BadInput("face without trim"))?;
                 let (uv_lo, uv_hi) = kw_brep::uvgeom::loops_bbox(&uv_loops)
                     .ok_or(BooleanError::BadInput("face without trim"))?;
                 let loop_index = std::sync::Arc::new(kw_brep::uvgeom::LoopIndex::new(&uv_loops));

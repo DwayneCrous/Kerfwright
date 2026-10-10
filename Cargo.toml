@@ -16,7 +16,12 @@ members = [
     "crates/kw-sketch",
     "crates/kw-dxf",
     "crates/kw-sketcher",
+    "crates/kw-expr",
     "crates/kw-feature",
+    "crates/kw-sheet",
+    "crates/kw-subd",
+    "crates/kw-assembly",
+    "crates/kw-script",
     "crates/kw-app",
 ]
 
@@ -36,6 +41,11 @@ spade = "2"
 proptest = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 approx = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rhai = { version = "1", default-features = false, features = ["std", "no_closure"] }
 bytemuck = { version = "1", features = ["derive"] }
 kw-math = { path = "crates/kw-math" }
 kw-nurbs = { path = "crates/kw-nurbs" }
@@ -50,7 +60,12 @@ kw-model = { path = "crates/kw-model" }
 kw-blend = { path = "crates/kw-blend" }
 kw-step = { path = "crates/kw-step" }
 kw-iges = { path = "crates/kw-iges" }
+kw-expr = { path = "crates/kw-expr" }
 kw-feature = { path = "crates/kw-feature" }
+kw-sheet = { path = "crates/kw-sheet" }
+kw-subd = { path = "crates/kw-subd" }
+kw-assembly = { path = "crates/kw-assembly" }
+kw-script = { path = "crates/kw-script" }
 
 [profile.release]
 debug = 1

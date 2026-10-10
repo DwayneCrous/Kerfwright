@@ -1,12 +1,43 @@
-//! Parametric feature DAG, persistent topological names, references and the
-//! evaluator contract. See docs/01-research/03-parametric-dag.md.
+//! The parametric engine: a serialisable document of features, expressions with units, an incremental
+//! evaluator with early cutoff, persistent topological names, and the `.kwf` file format.
 
-pub mod dag;
+// Numerical code indexes small fixed-size arrays; `!(x > 0.0)` is deliberate (it also rejects NaN).
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
+pub mod builder;
+pub mod doc;
+pub mod engine;
 pub mod eval;
-pub mod kernel;
+pub mod geomhash;
+pub mod id;
+pub mod kwf;
+pub mod namer;
 pub mod naming;
+pub mod ops;
+pub mod profile;
+pub mod recipe;
+pub mod spec;
+pub mod tools;
 
-pub use dag::{DagError, DagNode, EvalState, FeatureDag, NodeId, NodeKind};
-pub use eval::{EvalError, EvalOutput, FeatureEvaluator, InputHash};
-pub use kernel::{sketch_profile, EdgeSel, FeatureOp, KernelEvaluator};
-pub use naming::{GeomFingerprint, NameMap, NameOrigin, Reference, ResolveOutcome, TopoName};
+pub use doc::{Document, Feature, History, TimelineError};
+pub use engine::{CancelToken, Engine, Evaluation, FeatureState, RunStats, KERNEL_VERSION};
+pub use eval::{
+    EvalError, EvalOutput, Product, Resolution, SketchProduct, SolidProduct, ToolProduct,
+    Unresolved,
+};
+pub use id::{FeatureId, Hasher128};
+pub use naming::{
+    GeomFingerprint, NameMap, NameOrigin, Reference, ResolveKind, ResolveOutcome, Resolved,
+    TopoName,
+};
+pub use profile::{sketch_profile, sketch_profile_labeled, LabeledProfile};
+pub use recipe::SketchRecipe;
+pub use spec::*;
+
+/// The old name for a feature identifier (kept for `kw-app`).
+pub type NodeId = FeatureId;

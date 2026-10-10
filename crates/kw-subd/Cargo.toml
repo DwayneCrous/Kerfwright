@@ -1,0 +1,17 @@
+[package]
+name = "kw-subd"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+serde.workspace = true
+kw-math.workspace = true
+kw-nurbs.workspace = true
+kw-brep.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

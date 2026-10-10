@@ -163,8 +163,13 @@ impl BRep {
         // rational / freeform integrands need finer panels than the analytic quadrics
         let inner_scale = if matches!(surf, SurfaceGeom::Nurbs(_) | SurfaceGeom::Procedural(_)) {
             0.12
+        } else if matches!(surf, SurfaceGeom::Plane(_)) {
+            // the integrand is a polynomial of low degree in `s` on a plane: one Gauss panel is exact
+            f64::INFINITY
         } else {
-            0.6
+            // analytic quadrics: trigonometric in `s`, which an 8-point panel integrates to ~1e-20
+            // over 1.5 rad
+            1.5
         };
         let mut total = 0.0;
         let first_uv = (u_ref, pc0.point_at(t_start).y);
@@ -202,14 +207,21 @@ impl BRep {
                     + pc.derivative(b0).norm())
                     / 3.0
                     * (b0 - a0).abs();
-                let nseg = ((extent
-                    / if matches!(surf, SurfaceGeom::Nurbs(_) | SurfaceGeom::Procedural(_)) {
-                        0.12
-                    } else {
-                        0.35
-                    })
-                .ceil() as usize)
-                    .clamp(1, 160);
+                let nseg = if matches!(surf, SurfaceGeom::Plane(_))
+                    && matches!(pc, kw_nurbs::CurveGeom::Line(_))
+                {
+                    // polynomial integrand along a straight boundary of a plane: one panel is exact
+                    1
+                } else {
+                    ((extent
+                        / if matches!(surf, SurfaceGeom::Nurbs(_) | SurfaceGeom::Procedural(_)) {
+                            0.12
+                        } else {
+                            1.2
+                        })
+                    .ceil() as usize)
+                        .clamp(1, 160)
+                };
                 for k in 0..nseg {
                     let (a, b) = (
                         a0 + (b0 - a0) * k as f64 / nseg as f64,

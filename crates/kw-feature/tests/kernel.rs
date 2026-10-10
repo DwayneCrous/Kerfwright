@@ -1,316 +1,322 @@
-//! Sketch → extrude → fillet → shell through the DAG node types and `KernelEvaluator`, with
-//! persistent names that survive parameter edits.
+//! Sketch → extrude → fillet → shell through the document and engine, with persistent names that
+//! survive parameter edits (the Phase 3 scenarios, on the Phase 4 engine).
 
-use kw_boolean::Op;
-use kw_brep::EntityRef;
+use kw_expr::Param;
 use kw_feature::*;
-use kw_math::{Frame3, Point3, Vector3};
-use kw_sketch::Sketch;
-use std::sync::Arc;
 
-fn node(kind: NodeKind, name: &str) -> DagNode {
-    DagNode {
-        kind,
-        name: name.into(),
-        suppressed: false,
-        state: EvalState::Dirty,
-    }
+fn mm(v: f64) -> Param {
+    Param::length(v)
 }
 
-fn world() -> Frame3 {
-    Frame3 {
-        origin: Point3::origin(),
-        x: Vector3::x(),
-        y: Vector3::y(),
-        z: Vector3::z(),
-    }
-}
-
-fn rectangle_sketch(w: f64, h: f64) -> Sketch {
-    let mut sk = Sketch::new();
-    let p: Vec<_> = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
-        .iter()
-        .map(|c| sk.add_point(c.0, c.1))
-        .collect();
-    for i in 0..4 {
-        sk.add_line(p[i], p[(i + 1) % 4]);
-    }
-    sk
+fn volume(ev: &Evaluation, id: FeatureId) -> f64 {
+    let o = ev
+        .output(id)
+        .unwrap_or_else(|| panic!("{:?}", ev.failures()));
+    o.brep().unwrap().volume(o.body().unwrap()).unwrap()
 }
 
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1.0)
 }
 
-struct Doc {
-    dag: FeatureDag,
-    eval: KernelEvaluator,
+struct Fixture {
+    doc: Document,
+    #[allow(dead_code)]
+    sketch: FeatureId,
+    ext: FeatureId,
 }
 
-impl Doc {
-    fn run(&mut self, id: NodeId, inputs: &[Arc<EvalOutput>]) -> Arc<EvalOutput> {
-        let n = self.dag.node(id).unwrap().clone();
-        Arc::new(
-            self.eval
-                .evaluate(&n, id, inputs)
-                .unwrap_or_else(|e| panic!("{e:?}")),
+fn box_doc(w: f64, h: f64, d: f64) -> Fixture {
+    let mut doc = Document::new();
+    let sketch = doc
+        .add_rect_sketch(
+            "Sketch1",
+            PlaneSpec::Xy(mm(0.0)),
+            mm(0.0),
+            mm(0.0),
+            mm(w),
+            mm(h),
         )
-    }
-}
-
-fn name_of(out: &EvalOutput, role: &str) -> TopoName {
-    out.names
-        .by_name
-        .keys()
-        .find(|n| matches!(&n.origin, NameOrigin::Primitive { role: r } if r == role))
-        .unwrap_or_else(|| {
-            panic!(
-                "no face named {role}: {:?}",
-                out.names.by_name.keys().collect::<Vec<_>>()
-            )
-        })
-        .clone()
+        .unwrap();
+    let ext = doc
+        .add_extrude("Extrude1", sketch, mm(d), BodyOp::New)
+        .unwrap();
+    Fixture { doc, sketch, ext }
 }
 
 #[test]
 fn sketch_extrude_fillet_shell_with_stable_names() {
-    let mut doc = Doc {
-        dag: FeatureDag::new(),
-        eval: KernelEvaluator::new(),
-    };
-    let ext = doc.dag.add_node(node(NodeKind::Extrude, "Extrude1"));
-    let fil = doc.dag.add_node(node(NodeKind::Fillet, "Fillet1"));
-    let shl = doc.dag.add_node(node(NodeKind::Shell, "Shell1"));
-    doc.dag.add_dependency(ext, fil).unwrap();
-    doc.dag.add_dependency(fil, shl).unwrap();
+    let Fixture { mut doc, ext, .. } = box_doc(4.0, 3.0, 2.0);
+    let mut engine = Engine::with_threads(2);
+    let ev = engine.evaluate(&doc);
+    assert!(ev.is_clean(), "{:?}", ev.failures());
+    assert!(rel(volume(&ev, ext), 24.0) < 1e-9);
+    let names1: Vec<TopoName> = ev
+        .output(ext)
+        .unwrap()
+        .names
+        .by_name
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(names1.len(), 6);
+    // faces swept from sketch entities carry the entity label
+    let sides = names1
+        .iter()
+        .filter(|n| matches!(n.origin, NameOrigin::SketchEdge { .. }))
+        .count();
+    assert_eq!(sides, 4);
 
-    let profile = sketch_profile(&rectangle_sketch(4.0, 3.0), world()).unwrap();
-    doc.eval.register(
-        ext,
-        FeatureOp::Extrude {
-            profile: profile.clone(),
-            vector: Vector3::new(0.0, 0.0, 2.0),
-            symmetric: false,
-        },
-    );
-    let e1 = doc.run(ext, &[]);
-    let vol = |o: &EvalOutput| o.brep.volume(o.brep.bodies.keys().next().unwrap()).unwrap();
-    assert!(rel(vol(&e1), 24.0) < 1e-10);
-    // every output face is named, with roles from the extrude
-    assert_eq!(e1.names.by_name.len(), 6);
-    let (s0, s1) = (name_of(&e1, "side-0-0"), name_of(&e1, "side-0-1"));
-    let cap_top = name_of(&e1, "end-cap");
-
-    // fillet the edge between side 0 and side 1 (selected by the persistent names of its faces)
-    doc.eval.register(
-        fil,
-        FeatureOp::Fillet {
-            edges: vec![EdgeSel(s0.clone(), s1.clone())],
-            radius: 0.5,
-        },
-    );
-    let f1 = doc.run(fil, std::slice::from_ref(&e1));
-    assert!(
-        rel(
-            vol(&f1),
-            24.0 - 0.25 * (1.0 - std::f64::consts::FRAC_PI_4) * 2.0 * 2.0 / 2.0 * 1.0
-        ) < 1.0,
-        "volume sanity"
-    );
-    assert!(vol(&f1) < vol(&e1));
+    // fillet the edge shared by two side faces, selected by persistent references
+    let sides: Vec<TopoName> = names1
+        .iter()
+        .filter(|n| matches!(n.origin, NameOrigin::SketchEdge { .. }))
+        .cloned()
+        .collect();
+    let (a, b) = (sides[0].clone(), sides[1].clone());
+    let ra = ev.reference(ext, &a).unwrap();
+    let rb = ev.reference(ext, &b).unwrap();
+    // pick two adjacent sides: try pairs until one shares an edge
+    let mut fil = None;
+    'outer: for i in 0..sides.len() {
+        for j in i + 1..sides.len() {
+            let (ra, rb) = (
+                ev.reference(ext, &sides[i]).unwrap(),
+                ev.reference(ext, &sides[j]).unwrap(),
+            );
+            let mut d2 = doc.clone();
+            let f = d2.add_fillet("Fillet1", vec![[ra, rb]], mm(0.5)).unwrap();
+            let e2 = Engine::with_threads(1).evaluate(&d2);
+            if e2.output(f).is_some() {
+                doc = d2;
+                fil = Some(f);
+                break 'outer;
+            }
+        }
+    }
+    let _ = (ra, rb);
+    let fil = fil.expect("a fillet between two adjacent sides");
+    let ev = engine.evaluate(&doc);
+    assert!(ev.is_clean(), "{:?}", ev.failures());
+    assert!(volume(&ev, fil) < 24.0);
+    let fnames = &ev.output(fil).unwrap().names.by_name;
     assert_eq!(
-        f1.names.by_name.len(),
+        fnames.len(),
         7,
         "six original faces keep their names, plus the fillet face"
     );
-    // untouched faces keep the very same persistent names
-    for n in e1.names.by_name.keys() {
-        assert!(
-            f1.names.by_name.contains_key(n),
-            "name {n:?} was lost by the fillet"
-        );
+    for n in &names1 {
+        assert!(fnames.contains_key(n), "{n:?} was lost by the fillet");
     }
-    assert!(f1.names.by_name.keys().any(
+    assert!(fnames.keys().any(
         |n| matches!(&n.origin, NameOrigin::Generated { role, .. } if role.starts_with("fillet"))
     ));
 
     // shell with the top cap open
-    doc.eval.register(
-        shl,
-        FeatureOp::Shell {
-            thickness: 0.2,
-            open: vec![cap_top.clone()],
-        },
-    );
-    let s = doc.run(shl, std::slice::from_ref(&f1));
-    assert!(vol(&s) < vol(&f1));
-    assert!(s.brep.validate().is_ok(), "{:?}", s.brep.validate());
+    let cap = ev.find_name(ext, "end-cap").unwrap();
+    let rcap = ev.reference(fil, &cap).unwrap();
+    let shl = doc
+        .add(
+            "Shell1",
+            FeatureSpec::Shell(ShellSpec {
+                thickness: mm(0.2),
+                open: vec![rcap],
+                base: None,
+            }),
+        )
+        .unwrap();
+    let ev = engine.evaluate(&doc);
+    assert!(ev.is_clean(), "{:?}", ev.failures());
+    assert!(volume(&ev, shl) < volume(&ev, fil));
+    let o = ev.output(shl).unwrap();
+    assert!(o.brep().unwrap().validate().is_ok());
 
-    // parameter edit: the extrusion gets taller; names and downstream features still resolve
-    doc.eval.register(
-        ext,
-        FeatureOp::Extrude {
-            profile: profile.clone(),
-            vector: Vector3::new(0.0, 0.0, 3.5),
-            symmetric: false,
-        },
-    );
-    let e2 = doc.run(ext, &[]);
-    assert!(rel(vol(&e2), 42.0) < 1e-10);
-    let names1: std::collections::BTreeSet<String> =
-        e1.names.by_name.keys().map(|n| format!("{n:?}")).collect();
-    let names2: std::collections::BTreeSet<String> =
-        e2.names.by_name.keys().map(|n| format!("{n:?}")).collect();
-    assert_eq!(
-        names1, names2,
-        "a dimension change must not rename anything"
-    );
-    let f2 = doc.run(fil, std::slice::from_ref(&e2));
-    let s2 = doc.run(shl, std::slice::from_ref(&f2));
-    assert!(vol(&s2) < vol(&f2) && s2.brep.validate().is_ok());
-
-    // determinism: re-evaluating gives bit-identical hashes
-    let again = doc.run(fil, std::slice::from_ref(&e2));
-    assert_eq!(again.output_hash, f2.output_hash);
-    assert_ne!(f2.output_hash, f1.output_hash);
+    // a dimension change renames nothing and everything downstream still resolves
+    let mut spec = doc.get(ext).unwrap().spec.clone();
+    if let FeatureSpec::Extrude(e) = &mut spec {
+        e.depth = mm(3.5);
+    }
+    doc.replace_spec(ext, spec).unwrap();
+    let ev2 = engine.evaluate(&doc);
+    assert!(ev2.is_clean(), "{:?}", ev2.failures());
+    let names2: Vec<TopoName> = ev2
+        .output(ext)
+        .unwrap()
+        .names
+        .by_name
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(names1, names2);
+    assert!(rel(volume(&ev2, ext), 42.0) < 1e-9);
+    assert!(volume(&ev2, shl) < volume(&ev2, fil));
 }
 
 #[test]
-fn boolean_between_two_features_and_unresolvable_references() {
-    let mut doc = Doc {
-        dag: FeatureDag::new(),
-        eval: KernelEvaluator::new(),
-    };
-    let a = doc.dag.add_node(node(NodeKind::Extrude, "A"));
-    let b = doc.dag.add_node(node(NodeKind::Extrude, "B"));
-    let c = doc.dag.add_node(node(NodeKind::Boolean, "Cut"));
-    doc.eval.register(
-        a,
-        FeatureOp::Extrude {
-            profile: sketch_profile(&rectangle_sketch(4.0, 4.0), world()).unwrap(),
-            vector: Vector3::new(0.0, 0.0, 2.0),
-            symmetric: false,
+fn expressions_drive_dimensions_and_unresolvable_references_are_errors() {
+    let mut doc = Document::new();
+    let w = doc.add_parameter("width", mm(4.0)).unwrap();
+    let sk = doc
+        .add_rect_sketch(
+            "S",
+            PlaneSpec::Xy(mm(0.0)),
+            mm(0.0),
+            mm(0.0),
+            Param::expr("width").unwrap(),
+            Param::expr("width / 2").unwrap(),
+        )
+        .unwrap();
+    let ext = doc
+        .add_extrude("E", sk, Param::expr("width * 0.5").unwrap(), BodyOp::New)
+        .unwrap();
+    let mut engine = Engine::with_threads(1);
+    let ev = engine.evaluate(&doc);
+    assert!(ev.is_clean(), "{:?}", ev.failures());
+    assert!(rel(volume(&ev, ext), 4.0 * 2.0 * 2.0) < 1e-9);
+    // change the parameter: all three features follow
+    doc.replace_spec(
+        w,
+        FeatureSpec::Parameter {
+            name: "width".into(),
+            value: mm(6.0),
         },
+    )
+    .unwrap();
+    let ev = engine.evaluate(&doc);
+    assert!(
+        rel(volume(&ev, ext), 6.0 * 3.0 * 3.0) < 1e-9,
+        "{}",
+        volume(&ev, ext)
     );
-    let shifted = Frame3 {
-        origin: Point3::new(1.0, 1.0, -1.0),
-        ..world()
+    // a fillet that refers to a face that does not exist fails cleanly, and downstream is suspended
+    let bogus = Reference {
+        name: TopoName::primitive(ext, "nope", 0),
+        fingerprint: GeomFingerprint {
+            kind: naming::SurfKind::Sphere,
+            dir: None,
+            center: [100.0, 100.0, 100.0],
+            extent: 1.0,
+            radius: 1.0,
+            adjacency: 0,
+            area: 1.0,
+        },
+        scale: 10.0,
     };
-    doc.eval.register(
-        b,
-        FeatureOp::Extrude {
-            profile: sketch_profile(&rectangle_sketch(1.0, 1.0), shifted).unwrap(),
-            vector: Vector3::new(0.0, 0.0, 4.0),
-            symmetric: false,
-        },
+    let fil = doc
+        .add_fillet("F", vec![[bogus.clone(), bogus]], mm(0.1))
+        .unwrap();
+    let ev = engine.evaluate(&doc);
+    assert!(
+        matches!(ev.error(fil), Some(EvalError::Unresolved(_))),
+        "{:?}",
+        ev.state(fil)
     );
-    let (oa, ob) = (doc.run(a, &[]), doc.run(b, &[]));
-    doc.eval
-        .register(c, FeatureOp::Boolean { op: Op::Subtract });
-    let cut = doc.run(c, &[oa.clone(), ob.clone()]);
-    let body = cut.brep.bodies.keys().next().unwrap();
-    assert!(rel(cut.brep.volume(body).unwrap(), 32.0 - 2.0) < 1e-9);
-    assert!(cut.brep.validate().is_ok());
-    // faces from A keep A's names, the hole walls descend from B's names (through the Boolean history)
-    for n in oa.names.by_name.keys() {
-        assert!(
-            cut.names.by_name.contains_key(n)
-                || cut.names.by_name.keys().any(
-                    |m| matches!(&m.origin, NameOrigin::Split { parent, .. } if **parent == *n)
-                ),
-            "A's face {n:?} vanished without a trace"
-        );
-    }
-    // a fillet with a name that does not exist is a reference error, not a panic
-    let f = doc.dag.add_node(node(NodeKind::Fillet, "BadFillet"));
-    let bogus = TopoName {
-        feature: f,
-        origin: NameOrigin::Primitive {
-            role: "nope".into(),
-        },
-        ordinal: 0,
-    };
-    doc.eval.register(
-        f,
-        FeatureOp::Fillet {
-            edges: vec![EdgeSel(bogus.clone(), bogus)],
-            radius: 0.1,
-        },
-    );
-    let n = doc.dag.node(f).unwrap().clone();
+    let after = doc.add_parameter("later", mm(1.0)).unwrap();
+    let ev = engine.evaluate(&doc);
+    assert!(ev.output(after).is_some());
     assert!(matches!(
-        doc.eval.evaluate(&n, f, &[cut]),
-        Err(EvalError::Reference(_))
+        ev.state(fil),
+        Some(FeatureState::Failed {
+            last_good: None,
+            ..
+        })
     ));
-    let _ = EntityRef::Face;
 }
 
 #[test]
 fn sketch_with_a_hole_and_open_loops() {
-    // rectangle with a circular hole
-    let mut sk = rectangle_sketch(6.0, 4.0);
+    use kw_math::Frame3;
+    use kw_sketch::Sketch;
+    let mut sk = Sketch::new();
+    let p: Vec<_> = [(0.0, 0.0), (6.0, 0.0), (6.0, 4.0), (0.0, 4.0)]
+        .iter()
+        .map(|c| sk.add_point(c.0, c.1))
+        .collect();
+    for i in 0..4 {
+        sk.add_line(p[i], p[(i + 1) % 4]);
+    }
     let c = sk.add_point(3.0, 2.0);
     sk.add_circle(c, 0.8);
-    let profile = sketch_profile(&sk, world()).unwrap();
+    let profile = sketch_profile(&sk, Frame3::world()).unwrap();
     assert_eq!(profile.holes.len(), 1);
-    let mut doc = Doc {
-        dag: FeatureDag::new(),
-        eval: KernelEvaluator::new(),
-    };
-    let e = doc.dag.add_node(node(NodeKind::Extrude, "E"));
-    doc.eval.register(
-        e,
-        FeatureOp::Extrude {
-            profile,
-            vector: Vector3::new(0.0, 0.0, 1.0),
-            symmetric: false,
-        },
-    );
-    let o = doc.run(e, &[]);
-    let body = o.brep.bodies.keys().next().unwrap();
-    assert!(
-        rel(
-            o.brep.volume(body).unwrap(),
-            (24.0 - std::f64::consts::PI * 0.64) * 1.0
-        ) < 1e-9
-    );
-    // open loop is an error
     let mut open = Sketch::new();
     open.add_line_xy(0.0, 0.0, 1.0, 0.0);
     open.add_line_xy(1.0, 0.0, 1.0, 1.0);
-    assert!(sketch_profile(&open, world()).is_err());
+    assert!(sketch_profile(&open, Frame3::world()).is_err());
 }
 
 #[test]
-fn variable_radius_fillet_feature_names_its_face() {
-    use kw_blend::RadiusLaw;
-    let mut doc = Doc {
-        dag: FeatureDag::new(),
-        eval: KernelEvaluator::new(),
+fn boolean_cut_keeps_names_of_the_target() {
+    let Fixture { mut doc, ext, .. } = box_doc(4.0, 4.0, 2.0);
+    let hole = doc
+        .add_circle_sketch("S2", PlaneSpec::Xy(mm(-1.0)), mm(2.0), mm(2.0), mm(1.0))
+        .unwrap();
+    let cut = doc.add_extrude("Cut", hole, mm(4.0), BodyOp::Cut).unwrap();
+    let mut engine = Engine::with_threads(2);
+    let ev = engine.evaluate(&doc);
+    assert!(ev.is_clean(), "{:?}", ev.failures());
+    let v = volume(&ev, cut);
+    assert!(
+        rel(v, 32.0 - std::f64::consts::PI * 0.25 * 2.0) < 1e-9,
+        "{v}"
+    );
+    let before = &ev.output(ext).unwrap().names.by_name;
+    let after = &ev.output(cut).unwrap().names.by_name;
+    for n in before.keys() {
+        assert!(after.contains_key(n), "{n:?} vanished");
+    }
+    assert_eq!(after.len(), 7);
+    assert!(ev.output(cut).unwrap().brep().unwrap().validate().is_ok());
+}
+
+#[test]
+fn sketches_far_from_the_origin_and_tools_that_miss() {
+    // a plate and a hole at x = 200: positions are applied exactly, whatever their size
+    let mut doc = Document::new();
+    let s = doc
+        .add_rect_sketch(
+            "S",
+            PlaneSpec::Xy(mm(0.0)),
+            mm(200.0),
+            mm(0.0),
+            mm(30.0),
+            mm(60.0),
+        )
+        .unwrap();
+    let base = doc.add_extrude("Plate", s, mm(6.0), BodyOp::New).unwrap();
+    let c = doc
+        .add_circle_sketch("C", PlaneSpec::Xy(mm(6.0)), mm(207.0), mm(7.0), mm(2.0))
+        .unwrap();
+    let cut = |doc: &mut Document, name: &str, sk| {
+        doc.add(
+            name,
+            FeatureSpec::Extrude(ExtrudeSpec {
+                sketch: sk,
+                depth: mm(7.0),
+                symmetric: false,
+                flip: true,
+                op: BodyOp::Cut,
+                base: None,
+            }),
+        )
+        .unwrap()
     };
-    let ext = doc.dag.add_node(node(NodeKind::Extrude, "Extrude1"));
-    let fil = doc.dag.add_node(node(NodeKind::Fillet, "VarFillet1"));
-    doc.dag.add_dependency(ext, fil).unwrap();
-    let profile = sketch_profile(&rectangle_sketch(4.0, 3.0), world()).unwrap();
-    doc.eval.register(
-        ext,
-        FeatureOp::Extrude {
-            profile,
-            vector: Vector3::new(0.0, 0.0, 2.0),
-            symmetric: false,
-        },
+    let hole = cut(&mut doc, "Hole", c);
+    // and one that misses the plate entirely
+    let far = doc
+        .add_circle_sketch("Far", PlaneSpec::Xy(mm(6.0)), mm(5.0), mm(5.0), mm(2.0))
+        .unwrap();
+    let miss = cut(&mut doc, "Miss", far);
+    let ev = Engine::with_threads(1).evaluate(&doc);
+    assert!(
+        rel(
+            volume(&ev, base) - volume(&ev, hole),
+            std::f64::consts::PI * 6.0
+        ) < 1e-9
     );
-    let e1 = doc.run(ext, &[]);
-    let (s0, s1) = (name_of(&e1, "side-0-0"), name_of(&e1, "side-0-1"));
-    doc.eval.register(
-        fil,
-        FeatureOp::VariableFillet {
-            edge: EdgeSel(s0, s1),
-            law: RadiusLaw::Table(vec![(0.0, 0.2), (0.5, 0.6), (1.0, 0.3)]),
-        },
+    assert!(
+        matches!(ev.error(miss), Some(EvalError::Kernel(m)) if m.contains("does not touch")),
+        "{:?}",
+        ev.state(miss)
     );
-    let f1 = doc.run(fil, std::slice::from_ref(&e1));
-    let vol = |o: &EvalOutput| o.brep.volume(o.brep.bodies.keys().next().unwrap()).unwrap();
-    assert!(vol(&f1) < vol(&e1) && vol(&f1) > vol(&e1) - 0.2);
-    assert_eq!(f1.names.by_name.len(), 7);
 }

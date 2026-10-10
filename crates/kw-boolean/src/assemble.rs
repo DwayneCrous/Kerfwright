@@ -333,6 +333,34 @@ fn assemble_with(
             .collect()
     };
 
+    // ---- canonical face order: the order in which fragments come out of the arrangement may depend
+    // on scheduling and hashing, but face identities (split ordinals, shell and face order of the
+    // result) must not. Sort by source face, then by where the fragment lies.
+    let mut out_faces = out_faces;
+    {
+        let q = |x: f64| (x * 1e6).round() as i64;
+        let key = |of: &OutFace| -> (usize, bool, (i64, i64, i64), usize, usize) {
+            let s = &selected[of.base];
+            let fr = &w.fragments[s.fragment];
+            let mut lo: Option<(i64, i64, i64)> = None;
+            for h in &of.outer {
+                for v in [w.pieces[h.piece].v0, w.pieces[h.piece].v1] {
+                    let p = w.reg.pts[v];
+                    let k = (q(p.x), q(p.y), q(p.z));
+                    lo = Some(lo.map_or(k, |l| l.min(k)));
+                }
+            }
+            (
+                fr.face,
+                s.flip,
+                lo.unwrap_or((0, 0, 0)),
+                of.outer.len(),
+                of.holes.len(),
+            )
+        };
+        out_faces.sort_by_cached_key(key);
+    }
+
     // ---- piece usage check
     let mut usage: BTreeMap<usize, (u32, u32)> = BTreeMap::new(); // piece → (forward uses, backward uses)
     for of in &out_faces {

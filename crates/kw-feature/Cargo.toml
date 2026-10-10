@@ -8,8 +8,13 @@ publish.workspace = true
 bench = false
 
 [dependencies]
-petgraph.workspace = true
 slotmap.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+zip.workspace = true
+kw-expr.workspace = true
 kw-brep.workspace = true
 kw-sketch.workspace = true
 kw-math.workspace = true
@@ -17,6 +22,10 @@ kw-nurbs.workspace = true
 kw-boolean.workspace = true
 kw-model.workspace = true
 kw-blend.workspace = true
+kw-sheet.workspace = true
+kw-subd.workspace = true
+kw-dxf.workspace = true
 
 [dev-dependencies]
 kw-tess.workspace = true
+proptest.workspace = true

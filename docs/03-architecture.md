@@ -1,6 +1,6 @@
 # Kerfwright — Rust Technical Architecture
 
-Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions referenced here are real code in `crates/` (compiled and tested; `kw-math`, `kw-nurbs`, `kw-brep`, `kw-tess`, `kw-io`, `kw-viewer` are implemented in Phase 1, `kw-sketch`/`kw-feature`/`kw-app` are still skeletons); this document shows the key ones in condensed form plus the diagrams.
+Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions referenced here are real code in `crates/` (compiled and tested; `kw-math`, `kw-nurbs`, `kw-brep`, `kw-tess`, `kw-io`, `kw-viewer` are implemented in Phase 1, `kw-sketch` is implemented in Phase 2, the kernel crates in Phase 3, `kw-feature`/`kw-expr`/`kw-sheet`/`kw-subd`/`kw-assembly`/`kw-script` in Phase 4, and `kw-app` is still a skeleton); this document shows the key ones in condensed form plus the diagrams.
 
 ## 1. Crate map and dependency direction
 ```
@@ -105,7 +105,8 @@ Hot-path optimisation (Phase 3+): `BRep` exposes read-only *struct-of-arrays* sn
 ```
 HashMap<InputHash(u128), Arc<EvalOutput>>
 EvalOutput ─ brep: Arc<BRep> ─ names: NameMap ─ history: ShapeHistory ─ output_hash
-InputHash = H( kernel_version ‖ node.params ‖ [ input.output_hash … ] )
+InputHash = H( kernel_version ‖ feature id ‖ spec with every expression evaluated ‖ body input ‖ [ input.output_hash … ] )
+output_hash = H( geometry hash (canonical, 1e-7 mm) ‖ name-set hash )   — equal output_hash ⇒ dependents stay cache hits (early cutoff)
 Unchanged bodies = Arc clone (O(1)); edits create new Arc, old kept for undo.
 ```
 
