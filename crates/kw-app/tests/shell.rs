@@ -1669,3 +1669,148 @@ fn a_sketch_edited_with_deletions_still_saves_shows_and_reopens() {
     );
     assert!(h.app.design.sketch.app.editor.sketch.entities.len() >= 5);
 }
+
+#[test]
+fn edges_are_picked_within_a_few_pixels_and_light_up_when_hovered_or_selected() {
+    let Some(g) = kw_render::RenderGpu::try_new() else {
+        eprintln!("no GPU adapter: test skipped");
+        return;
+    };
+    let mut p = kw_app::project::Project::demo();
+    let ev = p.evaluation();
+    let brep = ev
+        .final_solid()
+        .and_then(|(_, o)| o.brep().cloned())
+        .unwrap();
+    let model = ModelScene::build(&brep);
+    let size = (480u32, 360u32);
+    let mut view = kw_app::viewport::GpuView::new(&g.device, size);
+    view.renderer.upload(&g.device, &model.scene);
+    let mut cam = kw_viewer::OrbitCamera::new(model.scene.radius, size.0 as f64 / size.1 as f64);
+    cam.fit(model.scene.radius);
+    view.render(&g.device, &g.queue, &cam);
+    // find a pixel that is exactly on an edge and one whose neighbours 6 px away are a face
+    let at = |view: &kw_app::viewport::GpuView, x: u32, y: u32, r: u32| {
+        view.pick_near(&g.device, &g.queue, &model, x, y, r)
+    };
+    let mut found = None;
+    'scan: for y in 20..size.1 - 20 {
+        for x in 20..size.0 - 20 {
+            let Some(Pick::Edge(e)) = at(&view, x, y, 0) else {
+                continue;
+            };
+            // 6 px to the right and left: a face on both sides, so this is a clean test of reach
+            let side = |dx: i32| at(&view, (x as i32 + dx) as u32, y, 0);
+            if matches!(side(6), Some(Pick::Face(_))) && matches!(side(-6), Some(Pick::Face(_))) {
+                found = Some((x, y, e));
+                break 'scan;
+            }
+        }
+    }
+    let (x, y, edge) = found.expect("an edge with faces 6 px to either side");
+    // the exact pixel misses it 6 px away, a reach of 8 px finds it, a reach of 1 px does not
+    for dx in [6i32, -6] {
+        let (px, py) = ((x as i32 + dx) as u32, y);
+        assert!(matches!(at(&view, px, py, 0), Some(Pick::Face(_))));
+        // some edge is found (the nearest one: another edge may be closer than the one searched from)
+        assert!(
+            matches!(at(&view, px, py, 8), Some(Pick::Edge(_))),
+            "reach 8 at dx {dx}"
+        );
+        assert_ne!(at(&view, px, py, 1), Some(Pick::Edge(edge)));
+    }
+    // empty space stays empty and a face in the middle of the block stays a face
+    assert_eq!(at(&view, 3, 3, 8), None);
+    assert!(matches!(
+        at(&view, size.0 / 2, size.1 / 2, 8),
+        Some(Pick::Face(_)) | Some(Pick::Edge(_))
+    ));
+
+    // hovered / selected edges are drawn in their own colours, thicker than plain ones
+    let id = model.id_of(Pick::Edge(edge));
+    let colour_at = |view: &kw_app::viewport::GpuView| {
+        let px = view.read_rgba(&g.device, &g.queue);
+        let i = ((y * size.0 + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    view.render(&g.device, &g.queue, &cam);
+    let plain = colour_at(&view);
+    view.renderer.hovered = id;
+    view.render(&g.device, &g.queue, &cam);
+    let hovered = colour_at(&view);
+    view.renderer.hovered = 0;
+    view.renderer.selected_extra = vec![id];
+    view.render(&g.device, &g.queue, &cam);
+    let selected = colour_at(&view);
+    assert!(
+        plain.iter().all(|c| *c < 80),
+        "plain edges are dark: {plain:?}"
+    );
+    assert!(
+        hovered[0] > 200 && hovered[2] < 80,
+        "hovered edge is orange: {hovered:?}"
+    );
+    assert!(
+        selected[2] > 200 && selected[0] < 80,
+        "selected edge is blue: {selected:?}"
+    );
+}
+
+#[test]
+fn while_edges_are_being_picked_the_view_shows_the_body_the_picks_refer_to() {
+    let (mut h, _d) = design_harness("pick_on_base");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let top_edges: Vec<kw_brep::EdgeId> = {
+        let ev = proj(&mut h).evaluation();
+        let b = ev.final_solid().unwrap().1.brep().unwrap().clone();
+        b.edges
+            .iter()
+            .filter(|(_, ed)| {
+                (b.vertices[ed.start].point.z - 5.0).abs() < 1e-9
+                    && (b.vertices[ed.end].point.z - 5.0).abs() < 1e-9
+            })
+            .map(|(e, _)| e)
+            .collect()
+    };
+    assert_eq!(top_edges.len(), 4);
+    let base_edges = {
+        let ev = proj(&mut h).evaluation();
+        ev.final_solid().unwrap().1.brep().unwrap().edges.len()
+    };
+    act(
+        &mut h,
+        Action::Open(Tool::Fillet {
+            radius: "2 mm".into(),
+        }),
+    );
+    h.frame();
+    for (n, e) in top_edges.iter().enumerate().take(3) {
+        click(&mut h, Some(Pick::Edge(*e)));
+        h.frame();
+        assert_eq!(h.app.design.model.picks.len(), n + 1);
+        // the preview solid exists, but the view still shows (and picks from) the unmodified body
+        let pv = h.app.design.preview.clone().expect("a preview");
+        assert!(pv.error.is_none(), "{:?}", pv.error);
+        let shown = h
+            .app
+            .design
+            .viewport
+            .model()
+            .expect("model")
+            .edge_polylines()
+            .len();
+        assert_eq!(shown, base_edges, "after {} picks", n + 1);
+        // all picks are drawn as selected, edges are easy to hit
+        assert_eq!(h.app.design.viewport.extra_selected.len(), n + 1);
+        assert_eq!(h.app.design.viewport.edge_pick_px, 8);
+    }
+    commit(&mut h);
+    let v = vol(&mut h);
+    assert!(
+        v < 3000.0 && v > 3000.0 - 3.0 * 30.0 * 1.0,
+        "three filleted edges: {v}"
+    );
+    // outside of a pick tool the reach is small, and picking a plane has none
+    assert_eq!(h.app.design.viewport.edge_pick_px, 4);
+}

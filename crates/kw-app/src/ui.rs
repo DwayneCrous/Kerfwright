@@ -315,12 +315,37 @@ impl KerfwrightApp {
                 }
             }
             "hole" => self.design.open_tool(project, Tool::default_hole()),
-            "fillet" => self.design.open_tool(
-                project,
-                Tool::Fillet {
-                    radius: "2 mm".into(),
-                },
-            ),
+            "fillet" | "fillet-picked" => {
+                self.design.open_tool(
+                    project,
+                    Tool::Fillet {
+                        radius: "2 mm".into(),
+                    },
+                );
+                if what == "fillet-picked" {
+                    // the two long edges of the top face are picked (blue)
+                    let ev = project.evaluation();
+                    if let Some((_, o)) = ev.final_solid() {
+                        if let Some(b) = o.brep() {
+                            let zmax = b
+                                .vertices
+                                .values()
+                                .map(|v| v.point.z)
+                                .fold(f64::MIN, f64::max);
+                            self.design.model.picks = b
+                                .edges
+                                .iter()
+                                .filter(|(_, ed)| {
+                                    (b.vertices[ed.start].point.z - zmax).abs() < 1e-9
+                                        && (b.vertices[ed.end].point.z - zmax).abs() < 1e-9
+                                })
+                                .take(2)
+                                .map(|(e, _)| crate::viewport::Pick::Edge(e))
+                                .collect();
+                        }
+                    }
+                }
+            }
             "params" => {
                 self.design.model.add_parameter(project, "width", "30");
                 self.design.params_open = true;

@@ -497,11 +497,19 @@ impl DesignWorkspace {
         let ev = project.evaluation();
         let doc = project.document();
         self.update_preview(project);
-        let (shown, base_key) = match self.preview.as_ref().and_then(|p| p.brep.clone()) {
+        // While a tool is collecting picks (edges for Fillet / Chamfer, faces for Shell / Hole) the view must
+        // show the body the picks refer to: the preview solid has other edges and faces, so picking on it
+        // would store ids that mean something else. Those tools show their result after OK.
+        let collecting = self
+            .dialog
+            .as_ref()
+            .is_some_and(|d| d.tool.picks_edges() || d.tool.picks_faces());
+        let preview = self.preview.as_ref().filter(|_| !collecting);
+        let (shown, base_key) = match preview.and_then(|p| p.brep.clone()) {
             Some(b) => (Some(b), 0xB0B0_u128),
             None => (ev.final_solid().and_then(|(_, o)| o.brep().cloned()), 0),
         };
-        let geom_key = match (&self.preview, ev.final_hashes()) {
+        let geom_key = match (preview, ev.final_hashes()) {
             (Some(p), _) if p.brep.is_some() => {
                 let mut h = kw_feature::Hasher128::new();
                 h.bytes(p.key.as_bytes());
@@ -516,6 +524,14 @@ impl DesignWorkspace {
             ^ ((segs.len() as u128) << 96)
             ^ ((self.hidden_sketches.len() as u128) << 90);
         let highlight = self.model.picks.last().copied();
+        // all picked faces / edges show as selected, and edges are easy to hit while a tool wants them
+        self.viewport.extra_selected = self.model.picks.clone();
+        self.viewport.edge_pick_px = match (&self.dialog, self.mode) {
+            (_, Mode::PickPlane) => 0,
+            (Some(d), _) if d.tool.picks_edges() => 8,
+            (Some(_), _) => 0,
+            (None, _) => 4,
+        };
         let opts = ViewOpts {
             hover: true,
             navigate: true,

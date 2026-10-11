@@ -8,6 +8,7 @@ struct Globals {
     viewport: vec4<f32>,
     params: vec4<f32>,
     ids: vec4<u32>,
+    sel: array<vec4<u32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -22,7 +23,19 @@ struct VsIn {
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) id: u32,
+    // 0 plain, 1 hovered, 2 selected
+    @location(1) @interpolate(flat) state: u32,
 };
+
+fn edge_state(id: u32) -> u32 {
+    if (id == 0u || id == 0xFFFFFFFFu) { return 0u; }
+    if (id == g.ids.y) { return 2u; }
+    for (var k = 0u; k < g.ids.z; k = k + 1u) {
+        if (g.sel[k / 4u][k % 4u] == id) { return 2u; }
+    }
+    if (id == g.ids.x) { return 1u; }
+    return 0u;
+}
 
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
@@ -35,6 +48,7 @@ fn vs_main(v: VsIn) -> VsOut {
     var b = g.view_proj * vec4<f32>(v.p1, 1.0);
     var o: VsOut;
     o.id = v.id;
+    o.state = edge_state(v.id);
     let near_w = 0.01;
     if (a.w < near_w && b.w < near_w) {
         o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -50,7 +64,8 @@ fn vs_main(v: VsIn) -> VsOut {
     let len = length(dir);
     if (len > 1e-6) { dir = dir / len; } else { dir = vec2<f32>(1.0, 0.0); }
     let nrm = vec2<f32>(-dir.y, dir.x);
-    let half_w = 0.5 * g.viewport.z;
+    var half_w = 0.5 * g.viewport.z;
+    if (o.state != 0u) { half_w = half_w * 2.4; }
 
     var base = sa;
     var cp = a;
@@ -71,6 +86,8 @@ struct FsOut {
 fn fs_main(i: VsOut) -> FsOut {
     var o: FsOut;
     o.color = vec4<f32>(0.01, 0.012, 0.016, 1.0);
+    if (i.state == 1u) { o.color = vec4<f32>(1.0, 0.55, 0.0, 1.0); }
+    if (i.state == 2u) { o.color = vec4<f32>(0.0, 0.45, 0.95, 1.0); }
     o.id = i.id;
     return o;
 }

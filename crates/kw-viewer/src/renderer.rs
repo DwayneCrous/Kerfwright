@@ -15,8 +15,14 @@ struct Globals {
     light_dir: [f32; 4],
     viewport: [f32; 4],
     params: [f32; 4],
+    /// hovered id, selected id, number of extra selected ids, unused
     ids: [u32; 4],
+    /// Extra selected ids (a multi-selection), four per row.
+    sel: [[u32; 4]; 16],
 }
+
+/// How many extra selected ids the shaders can highlight.
+pub const MAX_EXTRA_SELECTED: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct RenderSettings {
@@ -64,6 +70,8 @@ pub struct Renderer {
     pub settings: RenderSettings,
     pub hovered: u32,
     pub selected: u32,
+    /// More selected ids besides `selected` (at most [`MAX_EXTRA_SELECTED`]).
+    pub selected_extra: Vec<u32>,
 }
 
 fn targets(color: wgpu::TextureFormat) -> [Option<wgpu::ColorTargetState>; 2] {
@@ -217,6 +225,7 @@ impl Renderer {
             settings: RenderSettings::default(),
             hovered: 0,
             selected: 0,
+            selected_extra: Vec::new(),
         }
     }
 
@@ -301,13 +310,28 @@ impl Renderer {
     fn write_globals(&self, queue: &wgpu::Queue, cam: &OrbitCamera) {
         let eye = cam.eye();
         let s = &self.settings;
+        let mut sel = [[0u32; 4]; 16];
+        for (k, id) in self
+            .selected_extra
+            .iter()
+            .take(MAX_EXTRA_SELECTED)
+            .enumerate()
+        {
+            sel[k / 4][k % 4] = *id;
+        }
         let g = Globals {
             view_proj: cam.view_proj_f32(),
             cam_pos: [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
             light_dir: [0.45, -0.35, 0.82, 0.0],
             viewport: [self.size.0 as f32, self.size.1 as f32, s.line_px, 1.0e-4],
             params: [s.metallic, s.roughness, s.exposure, s.ambient],
-            ids: [self.hovered, self.selected, 0, 0],
+            ids: [
+                self.hovered,
+                self.selected,
+                self.selected_extra.len().min(MAX_EXTRA_SELECTED) as u32,
+                0,
+            ],
+            sel,
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
     }

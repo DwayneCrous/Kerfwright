@@ -6,7 +6,8 @@ struct Globals {
     light_dir: vec4<f32>,
     viewport: vec4<f32>, // width, height, line width (px), edge depth bias
     params: vec4<f32>,   // metallic, roughness, exposure, ambient
-    ids: vec4<u32>,      // hovered id, selected id, unused, unused
+    ids: vec4<u32>,      // hovered id, selected id, number of extra selected ids, unused
+    sel: array<vec4<u32>, 16>, // extra selected ids
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -25,6 +26,14 @@ struct VsOut {
     @location(2) color: vec4<f32>,
     @location(3) @interpolate(flat) id: u32,
 };
+
+fn is_selected(id: u32) -> bool {
+    if (id == g.ids.y) { return true; }
+    for (var k = 0u; k < g.ids.z; k = k + 1u) {
+        if (g.sel[k / 4u][k % 4u] == id) { return true; }
+    }
+    return false;
+}
 
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
@@ -81,7 +90,7 @@ struct FsOut {
 fn fs_main(i: VsOut) -> FsOut {
     var albedo = i.color.rgb;
     if (i.id == g.ids.x) { albedo = mix(albedo, vec3<f32>(1.0, 0.85, 0.2), 0.55); }
-    if (i.id == g.ids.y) { albedo = mix(albedo, vec3<f32>(1.0, 0.45, 0.1), 0.7); }
+    if (is_selected(i.id)) { albedo = mix(albedo, vec3<f32>(1.0, 0.45, 0.1), 0.7); }
     // sRGB-encoded vertex colours -> linear
     let lin = pow(albedo, vec3<f32>(2.2));
     let n = normalize(i.normal);

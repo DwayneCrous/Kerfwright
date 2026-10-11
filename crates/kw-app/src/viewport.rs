@@ -113,6 +113,47 @@ impl GpuView {
     }
 }
 
+impl GpuView {
+    /// What is at pixel `(x, y)`, preferring an edge within `edge_px` pixels: edges are drawn only a pixel or
+    /// two wide, so picking edges needs some reach. With `edge_px == 0` this is the single pixel.
+    pub fn pick_near(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model: &ModelScene,
+        x: u32,
+        y: u32,
+        edge_px: u32,
+    ) -> Option<Pick> {
+        let centre = model.resolve(self.pick_id(device, queue, x, y));
+        if edge_px == 0 || x >= self.size.0 || y >= self.size.1 {
+            return centre;
+        }
+        let x0 = x.saturating_sub(edge_px);
+        let y0 = y.saturating_sub(edge_px);
+        let x1 = (x + edge_px).min(self.size.0 - 1);
+        let y1 = (y + edge_px).min(self.size.1 - 1);
+        let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+        let ids = self.renderer.read_ids(device, queue, x0, y0, w, h);
+        let r2 = (edge_px * edge_px) as i64;
+        let mut best: Option<(i64, Pick)> = None;
+        for (k, id) in ids.iter().enumerate() {
+            let (px, py) = (x0 + k as u32 % w, y0 + k as u32 / w);
+            let (dx, dy) = (px as i64 - x as i64, py as i64 - y as i64);
+            let d2 = dx * dx + dy * dy;
+            if d2 > r2 || *id == 0 {
+                continue;
+            }
+            if let Some(Pick::Edge(e)) = model.resolve(*id) {
+                if best.is_none_or(|(bd, _)| d2 < bd) {
+                    best = Some((d2, Pick::Edge(e)));
+                }
+            }
+        }
+        best.map(|(_, p)| p).or(centre)
+    }
+}
+
 /// What a click in the viewport hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
@@ -278,6 +319,10 @@ pub struct Viewport3d {
     /// Draw edges only (to see toolpaths inside the material).
     pub wireframe: bool,
     pub show_edges: bool,
+    /// Picks drawn as selected besides the one passed to `show` (a multi-selection).
+    pub extra_selected: Vec<Pick>,
+    /// Reach, in pixels, of edge picking and hovering (0 = the exact pixel only).
+    pub edge_pick_px: u32,
     model: Option<ModelScene>,
     /// Identifies the geometry currently uploaded.
     key: Option<u128>,
@@ -285,6 +330,7 @@ pub struct Viewport3d {
     anim: Option<Anim>,
     hover: Option<Pick>,
     last_pointer: Option<egui::Pos2>,
+    last_edge_px: u32,
     rect: egui::Rect,
     ppp: f32,
 }
@@ -297,12 +343,15 @@ impl Default for Viewport3d {
             camera: OrbitCamera::new(50.0, 1.5),
             wireframe: false,
             show_edges: true,
+            extra_selected: Vec::new(),
+            edge_pick_px: 0,
             model: None,
             key: None,
             fitted: false,
             anim: None,
             hover: None,
             last_pointer: None,
+            last_edge_px: 0,
             rect: egui::Rect::NOTHING,
             ppp: 1.0,
         }
@@ -527,6 +576,17 @@ impl Viewport3d {
         gpu.renderer.selected = highlight
             .and_then(|p| self.model.as_ref().map(|m| m.id_of(p)))
             .unwrap_or(0);
+        gpu.renderer.selected_extra = self
+            .model
+            .as_ref()
+            .map(|m| {
+                self.extra_selected
+                    .iter()
+                    .map(|p| m.id_of(*p))
+                    .filter(|id| *id != 0)
+                    .collect()
+            })
+            .unwrap_or_default();
         gpu.renderer.hovered = self
             .hover
             .and_then(|p| self.model.as_ref().map(|m| m.id_of(p)))
@@ -544,13 +604,16 @@ impl Viewport3d {
         let mut out = ViewOut::none(rect);
         if opts.hover {
             let pos = resp.hover_pos();
-            if pos != self.last_pointer {
+            if pos != self.last_pointer || self.last_edge_px != self.edge_pick_px {
                 self.last_pointer = pos;
+                self.last_edge_px = self.edge_pick_px;
+                let reach = (self.edge_pick_px as f32 * ppp).round() as u32;
                 self.hover = pos.and_then(|pos| {
                     let x = ((pos.x - rect.min.x) * ppp) as u32;
                     let y = ((pos.y - rect.min.y) * ppp) as u32;
-                    let id = gpu.pick_id(device, &rs.queue, x, y);
-                    self.model.as_ref().and_then(|m| m.resolve(id))
+                    self.model
+                        .as_ref()
+                        .and_then(|m| gpu.pick_near(device, &rs.queue, m, x, y, reach))
                 });
             }
         } else {
@@ -558,12 +621,14 @@ impl Viewport3d {
         }
         out.hover = self.hover;
         // ---- clicks
+        let reach = (self.edge_pick_px as f32 * ppp).round() as u32;
         let pick_at =
             |gpu: &GpuView, model: &Option<ModelScene>, pos: egui::Pos2| -> Option<Pick> {
                 let x = ((pos.x - rect.min.x) * ppp) as u32;
                 let y = ((pos.y - rect.min.y) * ppp) as u32;
-                let id = gpu.pick_id(device, &rs.queue, x, y);
-                model.as_ref().and_then(|m| m.resolve(id))
+                model
+                    .as_ref()
+                    .and_then(|m| gpu.pick_near(device, &rs.queue, m, x, y, reach))
             };
         if resp.clicked_by(egui::PointerButton::Primary) {
             if let Some(pos) = resp.interact_pointer_pos() {

@@ -35,6 +35,7 @@ shot design_sketch_on_face --design-demo face
 shot design_cut_through_face --design-demo faceextrude
 shot design_hole_dialog --design-demo hole
 shot design_fillet_dialog --design-demo fillet
+shot design_fillet_edges_picked --design-demo fillet-picked
 shot design_parameters --design-demo params
 shot cam --cam-demo
 shot fea --fea-demo
