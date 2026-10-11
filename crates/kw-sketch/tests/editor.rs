@@ -24,9 +24,11 @@ fn rectangle_tool_builds_a_constrained_rectangle_and_dimensions_fix_it() {
     // dimension the bottom edge, then the right edge
     ed.set_tool(Tool::Dimension);
     click(&mut ed, 4.0, 0.0);
+    click(&mut ed, 4.0, -6.0); // empty space places the length
     let w = ed.last_dimension.expect("dimension created");
     assert!((ed.sketch.dimension_value(w).unwrap() - 8.0).abs() < 1e-9);
     click(&mut ed, 8.0, 2.5);
+    click(&mut ed, 14.0, 2.5);
     let h = ed.last_dimension.unwrap();
     assert!(ed.edit_dimension(w, 10.0));
     assert!(ed.edit_dimension(h, 4.0));

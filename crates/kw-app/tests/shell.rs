@@ -4245,3 +4245,96 @@ fn the_seam_of_a_cylinder_is_not_drawn_as_an_edge() {
     ids.dedup();
     assert_eq!(ids.len(), 2, "only the two rims are drawn");
 }
+
+#[test]
+fn a_dimension_formula_follows_the_documents_parameters() {
+    use kw_sketch::editor::{Input, Tool as SkTool};
+    let (mut h, _d) = design_harness("dim_formula");
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.model.add_parameter(project, "Width", "30");
+    }
+    start_sketch_plane(&mut h, 0);
+    h.frame(); // the sketch canvas reads the document's parameters
+    let ed = &mut h.app.design.sketch.app.editor;
+    ed.set_tool(SkTool::Rectangle);
+    ed.handle(Input::Click((0.0, 0.0)));
+    ed.handle(Input::Click((10.0, 6.0)));
+    ed.set_tool(SkTool::Dimension);
+    ed.handle(Input::Click((5.0, 0.0)));
+    ed.handle(Input::Click((5.0, -8.0)));
+    let c = ed.last_dimension.expect("a driving dimension");
+    // the width is half the parameter; the height stays 6
+    let (v, f) = h
+        .app
+        .design
+        .sketch
+        .app
+        .eval_dimension_text(c, "Width / 2")
+        .unwrap();
+    assert!((v - 15.0).abs() < 1e-9 && f.is_some());
+    assert!(h.app.design.sketch.app.editor.edit_dimension_expr(c, v, f));
+    // pin the corner so the width does not float
+    {
+        let ed = &mut h.app.design.sketch.app.editor;
+        let (lo, _) = ed.sketch.bounds().unwrap();
+        ed.set_tool(SkTool::Constrain(kw_sketch::editor::ConstraintTool::Fix));
+        ed.handle(Input::Click(lo));
+    }
+    act(&mut h, Action::FinishSketch);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { depth, .. } = &mut d.tool else {
+            panic!()
+        };
+        *depth = "2 mm".into();
+    }
+    h.frame();
+    commit(&mut h);
+    assert!(
+        (vol(&mut h) - 15.0 * 6.0 * 2.0).abs() < 1e-6,
+        "{}",
+        vol(&mut h)
+    );
+    // change the parameter: the sketch follows
+    let width = proj(&mut h)
+        .document()
+        .features
+        .iter()
+        .find(|f| matches!(f.spec, kw_feature::FeatureSpec::Parameter { .. }))
+        .unwrap()
+        .id;
+    proj(&mut h)
+        .history
+        .edit(|d| {
+            d.replace_spec(
+                width,
+                kw_feature::FeatureSpec::Parameter {
+                    name: "Width".into(),
+                    value: kw_expr::Param::length(50.0),
+                },
+            )
+        })
+        .unwrap();
+    assert!(
+        (vol(&mut h) - 25.0 * 6.0 * 2.0).abs() < 1e-6,
+        "{}",
+        vol(&mut h)
+    );
+    // editing the sketch again shows the formula
+    let sk = proj(&mut h)
+        .document()
+        .features
+        .iter()
+        .find(|f| matches!(f.spec, kw_feature::FeatureSpec::Sketch(_)))
+        .unwrap()
+        .id;
+    act(&mut h, Action::Edit(sk));
+    let ed = &h.app.design.sketch.app.editor;
+    assert_eq!(
+        ed.sketch.exprs.values().next().map(String::as_str),
+        Some("Width / 2")
+    );
+}

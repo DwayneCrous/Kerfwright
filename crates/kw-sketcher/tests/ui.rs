@@ -241,6 +241,7 @@ fn dimension_tool_opens_the_value_editor_and_applies_it() {
     h.key(Key::Escape, Modifiers::NONE);
     h.key(Key::D, Modifiers::NONE);
     h.click((5.0, 0.0)); // pick the line
+    h.click((5.0, -6.0)); // empty space places its length
     h.frame(vec![]);
     assert!(h
         .app
@@ -434,4 +435,61 @@ fn every_snap_marker_draws_and_the_snaps_palette_renders() {
     for _ in 0..3 {
         h.frame(vec![]);
     }
+}
+
+#[test]
+fn dimension_text_may_be_a_formula_over_parameters_and_other_dimensions() {
+    use kw_expr::Quantity;
+    let mut h = Harness::new(SketcherApp::default());
+    h.key(Key::R, Modifiers::NONE);
+    h.click((0.0, 0.0));
+    h.click((10.0, 6.0));
+    h.key(Key::D, Modifiers::NONE);
+    h.click((5.0, 0.0));
+    h.click((5.0, -8.0)); // d1: the bottom side
+    h.click((10.0, 3.0));
+    h.click((18.0, 3.0)); // d2: the right side
+    let ids: Vec<_> = h
+        .app
+        .editor
+        .sketch
+        .constraints
+        .iter()
+        .filter(|(id, _)| h.app.editor.sketch.dimension_var(*id).is_some())
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids.len(), 2);
+    h.app.scope.insert("Width".into(), Quantity::length(30.0));
+    // a plain number: millimetres; no formula kept
+    assert_eq!(
+        h.app.eval_dimension_text(ids[0], "12").unwrap(),
+        (12.0, None)
+    );
+    // a formula over a parameter stays live
+    let (v, f) = h.app.eval_dimension_text(ids[0], "Width / 2").unwrap();
+    assert!((v - 15.0).abs() < 1e-12 && f.as_deref() == Some("Width / 2"));
+    // another dimension: evaluated once (the formula cannot be kept)
+    let (v, f) = h.app.eval_dimension_text(ids[1], "d1 * 2").unwrap();
+    assert!((v - 20.0).abs() < 1e-9 && f.is_none(), "{v} {f:?}");
+    // an unknown name or the wrong kind of quantity is explained
+    assert!(h.app.eval_dimension_text(ids[0], "Nope + 1").is_err());
+    // an angle: a bare number is degrees
+    let mut h2 = Harness::new(SketcherApp::default());
+    h2.key(Key::R, Modifiers::NONE);
+    h2.click((0.0, 0.0));
+    h2.click((10.0, 6.0));
+    h2.key(Key::D, Modifiers::NONE);
+    h2.click((5.0, 0.0));
+    h2.click((0.0, 3.0));
+    let a = h2
+        .app
+        .editor
+        .sketch
+        .constraints
+        .iter()
+        .find(|(_, c)| matches!(c.kind, kw_sketch::ConstraintKind::Angle { .. }))
+        .unwrap()
+        .0;
+    let (v, _) = h2.app.eval_dimension_text(a, "45").unwrap();
+    assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
 }

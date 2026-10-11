@@ -63,6 +63,15 @@ pub enum Tool {
     Mirror,
 }
 
+/// What a dimension measures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DimKind {
+    Distance(EntityId, EntityId),
+    Angle(EntityId, EntityId),
+    Radius(EntityId),
+    Diameter(EntityId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Input {
     Move(P2),
@@ -940,6 +949,11 @@ impl Editor {
                 self.checkpoint();
                 self.sketch.add_fit_spline(pts);
                 self.refresh();
+            }
+            Pending::Collect(es) if self.tool == Tool::Dimension && es.len() == 1 => {
+                if let Err(e) = self.dimension_from(es, true) {
+                    self.status = format!("{e}");
+                }
             }
             Pending::Collect(es) if self.tool == Tool::Mirror && !es.is_empty() => {
                 self.pending = Pending::MirrorAxis(es);
@@ -1863,71 +1877,186 @@ impl Editor {
     }
 
     fn click_dimension(&mut self, p: P2) -> Result<(), SketchError> {
-        let Some(e) = self.pick_curve_or_point(p) else {
-            return Ok(());
-        };
+        let hit = self.pick_curve_or_point(p);
         let mut got = match std::mem::take(&mut self.pending) {
             Pending::Collect(v) => v,
             _ => Vec::new(),
         };
-        got.push(e);
+        match hit {
+            Some(e) => {
+                got.push(e);
+                self.dimension_from(got, false)
+            }
+            // a click on empty space places the dimension of what is selected alone
+            None if got.len() == 1 => self.dimension_from(got, true),
+            None => {
+                if !got.is_empty() {
+                    self.pending = Pending::Collect(got);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Make the dimension that the picked entities mean. A single line waits for a second pick until
+    /// `place` says to dimension it alone (empty space was clicked, or Enter pressed).
+    fn dimension_from(&mut self, got: Vec<EntityId>, place: bool) -> Result<(), SketchError> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Cls {
+            Point,
+            Line,
+            Circle,
+            Arc,
+            Other,
+        }
         let class = |e: EntityId| match self.sketch.kind(e) {
-            Ok(EntityKind::Point(_)) => 0,
-            Ok(EntityKind::Line { .. }) => 1,
-            Ok(EntityKind::Circle { .. } | EntityKind::Arc { .. }) => 2,
-            _ => 3,
+            Ok(EntityKind::Point(_)) => Cls::Point,
+            Ok(EntityKind::Line { .. }) => Cls::Line,
+            Ok(EntityKind::Circle { .. }) => Cls::Circle,
+            Ok(EntityKind::Arc { .. }) => Cls::Arc,
+            _ => Cls::Other,
         };
-        let cls: Vec<u8> = got.iter().map(|e| class(*e)).collect();
-        let made = if got.len() == 1 {
-            let e0 = got[0];
-            if cls[0] == 1 {
-                let (a, b) = self.sketch.line_points(e0)?;
-                self.checkpoint();
-                Some(self.sketch.dim_distance(a, b)?)
-            } else if cls[0] == 2 {
-                self.checkpoint();
-                Some(self.sketch.dim_radius(e0)?)
-            } else {
-                None
+        let cls: Vec<Cls> = got.iter().map(|e| class(*e)).collect();
+        // what the selection means, as Fusion 360 reads it
+        let kind: Option<DimKind> = if got.len() == 1 {
+            match cls[0] {
+                // one line: its length, unless a second pick follows (a parallel line, a line to
+                // measure the angle to, a point)
+                Cls::Line if place => {
+                    let (a, b) = self.sketch.line_points(got[0])?;
+                    Some(DimKind::Distance(a, b))
+                }
+                Cls::Line => {
+                    self.selection = got.clone();
+                    self.pending = Pending::Collect(got);
+                    self.status =
+                        "click another line or point, or empty space to dimension its length"
+                            .into();
+                    return Ok(());
+                }
+                // a circle: its diameter; an arc: its radius
+                Cls::Circle => Some(DimKind::Diameter(got[0])),
+                Cls::Arc => Some(DimKind::Radius(got[0])),
+                _ => None,
             }
         } else {
             let (a, b) = (got[0], got[1]);
-            let (ca, cb) = (cls[0], cls[1]);
-            self.checkpoint();
-            if (ca == 0 && cb == 0) || (ca == 0 && cb == 1) || (ca == 1 && cb == 0) {
-                Some(self.sketch.dim_distance(a, b)?)
-            } else if ca == 1 && cb == 1 {
-                let (u, w) = (self.sketch.line_vector(a)?, self.sketch.line_vector(b)?);
-                let cross = (u.0 * w.1 - u.1 * w.0).abs() / (u.0.hypot(u.1) * w.0.hypot(w.1));
-                if cross < 1e-6 {
-                    Some(self.sketch.dim_distance(a, b)?)
-                } else {
-                    Some(self.sketch.dim_angle(a, b)?)
+            match (cls[0], cls[1]) {
+                // two points, or a point and a line (the perpendicular distance)
+                (Cls::Point, Cls::Point) | (Cls::Point, Cls::Line) | (Cls::Line, Cls::Point) => {
+                    Some(DimKind::Distance(a, b))
                 }
-            } else {
-                self.undo.pop();
-                self.status = "cannot dimension this combination".into();
-                None
+                (Cls::Line, Cls::Line) => {
+                    let (u, w) = (self.sketch.line_vector(a)?, self.sketch.line_vector(b)?);
+                    let cross = (u.0 * w.1 - u.1 * w.0).abs() / (u.0.hypot(u.1) * w.0.hypot(w.1));
+                    // parallel lines: the distance between them; lines that meet: the angle
+                    Some(if cross < 1e-6 {
+                        DimKind::Distance(a, b)
+                    } else {
+                        DimKind::Angle(a, b)
+                    })
+                }
+                _ => None,
             }
         };
-        match made {
-            Some(c) => {
-                self.last_dimension = Some(c);
-                self.pending = Pending::None;
-                self.refresh_or_rollback();
+        let Some(kind) = kind else {
+            if got.len() == 1 {
+                // a point alone waits for a second pick
+                if cls[0] == Cls::Point {
+                    self.pending = Pending::Collect(got);
+                }
+            } else {
+                self.status = "cannot dimension this combination".into();
             }
-            None if got.len() == 1 => self.pending = Pending::Collect(got),
-            None => {}
+            return Ok(());
+        };
+        let (c, driven) = self.add_dimension(kind)?;
+        self.pending = Pending::None;
+        if driven {
+            self.last_dimension = None;
+            self.status = "The sketch is already determined there: added as a driven (reference) dimension, shown in brackets.".into();
+        } else {
+            self.last_dimension = Some(c);
         }
         Ok(())
     }
 
-    /// Change a dimension's value and re-solve; conflicting values are rejected.
+    /// Make a dimension. When the sketch is already fully constrained, or the new dimension would
+    /// repeat or contradict what is there, it is made *driven*: it measures the geometry instead of
+    /// controlling it. Returns the constraint and whether it is driven.
+    fn add_dimension(&mut self, kind: DimKind) -> Result<(ConstraintId, bool), SketchError> {
+        let make = |sk: &mut Sketch| -> Result<ConstraintId, SketchError> {
+            match kind {
+                DimKind::Distance(a, b) => sk.dim_distance(a, b),
+                DimKind::Angle(a, b) => sk.dim_angle(a, b),
+                DimKind::Radius(c) => sk.dim_radius(c),
+                DimKind::Diameter(c) => sk.dim_diameter(c),
+            }
+        };
+        let was_full = self
+            .report
+            .as_ref()
+            .is_some_and(|r| r.status == SketchStatus::FullyConstrained);
+        self.checkpoint();
+        let c = make(&mut self.sketch)?;
+        if was_full {
+            self.sketch.set_driven(c, true);
+            self.refresh();
+            return Ok((c, true));
+        }
+        self.refresh();
+        let bad = self.report.as_ref().is_some_and(|r| {
+            matches!(
+                r.status,
+                SketchStatus::Conflicting | SketchStatus::OverConstrained
+            )
+        });
+        if bad {
+            // back to the geometry as it was, then the same dimension as a reference
+            if let Some(prev) = self.undo.pop() {
+                self.sketch = prev;
+            }
+            self.checkpoint();
+            let c = make(&mut self.sketch)?;
+            self.sketch.set_driven(c, true);
+            self.refresh();
+            return Ok((c, true));
+        }
+        Ok((c, false))
+    }
+
+    /// Change a dimension's value and re-solve; conflicting values are rejected. Driven dimensions
+    /// only measure and cannot be edited.
     pub fn edit_dimension(&mut self, c: ConstraintId, value: f64) -> bool {
+        self.edit_dimension_expr(c, value, None)
+    }
+
+    /// As [`Editor::edit_dimension`], also remembering the formula the value came from (`None` = a plain
+    /// number): the formula is stored with the sketch so that it follows the document's parameters.
+    pub fn edit_dimension_expr(
+        &mut self,
+        c: ConstraintId,
+        value: f64,
+        expr: Option<String>,
+    ) -> bool {
+        if self.sketch.constraints.get(c).is_none_or(|k| k.driven) {
+            return false;
+        }
+        let Some(var) = self.sketch.dimension_var(c) else {
+            return false;
+        };
         self.checkpoint();
         if self.sketch.set_dimension(c, value).is_err() {
             self.undo.pop();
             return false;
+        }
+        match expr {
+            Some(t) => {
+                self.sketch.exprs.insert(var.0, t);
+            }
+            None => {
+                self.sketch.exprs.remove(&var.0);
+            }
         }
         self.refresh_or_rollback()
     }

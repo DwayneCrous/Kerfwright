@@ -2442,6 +2442,7 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "kw-dxf",
+ "kw-expr",
  "kw-sketch",
 ]
 

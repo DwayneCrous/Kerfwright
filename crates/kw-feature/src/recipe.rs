@@ -301,7 +301,17 @@ impl SketchRecipe {
             fixed: sk.vars.fixed.clone(),
             entities,
             constraints,
-            bindings: Vec::new(),
+            // dimension formulas stay live: the document's parameters drive the value
+            bindings: sk
+                .exprs
+                .iter()
+                .filter_map(|(var, text)| {
+                    Some(VarBinding {
+                        var: *var as u32,
+                        value: Param::expr(text).ok()?,
+                    })
+                })
+                .collect(),
         }
     }
 

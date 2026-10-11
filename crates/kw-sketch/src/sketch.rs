@@ -52,6 +52,9 @@ pub struct Sketch {
     pub vars: VarStore,
     pub entities: SlotMap<EntityId, Entity>,
     pub constraints: SlotMap<ConstraintId, Constraint>,
+    /// Formulas of dimension values (variable index -> text such as `Width / 2`), kept so that the value
+    /// follows the document's parameters. The variable itself holds the evaluated number.
+    pub exprs: std::collections::BTreeMap<usize, String>,
     topo: u64,
 }
 
@@ -624,10 +627,71 @@ impl Sketch {
         self.add_constraint(ConstraintKind::Diameter { circle, value: v })
     }
 
-    /// Current driving value of a dimension constraint.
+    /// Current value of a dimension constraint: the number it drives, or, for a driven (reference)
+    /// dimension, what the geometry measures right now.
     pub fn dimension_value(&self, c: ConstraintId) -> Option<f64> {
+        let con = self.constraints.get(c)?;
+        if con.driven {
+            return self.measure(c);
+        }
         let v = self.dimension_var(c)?;
         Some(self.value(v))
+    }
+
+    /// What the geometry measures for a dimension constraint (distance, angle, radius, diameter).
+    pub fn measure(&self, c: ConstraintId) -> Option<f64> {
+        match &self.constraints.get(c)?.kind {
+            ConstraintKind::Distance { a, b, .. } => self.measure_distance(*a, *b),
+            ConstraintKind::Angle { a, b, .. } => {
+                let (u, w) = (self.line_vector(*a).ok()?, self.line_vector(*b).ok()?);
+                Some((u.0 * w.1 - u.1 * w.0).atan2(u.0 * w.0 + u.1 * w.1))
+            }
+            ConstraintKind::Radius { circle, .. } => Some(self.circle_geometry(*circle).ok()?.1),
+            ConstraintKind::Diameter { circle, .. } => {
+                Some(2.0 * self.circle_geometry(*circle).ok()?.1)
+            }
+            _ => None,
+        }
+    }
+
+    fn measure_distance(&self, a: EntityId, b: EntityId) -> Option<f64> {
+        let kinds = (self.kind(a).ok()?, self.kind(b).ok()?);
+        match kinds {
+            (EntityKind::Point(_), EntityKind::Point(_)) => {
+                let (pa, pb) = (self.point(a).ok()?, self.point(b).ok()?);
+                Some(((pa.0 - pb.0).powi(2) + (pa.1 - pb.1).powi(2)).sqrt())
+            }
+            (EntityKind::Point(_), EntityKind::Line { .. }) => self.point_line_distance(a, b),
+            (EntityKind::Line { .. }, EntityKind::Point(_)) => self.point_line_distance(b, a),
+            (EntityKind::Line { .. }, EntityKind::Line { .. }) => {
+                let (a1, _) = self.line_points(a).ok()?;
+                self.point_line_distance(a1, b)
+            }
+            _ => None,
+        }
+    }
+
+    fn point_line_distance(&self, pt: EntityId, line: EntityId) -> Option<f64> {
+        let (l1, _) = self.line_points(line).ok()?;
+        let (d, o, p) = (
+            self.line_vector(line).ok()?,
+            self.point(l1).ok()?,
+            self.point(pt).ok()?,
+        );
+        let len = (d.0 * d.0 + d.1 * d.1).sqrt();
+        (len > 0.0).then(|| (d.0 * (p.1 - o.1) - d.1 * (p.0 - o.0)).abs() / len)
+    }
+
+    /// The name of a dimension (`d1`, `d2`, …), in the order the dimensions were made; formulas of
+    /// other dimensions may use it.
+    pub fn dimension_name(&self, c: ConstraintId) -> Option<String> {
+        self.dimension_var(c)?;
+        let n = self
+            .constraints
+            .iter()
+            .filter(|(id, _)| self.dimension_var(*id).is_some())
+            .position(|(id, _)| id == c)?;
+        Some(format!("d{}", n + 1))
     }
 
     pub fn dimension_var(&self, c: ConstraintId) -> Option<VarId> {

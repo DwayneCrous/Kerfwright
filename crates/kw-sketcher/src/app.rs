@@ -51,7 +51,8 @@ pub const CONSTRAINTS: &[(ConstraintTool, &str)] = &[
 
 fn state_color(s: EntityState) -> Color32 {
     match s {
-        EntityState::Constrained => Color32::from_rgb(70, 190, 110),
+        // black, as in Fusion 360: nothing left to move
+        EntityState::Constrained => Color32::from_rgb(25, 25, 30),
         EntityState::Free => Color32::from_rgb(90, 160, 255),
         EntityState::Redundant => Color32::from_rgb(235, 200, 60),
         EntityState::Conflicting => Color32::from_rgb(235, 70, 70),
@@ -103,6 +104,8 @@ pub struct SketcherApp {
     file_msg: String,
     /// Dimension value being edited (opened right after the dimension tool creates one).
     dim_edit: Option<(ConstraintId, String)>,
+    /// Named values a dimension formula may use (the host document's parameters).
+    pub scope: std::collections::HashMap<String, kw_expr::Quantity>,
     /// A drag of sketch geometry is in progress.
     grabbing: bool,
     /// Treat the pointer as resting here (sketch coordinates) when it is not over the canvas;
@@ -147,6 +150,7 @@ impl Default for SketcherApp {
             file_path: "sketch.dxf".into(),
             file_msg: String::new(),
             dim_edit: None,
+            scope: Default::default(),
             grabbing: false,
             demo_cursor: None,
             dwell: None,
@@ -431,10 +435,21 @@ impl SketcherApp {
                 } else {
                     None
                 };
+                let dim_name = self.editor.sketch.dimension_name(id);
+                let formula = self
+                    .editor
+                    .sketch
+                    .dimension_var(id)
+                    .and_then(|v| self.editor.sketch.exprs.get(&v.0).cloned());
                 ui.horizontal(|ui| {
+                    let text = match (&dim_name, c.driven) {
+                        (Some(n), true) => format!("{n} {label} (reference)"),
+                        (Some(n), false) => format!("{n} {label}"),
+                        _ => label.to_string(),
+                    };
                     match color {
-                        Some(col) => ui.colored_label(col, label),
-                        None => ui.label(label),
+                        Some(col) => ui.colored_label(col, text),
+                        None => ui.label(text),
                     };
                     if let Some(mut v) = self.editor.sketch.dimension_value(id) {
                         let angle = matches!(c.kind, ConstraintKind::Angle { .. });
@@ -442,13 +457,21 @@ impl SketcherApp {
                             v = v.to_degrees();
                         }
                         let before = v;
-                        ui.add(egui::DragValue::new(&mut v).speed(0.1).suffix(if angle {
-                            "°"
+                        if c.driven {
+                            // a reference dimension only shows what the geometry measures
+                            ui.label(format!("({v:.3}{})", if angle { "°" } else { "" }));
                         } else {
-                            ""
-                        }));
-                        if v != before {
-                            change = Some((id, if angle { v.to_radians() } else { v }));
+                            ui.add(egui::DragValue::new(&mut v).speed(0.1).suffix(if angle {
+                                "°"
+                            } else {
+                                ""
+                            }));
+                            if v != before {
+                                change = Some((id, if angle { v.to_radians() } else { v }));
+                            }
+                        }
+                        if let Some(f) = &formula {
+                            ui.label(egui::RichText::new(format!("= {f}")).weak());
                         }
                     }
                     if ui
@@ -471,6 +494,69 @@ impl SketcherApp {
         }
     }
 
+    /// What the text of a dimension means: a number (millimetres, or degrees for an angle) or a formula
+    /// over the host's parameters and the other dimensions (`d1`, `d2`, …). Returns the value (radians
+    /// for an angle) and the formula to keep: formulas that read only the host's parameters stay live,
+    /// ones that read other dimensions are evaluated once.
+    pub fn eval_dimension_text(
+        &self,
+        c: ConstraintId,
+        text: &str,
+    ) -> Result<(f64, Option<String>), String> {
+        use kw_expr::{Dim, Expr, Quantity};
+        let angle = matches!(
+            self.editor.sketch.constraints.get(c).map(|k| &k.kind),
+            Some(ConstraintKind::Angle { .. })
+        );
+        let t = text.trim();
+        if let Ok(v) = t.parse::<f64>() {
+            return Ok((if angle { v.to_radians() } else { v }, None));
+        }
+        let expr = Expr::parse(t).map_err(|e| format!("not a number or formula: {e}"))?;
+        let mut scope = self.scope.clone();
+        let mut uses_dimension = false;
+        let names = expr.free_vars();
+        for (id, k) in &self.editor.sketch.constraints {
+            if id == c {
+                continue;
+            }
+            let (Some(name), Some(v)) = (
+                self.editor.sketch.dimension_name(id),
+                self.editor.sketch.dimension_value(id),
+            ) else {
+                continue;
+            };
+            if names.contains(&name) {
+                uses_dimension = true;
+            }
+            let q = if matches!(k.kind, ConstraintKind::Angle { .. }) {
+                Quantity::angle(v)
+            } else {
+                Quantity::length(v)
+            };
+            scope.insert(name, q);
+        }
+        let q = expr.eval(&scope).map_err(|e| format!("{e}"))?;
+        let want = if angle { Dim::ANGLE } else { Dim::LENGTH };
+        let value = if q.dim == want {
+            q.value
+        } else if q.dim == Dim::NONE {
+            // a bare number from a formula: mm, or degrees for an angle
+            if angle {
+                q.value.to_radians()
+            } else {
+                q.value
+            }
+        } else {
+            return Err(format!(
+                "the formula gives {}, a {} is needed",
+                q.dim,
+                if angle { "angle" } else { "length" }
+            ));
+        };
+        Ok((value, (!uses_dimension).then(|| t.to_string())))
+    }
+
     pub fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(c) = self.editor.last_dimension.take() {
             if let Some(v) = self.editor.sketch.dimension_value(c) {
@@ -482,18 +568,35 @@ impl SketcherApp {
                 } else {
                     v
                 };
-                self.dim_edit = Some((c, format!("{v:.4}")));
+                // an existing formula is edited as the formula
+                let formula = self
+                    .editor
+                    .sketch
+                    .dimension_var(c)
+                    .and_then(|var| self.editor.sketch.exprs.get(&var.0).cloned());
+                self.dim_edit = Some((c, formula.unwrap_or_else(|| format!("{v:.4}"))));
             }
         }
         let mut close = false;
         let mut apply = None;
         if let Some((c, text)) = &mut self.dim_edit {
-            egui::Window::new("Dimension")
+            let title = self
+                .editor
+                .sketch
+                .dimension_name(*c)
+                .map(|n| format!("Dimension {n}"))
+                .unwrap_or_else(|| "Dimension".into());
+            egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
                     let r = ui.text_edit_singleline(text);
                     r.request_focus();
+                    ui.label(
+                        egui::RichText::new("a number, or a formula: Width / 2, d1 * 2")
+                            .weak()
+                            .size(10.5),
+                    );
                     ui.horizontal(|ui| {
                         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                         if ui.button("OK").clicked() || enter {
@@ -506,20 +609,14 @@ impl SketcherApp {
                 });
         }
         if let Some((c, text)) = apply {
-            match text.trim().parse::<f64>() {
-                Ok(mut v) => {
-                    if matches!(
-                        self.editor.sketch.constraints.get(c).map(|c| &c.kind),
-                        Some(ConstraintKind::Angle { .. })
-                    ) {
-                        v = v.to_radians();
-                    }
-                    if !self.editor.edit_dimension(c, v) {
+            match self.eval_dimension_text(c, &text) {
+                Ok((v, formula)) => {
+                    if !self.editor.edit_dimension_expr(c, v, formula) {
                         self.editor.status = "that value cannot be satisfied".into();
                     }
                     close = true;
                 }
-                Err(_) => self.editor.status = "not a number".into(),
+                Err(e) => self.editor.status = e,
             }
         }
         if close {
@@ -693,6 +790,26 @@ impl SketcherApp {
         }
         self.update_dwell(ui, response.hover_pos(), rect);
         let select = self.editor.tool == Tool::Select;
+        // double-click a driving dimension's label to change it
+        if response.double_clicked() && select {
+            if let Some(c) = response
+                .interact_pointer_pos()
+                .and_then(|pos| self.dimension_label_at(rect, pos))
+            {
+                let formula = self
+                    .editor
+                    .sketch
+                    .dimension_var(c)
+                    .and_then(|var| self.editor.sketch.exprs.get(&var.0).cloned());
+                let value = self.editor.sketch.dimension_value(c).unwrap_or(0.0);
+                let angle = matches!(
+                    self.editor.sketch.constraints.get(c).map(|k| &k.kind),
+                    Some(ConstraintKind::Angle { .. })
+                );
+                let shown = if angle { value.to_degrees() } else { value };
+                self.dim_edit = Some((c, formula.unwrap_or_else(|| format!("{shown:.4}"))));
+            }
+        }
         if response.drag_started_by(PointerButton::Primary) && select {
             // grab where the button went down, not where egui's drag threshold fired
             if let Some(pos) = ui
@@ -851,6 +968,43 @@ impl SketcherApp {
         ui.weak("Hold Alt to ignore snaps");
     }
 
+    /// Where the label of a dimension sits (sketch coordinates): the middle of what it measures.
+    fn dimension_anchor(&self, cid: ConstraintId) -> Option<P2> {
+        let sk = &self.editor.sketch;
+        let c = sk.constraints.get(cid)?;
+        let pts: Vec<P2> = c
+            .kind
+            .entities()
+            .iter()
+            .flat_map(|e| sk.children(*e).into_iter().chain([*e]))
+            .filter_map(|e| sk.point(e).ok())
+            .collect();
+        if pts.is_empty() {
+            return None;
+        }
+        let n = pts.len() as f64;
+        Some((
+            pts.iter().map(|p| p.0).sum::<f64>() / n,
+            pts.iter().map(|p| p.1).sum::<f64>() / n,
+        ))
+    }
+
+    /// The driving dimension whose label is under `pos` (screen), if any.
+    fn dimension_label_at(&self, rect: Rect, pos: Pos2) -> Option<ConstraintId> {
+        self.editor
+            .sketch
+            .constraints
+            .iter()
+            .filter(|(id, c)| !c.driven && self.editor.sketch.dimension_var(*id).is_some())
+            .find_map(|(id, _)| {
+                let at =
+                    self.view.to_screen(rect, self.dimension_anchor(id)?) + Vec2::new(0.0, -10.0);
+                Rect::from_center_size(at + Vec2::new(0.0, -8.0), Vec2::new(70.0, 20.0))
+                    .contains(pos)
+                    .then_some(id)
+            })
+    }
+
     fn paint(&self, painter: &egui::Painter, rect: Rect, hover: Option<Pos2>) {
         let ctx_dark = painter.ctx().global_style().visuals.dark_mode;
         painter.rect_filled(
@@ -962,7 +1116,7 @@ impl SketcherApp {
             painter.circle_filled(v.to_screen(rect, p), r, color);
         }
 
-        // dimension labels
+        // dimension labels: blue for the ones that drive the sketch, grey in brackets for reference ones
         for (cid, c) in &sk.constraints {
             let Some(val) = sk.dimension_value(cid) else {
                 continue;
@@ -982,21 +1136,36 @@ impl SketcherApp {
                 pts.iter().map(|p| p.0).sum::<f64>() / n,
                 pts.iter().map(|p| p.1).sum::<f64>() / n,
             );
-            let text = match c.kind {
+            let body = match c.kind {
                 ConstraintKind::Angle { .. } => format!("{:.2}°", val.to_degrees()),
                 ConstraintKind::Radius { .. } => format!("R{val:.3}"),
-                ConstraintKind::Diameter { .. } => format!("⌀{val:.3}"),
+                ConstraintKind::Diameter { .. } => format!("Ø{val:.3}"),
                 _ => format!("{val:.3}"),
             };
+            let has_formula = sk
+                .dimension_var(cid)
+                .is_some_and(|v| sk.exprs.contains_key(&v.0));
+            let text = if c.driven {
+                format!("({body})")
+            } else if has_formula {
+                format!("fx {body}")
+            } else {
+                body
+            };
+            let pos = v.to_screen(rect, at) + Vec2::new(0.0, -10.0);
+            let colour = if c.driven {
+                Color32::from_gray(130)
+            } else {
+                Color32::from_rgb(120, 190, 255)
+            };
             painter.text(
-                v.to_screen(rect, at) + Vec2::new(0.0, -10.0),
+                pos,
                 egui::Align2::CENTER_BOTTOM,
                 text,
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(120, 190, 255),
+                colour,
             );
         }
-
         // rubber band, inference lines and the snap marker
         let hover = self.demo_cursor.map(|w| v.to_screen(rect, w)).or(hover);
         if self.editor.tool != Tool::Select {

@@ -9,6 +9,7 @@ description = "Interactive 2D sketcher (egui) on top of kw-sketch and kw-dxf"
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 kw-sketch.workspace = true
 kw-dxf.workspace = true
+kw-expr.workspace = true
 
 [lib]
 name = "kw_sketcher"

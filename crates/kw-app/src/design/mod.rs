@@ -793,6 +793,9 @@ impl DesignWorkspace {
                 .default_size(250.0)
                 .show(ui, |ui| self.palette_ui(ui));
             egui::CentralPanel::default().show(ui, |ui| {
+                // formulas in dimensions may use the document's parameters
+                let doc = project.document();
+                self.sketch.app.scope = project.evaluation().scope(&doc);
                 self.sketch.app.shortcuts(ui.ctx());
                 self.sketch.app.canvas_ui(ui);
             });

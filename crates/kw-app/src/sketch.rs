@@ -97,6 +97,19 @@ impl SketchWorkspace {
             Some(sk) => sk,
             None => s.recipe.to_sketch().map_err(|e| e.to_string())?.0,
         };
+        let mut sk = sk;
+        // the formulas of the dimensions come back as text
+        for b in &s.recipe.bindings {
+            if let kw_expr::Param::Expr(e) = &b.value {
+                if sk
+                    .constraints
+                    .keys()
+                    .any(|c| sk.dimension_var(c).is_some_and(|v| v.0 == b.var as usize))
+                {
+                    sk.exprs.insert(b.var as usize, e.source().to_string());
+                }
+            }
+        }
         self.loaded_vars = sk.vars.values.clone();
         self.app.editor.replace_sketch(sk);
         self.app.zoom_to_fit();
@@ -139,20 +152,30 @@ impl SketchWorkspace {
                     self.error = "the sketch no longer exists".into();
                     return None;
                 };
-                // keep the parameter bindings of variables that are still there
+                // keep the parameter bindings of variables that are still there; the formulas of
+                // dimensions travel with the sketch itself
                 let loaded = &self.loaded_vars;
-                recipe.bindings = old
+                let sk = &self.app.editor.sketch;
+                let is_dimension = |var: u32| {
+                    sk.constraints
+                        .keys()
+                        .any(|c| sk.dimension_var(c).is_some_and(|v| v.0 == var as usize))
+                };
+                let own: Vec<kw_feature::recipe::VarBinding> = old
                     .recipe
                     .bindings
                     .iter()
                     .filter(|b| {
                         let v = b.var as usize;
-                        v < recipe.vars.len()
+                        // formulas of dimensions are carried by the sketch's own list
+                        !(is_dimension(b.var) && matches!(b.value, kw_expr::Param::Expr(_)))
+                            && v < recipe.vars.len()
                             && v < loaded.len()
                             && (recipe.vars[v] - loaded[v]).abs() <= 1e-9 * (1.0 + loaded[v].abs())
                     })
                     .cloned()
                     .collect();
+                recipe.bindings.extend(own);
                 let (plane, old_base) = (old.plane, old.base);
                 project.history.edit(|d| {
                     d.replace_spec(
