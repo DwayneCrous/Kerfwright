@@ -4038,6 +4038,1015 @@ fn components_joints_and_motion_make_an_assembly_that_is_saved_with_the_project(
     }
 }
 
+/// Volume of the solid a document builds.
+fn doc_volume(doc: &kw_feature::Document) -> f64 {
+    let ev = kw_feature::Engine::new().evaluate(doc);
+    let (_, o) = ev.final_solid().expect("a solid");
+    o.brep()
+        .unwrap()
+        .mass_properties(o.body().unwrap())
+        .unwrap()
+        .volume
+}
+
+fn set_extrude_depth(p: &mut kw_app::project::Project, depth: &str) {
+    let (id, mut spec) = {
+        let doc = p.document();
+        let f = doc
+            .features
+            .iter()
+            .find(|f| matches!(f.spec, FeatureSpec::Extrude(_)))
+            .expect("an extrude");
+        (f.id, f.spec.clone())
+    };
+    if let FeatureSpec::Extrude(e) = &mut spec {
+        e.depth = kw_app::model::parse_param(depth, kw_expr::Dim::LENGTH).unwrap();
+    }
+    p.history.edit(|d| d.replace_spec(id, spec)).unwrap();
+}
+
+#[test]
+fn a_body_becomes_a_component_that_is_edited_in_place_and_saved_with_the_project() {
+    let (mut h, dir) = design_harness("component");
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    let head = *proj(&mut h).evaluation().final_solid().unwrap().0;
+    act(&mut h, Action::ComponentFromBody(head));
+    {
+        let a = proj(&mut h)
+            .assembly
+            .clone()
+            .expect("the assembly was made");
+        assert_eq!((a.parts.len(), a.instances.len()), (1, 1));
+        assert_eq!(a.parts[0].frames.len(), 1);
+        assert!((doc_volume(&a.parts[0].document) - 4000.0).abs() < 1e-6);
+    }
+    assert!(
+        h.app.design.hidden_bodies.contains(&head),
+        "the body is hidden in the design so it is not drawn twice"
+    );
+    let root_len = proj(&mut h).document().len();
+
+    // open the component: its document replaces the design on screen
+    act(&mut h, Action::ActivateComponent(0));
+    assert_eq!(proj(&mut h).editing(), Some(0));
+    assert!(
+        h.app.design.hidden_bodies.is_empty(),
+        "the screen state is the component's own"
+    );
+    // change the extrude to 25 mm; the assembly follows at once (the root design is not touched)
+    set_extrude_depth(proj(&mut h), "25 mm");
+    h.frame();
+    {
+        let p = proj(&mut h);
+        let a = p.assembly.as_ref().unwrap();
+        assert!((doc_volume(&a.parts[0].document) - 10000.0).abs() < 1e-6);
+        assert_eq!(p.root_document().len(), root_len);
+        assert!((doc_volume(&p.root_document()) - 4000.0).abs() < 1e-6);
+        assert!(p.is_dirty());
+    }
+    // saving while editing stores the component in the assembly and the root design as the design
+    let path = dir.join("component.kwf");
+    proj(&mut h).save_as(&path).unwrap();
+    let reopened = kw_app::project::Project::open(&path).unwrap();
+    assert!((doc_volume(&reopened.document()) - 4000.0).abs() < 1e-6);
+    assert!(
+        (doc_volume(&reopened.assembly.as_ref().unwrap().parts[0].document) - 10000.0).abs() < 1e-6
+    );
+    // undo inside the component does not touch the root's history
+    assert!(proj(&mut h).history.can_undo());
+    proj(&mut h).history.undo();
+    h.frame();
+    assert!(
+        (doc_volume(&proj(&mut h).assembly.as_ref().unwrap().parts[0].document) - 4000.0).abs()
+            < 1e-6
+    );
+    proj(&mut h).history.redo();
+    h.frame();
+    act(&mut h, Action::FinishComponent);
+    {
+        let p = proj(&mut h);
+        assert_eq!(p.editing(), None);
+        assert_eq!(p.document().len(), root_len);
+        assert!((volume(p) - 4000.0).abs() < 1e-6, "the root design is back");
+        assert!(
+            (doc_volume(&p.assembly.as_ref().unwrap().parts[0].document) - 10000.0).abs() < 1e-6
+        );
+    }
+    // a new empty component opens for editing at once and finishes empty
+    h.app.design.asm.new_name = "Bracket".into();
+    act(&mut h, Action::NewEmptyComponent);
+    {
+        let p = proj(&mut h);
+        assert_eq!(p.editing(), Some(1));
+        assert_eq!(p.document().len(), 0);
+        let a = p.assembly.as_ref().unwrap();
+        assert_eq!(
+            (a.parts[1].name.as_str(), a.instances[1].name.as_str()),
+            ("Bracket", "Bracket")
+        );
+    }
+    act(&mut h, Action::FinishComponent);
+    assert_eq!(proj(&mut h).editing(), None);
+}
+
+fn asm_of(h: &mut Harness) -> kw_assembly::Assembly {
+    proj(h).assembly.clone().expect("an assembly")
+}
+
+#[test]
+fn the_assembly_tree_selects_grounds_groups_copies_and_deletes_components() {
+    use kw_app::design::assembly::AsmAction as A;
+    use kw_assembly::{Joint, JointEnd, JointKind};
+    let (mut h, _dir) = design_harness("asm_tree");
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    let head = *proj(&mut h).evaluation().final_solid().unwrap().0;
+    act(&mut h, Action::ComponentFromBody(head));
+    act(&mut h, Action::Asm(A::Copy(0)));
+    act(&mut h, Action::Asm(A::Copy(0)));
+    let a = asm_of(&mut h);
+    let names: Vec<&str> = a.instances.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["Body1", "Body1 copy", "Body1 copy 2"]);
+    assert_eq!(
+        h.app.design.asm.selected,
+        vec![2],
+        "the new copy is selected"
+    );
+    // a copy floats 15 mm from the original
+    let t = a.solve().unwrap();
+    assert!((t[1].apply_point(&kw_math::Point3::origin()).x - 15.0).abs() < 1e-9);
+
+    // selection: plain click replaces, shift-click toggles
+    act(&mut h, Action::Asm(A::Select(0, false)));
+    assert_eq!(h.app.design.asm.selected, vec![0]);
+    act(&mut h, Action::Asm(A::Select(1, true)));
+    assert_eq!(h.app.design.asm.selected, vec![0, 1]);
+    act(&mut h, Action::Asm(A::Select(1, true)));
+    assert_eq!(h.app.design.asm.selected, vec![0]);
+
+    // hiding a component takes it out of the posed view
+    act(&mut h, Action::Asm(A::ToggleHidden(2)));
+    h.app.design.asm.view = true;
+    h.frame();
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        assert_eq!(h.app.design.asm_display(project).unwrap().2.len(), 2);
+    }
+    act(&mut h, Action::Asm(A::ShowAll));
+    assert!(asm_of(&mut h).instances.iter().all(|i| !i.hidden));
+
+    // grounding a second component, then releasing the first
+    act(&mut h, Action::Asm(A::ToggleGround(1)));
+    assert_eq!(asm_of(&mut h).grounded(), vec![0, 1]);
+    act(&mut h, Action::Asm(A::ToggleGround(0)));
+    assert_eq!(asm_of(&mut h).grounded(), vec![1]);
+    act(&mut h, Action::Asm(A::ToggleGround(0)));
+
+    // a joint, deleted again, leaves the component in place
+    {
+        let a = proj(&mut h).assembly.as_mut().unwrap();
+        let mut j = Joint::new(
+            "pin",
+            JointKind::Revolute,
+            JointEnd {
+                instance: 0,
+                frame: "origin".into(),
+            },
+            JointEnd {
+                instance: 2,
+                frame: "origin".into(),
+            },
+        );
+        j.values = vec![kw_expr::Param::angle_deg(45.0)];
+        a.add_joint(j);
+    }
+    let before = asm_of(&mut h).solve().unwrap()[2].to_matrix();
+    act(&mut h, Action::Asm(A::SelectJoint(0)));
+    assert_eq!(h.app.design.asm.selected_joint, Some(0));
+    act(&mut h, Action::Asm(A::DeleteJoint(0)));
+    let a = asm_of(&mut h);
+    assert!(a.joints.is_empty());
+    assert!((a.solve().unwrap()[2].to_matrix() - before).norm() < 1e-9);
+
+    // a rename that clashes is refused with a message
+    act(&mut h, Action::Asm(A::Rename(0, "Body1 copy".into())));
+    assert_eq!(asm_of(&mut h).instances[0].name, "Body1");
+    assert!(h.app.design.model.error.contains("already called"));
+    h.app.design.model.error.clear();
+    act(&mut h, Action::Asm(A::Rename(0, "Base".into())));
+    assert_eq!(asm_of(&mut h).instances[0].name, "Base");
+
+    // two selected components become a rigid group, or a sub-assembly
+    h.app.design.asm.selected = vec![1, 2];
+    act(&mut h, Action::Asm(A::RigidGroupFromSelection));
+    assert_eq!(asm_of(&mut h).groups.len(), 1);
+    act(&mut h, Action::Asm(A::DeleteGroup(0)));
+    assert!(asm_of(&mut h).groups.is_empty());
+    h.app.design.asm.selected = vec![1, 2];
+    act(&mut h, Action::Asm(A::SubAssemblyFromSelection));
+    let a = asm_of(&mut h);
+    assert_eq!(a.instances.len(), 2);
+    assert!(a.parts.iter().any(|p| p.sub.is_some()));
+    // the tree draws with the sub-assembly in it
+    h.frame();
+    h.frame();
+    // deleting a component takes it away
+    let k = a.instances.len() - 1;
+    act(&mut h, Action::Asm(A::Delete(k)));
+    assert_eq!(asm_of(&mut h).instances.len(), 1);
+    assert!(h.app.design.asm.selected.is_empty());
+    assert!(proj(&mut h).is_dirty());
+}
+
+/// A click in the posed assembly view, as the viewport would deliver it.
+fn asm_click(h: &mut Harness, pick: Option<Pick>, double: bool) {
+    let out = ViewOut {
+        rect: eframe::egui::Rect::NOTHING,
+        click: (!double).then_some(pick),
+        double_click: double.then_some(pick),
+        hover: None,
+        click_pos: None,
+        response: None,
+    };
+    let Harness { ctx, app, t } = h;
+    let raw = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360.0, 860.0))),
+        time: Some(*t),
+        ..Default::default()
+    };
+    *t += 1.0 / 60.0;
+    let kw_app::ui::Screen::Project { project, .. } = &mut app.screen else {
+        panic!()
+    };
+    let _ = ctx.run_ui(raw, |ui| app.design.asm_view_clicks(ui, project, &out));
+    h.frame();
+}
+
+/// A face of the posed view: the one of body `top` whose box is flat at height `z`, facing `up`.
+fn posed_face(h: &mut Harness, top: usize, z: f64, up: bool) -> Pick {
+    let rep = h.app.design.asm.display_rep().expect("the posed view");
+    let faces = rep.body_faces(rep.bodies.keys().nth(top).unwrap());
+    let f = faces
+        .into_iter()
+        .find(|f| {
+            geom::face_frame(&rep, *f)
+                .is_some_and(|fr| (fr.n[2] > 0.99) == up && fr.n[2].abs() > 0.99)
+                && rep
+                    .face_bbox(*f)
+                    .is_some_and(|bb| (bb.max.z - z).abs() < 1e-6 && (bb.min.z - z).abs() < 1e-6)
+        })
+        .expect("a face at that height");
+    Pick::Face(f)
+}
+
+fn two_blocks(name: &str) -> Harness {
+    use kw_app::design::assembly::AsmAction as A;
+    let (mut h, _d) = design_harness(name);
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    let head = *proj(&mut h).evaluation().final_solid().unwrap().0;
+    act(&mut h, Action::ComponentFromBody(head));
+    act(&mut h, Action::Asm(A::Copy(0)));
+    h.app.design.asm.view = true;
+    h.frame();
+    h.frame();
+    h
+}
+
+#[test]
+fn joint_origins_are_found_on_faces_edges_and_round_faces() {
+    use kw_app::design::asm_snap::{candidates, choose};
+    let mut h = two_blocks("snaps");
+    let rep = h.app.design.asm.display_rep().unwrap();
+    let top = posed_face(&mut h, 0, 10.0, true);
+    let c = candidates(&rep, top);
+    // a flat face offers its centre first (pointing out), then its corners and edge middles
+    assert_eq!(c[0].what, "face centre");
+    assert!(
+        (c[0].point[0] - 10.0).abs() < 1e-9
+            && (c[0].point[1] - 10.0).abs() < 1e-9
+            && (c[0].point[2] - 10.0).abs() < 1e-9,
+        "{:?}",
+        c[0]
+    );
+    assert!((c[0].z[2] - 1.0).abs() < 1e-9);
+    assert!(c.iter().filter(|o| o.what == "vertex").count() >= 4);
+    assert!(c.iter().filter(|o| o.what == "edge midpoint").count() >= 4);
+    // the pointer near a corner picks that corner, far from everything the centre
+    let corner = choose(&c, Some([0.2, 0.1, 10.0]), 2.0).unwrap();
+    assert_eq!(corner.what, "vertex");
+    assert!(corner.point[0].abs() < 1e-9 && corner.point[1].abs() < 1e-9);
+    let mid = choose(&c, Some([9.0, 11.0, 10.0]), 0.5).unwrap();
+    assert_eq!(mid.what, "face centre");
+    // every candidate's axes are orthonormal
+    for o in &c {
+        let dot = o.z[0] * o.x[0] + o.z[1] * o.x[1] + o.z[2] * o.x[2];
+        assert!(dot.abs() < 1e-9);
+    }
+}
+
+#[test]
+fn a_round_face_offers_its_axis_and_a_circle_its_centre() {
+    use kw_app::design::asm_snap::candidates;
+    // a cylinder: a circle of radius 4 at (5, 6) extruded 12 mm
+    let (mut h, _d) = design_harness("round_snaps");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    {
+        let mut sk = kw_sketch::Sketch::new();
+        let c = sk.add_point(5.0, 6.0);
+        sk.add_circle(c, 4.0);
+        h.app.design.sketch.app.editor.replace_sketch(sk);
+    }
+    act(&mut h, Action::FinishSketch);
+    if let Some(d) = h.app.design.dialog.as_mut() {
+        if let Tool::Extrude { depth, .. } = &mut d.tool {
+            *depth = "12 mm".into();
+        }
+    }
+    h.frame();
+    commit(&mut h);
+    let ev = proj(&mut h).evaluation();
+    let (_, o) = ev.final_solid().unwrap();
+    let b = o.brep().unwrap();
+    let side = b
+        .faces
+        .keys()
+        .find(|f| {
+            matches!(
+                b.surfaces[b.faces[*f].surface],
+                kw_nurbs::SurfaceGeom::Cylinder(_)
+            )
+        })
+        .unwrap();
+    let c = candidates(b, Pick::Face(side));
+    assert_eq!(c[0].what, "cylinder axis");
+    assert!((c[0].point[0] - 5.0).abs() < 1e-9 && (c[0].point[1] - 6.0).abs() < 1e-9);
+    assert!(
+        (c[0].point[2] - 6.0).abs() < 1e-6,
+        "mid-height of the pin: {:?}",
+        c[0]
+    );
+    assert!(c[0].z[2].abs() > 0.999, "along the pin: {:?}", c[0].z);
+    // its two circular edges give their centres
+    let circles: Vec<_> = c.iter().filter(|o| o.what == "circle centre").collect();
+    assert_eq!(circles.len(), 2);
+    let mut zs: Vec<f64> = circles.iter().map(|o| o.point[2]).collect();
+    zs.sort_by(f64::total_cmp);
+    assert!(zs[0].abs() < 1e-9 && (zs[1] - 12.0).abs() < 1e-9);
+    let edge = b
+        .edges
+        .keys()
+        .find(|e| {
+            matches!(
+                kw_app::design::measure::edge_kind(b, *e),
+                Some(kw_app::design::measure::EdgeKind::Circle { .. })
+            )
+        })
+        .unwrap();
+    let ec = candidates(b, Pick::Edge(edge));
+    assert_eq!(ec[0].what, "circle centre");
+}
+
+#[test]
+fn a_joint_is_made_by_clicking_two_faces_with_a_live_preview() {
+    let mut h = two_blocks("click_joint");
+    // block 0 is grounded at the origin; its copy floats 15 mm along x
+    // open the command, click the bottom face of the copy, then the top face of the first block
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_open_joint(project, false).unwrap();
+    }
+    assert!(h.app.design.asm.dialog.is_some());
+    let bottom_copy = posed_face(&mut h, 1, 0.0, false);
+    asm_click(&mut h, Some(bottom_copy), false);
+    let top_first = posed_face(&mut h, 0, 10.0, true);
+    asm_click(&mut h, Some(top_first), false);
+    h.frame();
+    h.frame();
+    {
+        let d = h.app.design.asm.dialog.as_ref().expect("still open");
+        let (a, b) = (d.first.as_ref().unwrap(), d.second.as_ref().unwrap());
+        assert_eq!((a.instance, b.instance), (1, 0));
+        assert_eq!(a.origin.what, "face centre");
+        // the first click was the underside of the copy: it points down
+        assert!((a.origin.z[2] + 1.0).abs() < 1e-9);
+        assert!((b.origin.z[2] - 1.0).abs() < 1e-9);
+        // the live preview already has the joint, and the copy sits on the first block
+        let prev = d.preview.as_ref().expect("a preview");
+        assert_eq!(prev.joints.len(), 1);
+        let t = prev.solve().unwrap();
+        let c = t[1].apply_point(&kw_math::Point3::new(10.0, 10.0, 5.0));
+        assert!(
+            (c.x - 10.0).abs() < 1e-9 && (c.y - 10.0).abs() < 1e-9 && (c.z - 15.0).abs() < 1e-9,
+            "{c:?}"
+        );
+    }
+    // the real assembly is untouched until OK
+    assert!(asm_of(&mut h).joints.is_empty());
+    // a revolute joint with limits 0..90°
+    {
+        let d = h.app.design.asm.dialog.as_mut().unwrap();
+        d.kind = kw_assembly::JointKind::Revolute;
+        d.limit_on[0] = true;
+        d.limit_lo[0] = "0".into();
+        d.limit_hi[0] = "90".into();
+        d.mark_dirty();
+    }
+    h.frame();
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let d = h.app.design.asm.dialog.clone().unwrap();
+        h.app.design.asm_joint_commit(project, &d).unwrap();
+    }
+    h.frame();
+    let a = asm_of(&mut h);
+    assert!(h.app.design.asm.dialog.is_none());
+    assert_eq!(a.joints.len(), 1);
+    let j = &a.joints[0];
+    assert_eq!(j.kind, kw_assembly::JointKind::Revolute);
+    assert_eq!((j.parent.instance, j.child.instance), (0, 1));
+    assert!((j.limits[0].unwrap().1 - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    // two new frames, one on each part (they share the part: one frame was added to it twice with
+    // different names)
+    assert!(a.parts[0].frames.len() >= 2);
+    // turning the joint 90° swings the copy about the vertical line through the first block's top centre
+    let mut a2 = a.clone();
+    a2.joints[0].values = vec![kw_expr::Param::angle_deg(90.0)];
+    let t = a2.solve().unwrap();
+    let p = t[1].apply_point(&kw_math::Point3::new(20.0, 10.0, 5.0));
+    // (20,10,5) is 10 mm from the copy's axis (10,10): a quarter turn about it moves it to (10, 20, 15)
+    // or (10, 0, 15) depending on the joint's sense; either way it is 10 mm from the axis, at z = 15
+    assert!(
+        ((p.x - 10.0).powi(2) + (p.y - 10.0).powi(2)).sqrt() - 10.0 < 1e-9,
+        "{p:?}"
+    );
+    assert!(
+        (p.z - 15.0).abs() < 1e-9 && (p.x - 10.0).abs() < 1e-9,
+        "{p:?}"
+    );
+    // beyond the limit the pose is refused with the reason
+    a2.joints[0].values = vec![kw_expr::Param::angle_deg(120.0)];
+    assert!(a2.solve().is_err());
+}
+
+#[test]
+fn clicking_components_selects_them_and_a_double_click_opens_them() {
+    use kw_app::design::assembly::AsmAction as A;
+    let mut h = two_blocks("pick_components");
+    let top1 = posed_face(&mut h, 1, 10.0, true);
+    asm_click(&mut h, Some(top1), false);
+    assert_eq!(h.app.design.asm.selected, vec![1]);
+    let top0 = posed_face(&mut h, 0, 10.0, true);
+    // plain click replaces the selection
+    asm_click(&mut h, Some(top0), false);
+    assert_eq!(h.app.design.asm.selected, vec![0]);
+    // a click in empty space clears it
+    asm_click(&mut h, None, false);
+    assert!(h.app.design.asm.selected.is_empty());
+    // the selected component is drawn in another colour
+    act(&mut h, Action::Asm(A::Select(1, false)));
+    let key_selected = {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_display(project).unwrap()
+    };
+    act(&mut h, Action::Asm(A::Select(0, false)));
+    let key_other = {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_display(project).unwrap()
+    };
+    assert_ne!(key_selected.2, key_other.2);
+    // a double click opens the component for editing in place
+    asm_click(&mut h, Some(top1), true);
+    assert_eq!(proj(&mut h).editing(), Some(0));
+    act(&mut h, Action::FinishComponent);
+}
+
+#[test]
+fn joint_properties_change_values_limits_and_kind_and_refuse_nonsense() {
+    use kw_app::design::asm_joint::JointEdit;
+    use kw_assembly::{Joint, JointEnd, JointKind};
+    let mut h = two_blocks("joint_props");
+    {
+        let a = proj(&mut h).assembly.as_mut().unwrap();
+        a.add_joint(Joint::new(
+            "pin",
+            JointKind::Cylindrical,
+            JointEnd {
+                instance: 0,
+                frame: "origin".into(),
+            },
+            JointEnd {
+                instance: 1,
+                frame: "origin".into(),
+            },
+        ));
+    }
+    let mut a = asm_of(&mut h);
+    let mut e = JointEdit::load(&a, 0);
+    assert_eq!(e.values.len(), 2);
+    e.values = vec!["30".into(), "5".into()];
+    e.limit_on = [true, true, false];
+    e.limit_lo = ["0".into(), "0".into(), "0".into()];
+    e.limit_hi = ["45".into(), "10".into(), "0".into()];
+    e.offset = ["1".into(), "2".into(), "3".into()];
+    e.angle = "15".into();
+    e.apply(&mut a).unwrap();
+    let j = &a.joints[0];
+    assert!((j.limits[0].unwrap().1 - 45f64.to_radians()).abs() < 1e-12);
+    assert_eq!(j.limits[1], Some((0.0, 10.0)));
+    assert_eq!(j.offset, [1.0, 2.0, 3.0]);
+    assert!((j.angle - 15f64.to_radians()).abs() < 1e-12);
+    assert!(a.solve().is_ok());
+    // a value beyond its limit is a solve error; limits the wrong way round are refused outright
+    e.values[0] = "60".into();
+    e.apply(&mut a).unwrap();
+    assert!(a.solve().is_err());
+    e.limit_lo[0] = "50".into();
+    e.limit_hi[0] = "40".into();
+    assert!(e.apply(&mut a).is_err());
+    // a length where an angle belongs is explained
+    e.limit_lo[0] = "0".into();
+    e.limit_hi[0] = "45".into();
+    e.values[0] = "5 mm".into();
+    e.apply(&mut a).unwrap();
+    assert!(a.solve().unwrap_err().to_string().contains("angle") || a.solve().is_err());
+    // the window draws for a real joint (it applies edits at once)
+    h.app.design.asm.edit_joint = Some(0);
+    h.frame();
+    h.frame();
+    assert_eq!(h.app.design.asm.edit_joint, Some(0));
+}
+
+#[test]
+fn an_as_built_joint_keeps_the_components_where_they_are() {
+    let mut h = two_blocks("as_built_ui");
+    // the copy floats 15 mm away; remember where it is
+    let before = asm_of(&mut h).solve().unwrap()[1].to_matrix();
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_open_joint(project, true).unwrap();
+    }
+    let a = posed_face(&mut h, 1, 10.0, true);
+    asm_click(&mut h, Some(a), false);
+    let b = posed_face(&mut h, 0, 10.0, true);
+    asm_click(&mut h, Some(b), false);
+    {
+        let d = h.app.design.asm.dialog.as_mut().unwrap();
+        assert!(d.as_built);
+        d.kind = kw_assembly::JointKind::Revolute;
+        d.axis = 3; // the world Z axis
+    }
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let d = h.app.design.asm.dialog.clone().unwrap();
+        h.app.design.asm_joint_commit(project, &d).unwrap();
+    }
+    let a = asm_of(&mut h);
+    assert_eq!(a.joints.len(), 1);
+    assert!(a.joints[0].as_built);
+    let after = a.solve().unwrap()[1].to_matrix();
+    assert!((after - before).norm() < 1e-9, "nothing moved");
+}
+
+#[test]
+fn interference_shows_the_overlap_and_the_bill_of_materials_counts_and_weighs() {
+    use kw_app::design::asm_inspect::{bom_csv, bom_rows, set_part_material};
+    let mut h = two_blocks("inspect_app");
+    // the copy is 15 mm along x; the blocks are 20 wide: they share 5 x 20 x 10 mm³
+    run_command(&mut h, "asm_check");
+    match h.app.design.asm.overlaps.clone() {
+        Some(Ok(v)) => {
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!((v[0].volume - 1000.0).abs() < 1e-6, "{}", v[0].volume);
+            assert!(v[0].body.is_some());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(h.app.design.asm.interference_open);
+    assert!(
+        h.app.design.asm.overlap_edges.len() >= 12,
+        "the twelve edges of the overlap box"
+    );
+    h.frame();
+    h.frame();
+    // moving a component makes the old result stale
+    {
+        let a = proj(&mut h).assembly.as_mut().unwrap();
+        a.instances[1].at.t[0] = 40.0;
+    }
+    h.frame();
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_display(project);
+    }
+    assert!(h.app.design.asm.overlaps.is_none());
+    assert!(h.app.design.asm.overlap_edges.is_empty());
+    // the bill: one part, two of it; steel gives a mass
+    {
+        let a = proj(&mut h).assembly.as_mut().unwrap();
+        set_part_material(a, "Body1", Some("Steel".into()));
+    }
+    let rows = {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_refresh_pub(project);
+        match h.app.design.asm.pose_ref() {
+            Some(Ok(p)) => bom_rows(p),
+            other => panic!("{:?}", other.map(|r| r.as_ref().err().cloned())),
+        }
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].count, 2);
+    assert!((rows[0].volume - 4000.0).abs() < 1e-6);
+    // 4000 mm³ of steel (7850 kg/m³) = 31.4 g each
+    assert!((rows[0].mass_g - 31.4).abs() < 1e-9, "{}", rows[0].mass_g);
+    let csv = bom_csv(&rows);
+    let lines: Vec<&str> = csv.lines().collect();
+    assert!(lines[0].starts_with("Item,Part,Quantity"));
+    assert!(
+        lines[1].starts_with("1,Body1,2,Steel,4000.000,31.400,62.800,"),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("Total,2") && lines[2].contains("62.800"),
+        "{}",
+        lines[2]
+    );
+    // the window draws, and the export request is raised
+    h.app.design.asm.bom_open = true;
+    h.frame();
+    h.frame();
+    assert!(h.app.design.asm.bom_open);
+}
+
+#[test]
+fn the_assemble_menu_commands_start_the_joint_commands_and_groups() {
+    let mut h = two_blocks("assemble_menu");
+    run_command(&mut h, "asm_joint");
+    assert!(h
+        .app
+        .design
+        .asm
+        .dialog
+        .as_ref()
+        .is_some_and(|d| !d.as_built));
+    // Escape closes it
+    h.app.design.asm.dialog = None;
+    run_command(&mut h, "asm_as_built");
+    assert!(h.app.design.asm.dialog.as_ref().is_some_and(|d| d.as_built));
+    h.app.design.asm.dialog = None;
+    // a rigid group from the two components
+    run_command(&mut h, "asm_rigid");
+    assert_eq!(h.app.design.asm.rigid.as_ref().map(|r| r.len()), Some(2));
+    h.app.design.asm.rigid = Some(vec![true, true]);
+    // the OK button acts through the same action the window pushes
+    h.app.design.asm.selected = vec![0, 1];
+    h.app.design.asm.rigid = None;
+    act(
+        &mut h,
+        Action::Asm(kw_app::design::assembly::AsmAction::RigidGroupFromSelection),
+    );
+    assert_eq!(asm_of(&mut h).groups.len(), 1);
+    // ground the selection: both components are grounded (the group is allowed to be)
+    run_command(&mut h, "asm_ground");
+    assert_eq!(asm_of(&mut h).grounded(), vec![0, 1]);
+    run_command(&mut h, "asm_ground");
+    assert!(
+        asm_of(&mut h).grounded().is_empty(),
+        "a second Ground releases them"
+    );
+    // activate the selected component and finish it
+    h.app.design.asm.selected = vec![1];
+    run_command(&mut h, "asm_activate");
+    assert_eq!(proj(&mut h).editing(), Some(0));
+    run_command(&mut h, "asm_finish");
+    assert_eq!(proj(&mut h).editing(), None);
+    // New Component from the menu makes an empty one and opens it
+    run_command(&mut h, "asm_new");
+    assert_eq!(proj(&mut h).editing(), Some(1));
+    run_command(&mut h, "asm_finish");
+    // the view toggle and the bill
+    let before = h.app.design.asm.view;
+    run_command(&mut h, "asm_view");
+    assert_ne!(h.app.design.asm.view, before);
+    run_command(&mut h, "asm_bom");
+    assert!(h.app.design.asm.bom_open);
+}
+
+/// One frame with the given pointer events.
+fn pointer_frame(h: &mut Harness, events: Vec<egui::Event>) {
+    let Harness { ctx, app, t } = h;
+    let raw = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360.0, 860.0))),
+        time: Some(*t),
+        events,
+        ..Default::default()
+    };
+    *t += 1.0 / 60.0;
+    let _ = ctx.run_ui(raw, |ui| app.show(ui));
+}
+
+fn press(pos: Pos2, down: bool) -> egui::Event {
+    egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
+/// The screen position of a world point in the design viewport.
+fn screen_of(h: &Harness, p: [f64; 3]) -> Pos2 {
+    let o = h.app.design.viewport.origin_in_scene();
+    h.app
+        .design
+        .viewport
+        .project([p[0] + o.x, p[1] + o.y, p[2] + o.z])
+        .expect("on screen")
+}
+
+#[test]
+fn dragging_a_component_in_the_view_moves_it_and_does_not_orbit() {
+    let mut h = two_blocks("drag_view");
+    h.frame();
+    let cam_before = format!("{:?}", h.app.design.viewport.camera.view());
+    // the copy floats at x = 15: grab the middle of its top face (25, 10, 10) and pull it to the right
+    let from = screen_of(&h, [25.0, 10.0, 10.0]);
+    let to = from + egui::vec2(60.0, 0.0);
+    // (no GPU here, so the pointer hover that tells which component is under the pointer is set by hand)
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(from)]);
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![press(from, true)]);
+    assert!(h.app.design.asm.drag.is_some(), "{}", h.app.design.status);
+    for k in 1..=6 {
+        let p = from + (to - from) * (k as f32 / 6.0);
+        pointer_frame(&mut h, vec![egui::Event::PointerMoved(p)]);
+    }
+    pointer_frame(&mut h, vec![press(to, false)]);
+    pointer_frame(&mut h, vec![]);
+    assert!(h.app.design.asm.drag.is_none());
+    let a = asm_of(&mut h);
+    let moved = a.solve().unwrap()[1].apply_point(&kw_math::Point3::origin());
+    let shift = [moved.x - 15.0, moved.y, moved.z];
+    let len = (shift[0].powi(2) + shift[1].powi(2) + shift[2].powi(2)).sqrt();
+    assert!(len > 5.0, "the component followed the pointer: {shift:?}");
+    // it moved in the plane facing the camera
+    let cam = &h.app.design.viewport.camera;
+    let dir = (cam.target - cam.eye()).normalize();
+    assert!(
+        (shift[0] * dir.x + shift[1] * dir.y + shift[2] * dir.z).abs() < 1e-6 * len.max(1.0),
+        "{shift:?} vs {dir:?}"
+    );
+    assert!(proj(&mut h).is_dirty());
+    assert_eq!(
+        cam_before,
+        format!("{:?}", h.app.design.viewport.camera.view()),
+        "the camera did not orbit"
+    );
+    // the grounded block refuses with a reason (and the view orbits instead)
+    h.app.design.asm.view_hover = Some(0);
+    let g = screen_of(&h, [10.0, 10.0, 10.0]);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(g)]);
+    h.app.design.asm.view_hover = Some(0);
+    pointer_frame(&mut h, vec![press(g, true)]);
+    assert!(h.app.design.asm.drag.is_none());
+    assert!(
+        h.app.design.status.contains("cannot be moved"),
+        "{}",
+        h.app.design.status
+    );
+    pointer_frame(&mut h, vec![press(g, false)]);
+}
+
+#[test]
+fn dragging_a_jointed_component_turns_its_joint_within_the_limits() {
+    use kw_assembly::{Joint, JointEnd, JointKind};
+    let mut h = two_blocks("drag_joint");
+    {
+        let a = proj(&mut h).assembly.as_mut().unwrap();
+        let mut j = Joint::new(
+            "pin",
+            JointKind::Revolute,
+            JointEnd {
+                instance: 0,
+                frame: "origin".into(),
+            },
+            JointEnd {
+                instance: 1,
+                frame: "origin".into(),
+            },
+        );
+        j.limits = vec![Some((
+            -std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+        ))];
+        a.add_joint(j);
+    }
+    h.frame();
+    h.frame();
+    // the copy now sits on the first block's origin turning about the z axis; grab a point of its top face (15, 15, 10)
+    let from = screen_of(&h, [15.0, 15.0, 10.0]);
+    let to = from + egui::vec2(-80.0, 40.0);
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(from)]);
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![press(from, true)]);
+    assert!(h.app.design.asm.drag.is_some(), "{}", h.app.design.status);
+    assert_eq!(h.app.design.asm.drag.as_ref().unwrap().joint(), Some(0));
+    for k in 1..=8 {
+        let p = from + (to - from) * (k as f32 / 8.0);
+        pointer_frame(&mut h, vec![egui::Event::PointerMoved(p)]);
+    }
+    pointer_frame(&mut h, vec![press(to, false)]);
+    pointer_frame(&mut h, vec![]);
+    let a = asm_of(&mut h);
+    let v = a.joint_values(&a.joints[0], &a.scope().unwrap()).unwrap()[0];
+    assert!(v.abs() > 0.05, "the joint turned: {}°", v.to_degrees());
+    assert!(
+        v.abs() <= std::f64::consts::FRAC_PI_2 + 1e-9,
+        "within its limit"
+    );
+    assert!(a.solve().is_ok());
+    // a pull far beyond what the limit allows holds the joint at the limit
+    h.app.design.asm.view_hover = Some(1);
+    let g = screen_of(&h, [15.0, 15.0, 10.0]);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(g)]);
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![press(g, true)]);
+    assert!(h.app.design.asm.drag.is_some(), "{}", h.app.design.status);
+    for k in 1..=10 {
+        let p = g + egui::vec2(-60.0 * k as f32, 30.0 * k as f32);
+        pointer_frame(&mut h, vec![egui::Event::PointerMoved(p)]);
+    }
+    pointer_frame(&mut h, vec![press(g, false)]);
+    pointer_frame(&mut h, vec![]);
+    let a = asm_of(&mut h);
+    let v = a.joint_values(&a.joints[0], &a.scope().unwrap()).unwrap()[0];
+    assert!(v.abs() <= std::f64::consts::FRAC_PI_2 + 1e-9);
+    assert!(a.solve().is_ok());
+}
+
+#[test]
+fn the_move_command_shifts_and_turns_a_free_component_and_refuses_a_jointed_one() {
+    use kw_app::design::asm_drag::{move_free, MoveForm};
+    let mut h = two_blocks("move_cmd");
+    let mut form = MoveForm::new();
+    form.t = ["10".into(), "0".into(), "5 mm".into()];
+    form.r = ["0".into(), "0".into(), "90".into()];
+    let (turn, shift) = form.transform().unwrap();
+    let a = proj(&mut h).assembly.as_mut().unwrap();
+    // the copy floats at x = 15; turn it a quarter about its own origin, then shift (10, 0, 5)
+    move_free(a, 1, &turn, shift).unwrap();
+    let t = a.solve().unwrap();
+    let p = t[1].apply_point(&kw_math::Point3::new(4.0, 0.0, 0.0));
+    // (4,0,0) turns to (0,4,0) about the origin at x = 15 → (15, 4, 0), then + (10, 0, 5)
+    assert!(
+        (p.x - 25.0).abs() < 1e-9 && (p.y - 4.0).abs() < 1e-9 && (p.z - 5.0).abs() < 1e-9,
+        "{p:?}"
+    );
+    // the grounded block is refused with an explanation
+    let err = move_free(a, 0, &turn, shift).unwrap_err();
+    assert!(err.contains("placed by a joint or a ground"), "{err}");
+    // bad numbers are explained
+    form.t[0] = "abc".into();
+    assert!(form.transform().is_err());
+    // the window draws
+    h.app.design.asm.selected = vec![1];
+    run_command(&mut h, "asm_move");
+    assert!(h.app.design.asm.move_form.is_some());
+    h.frame();
+}
+
+#[test]
+fn undo_and_redo_work_on_the_assembly_in_the_assembly_view_and_on_the_design_elsewhere() {
+    use kw_app::design::assembly::AsmAction as A;
+    let mut h = two_blocks("asm_undo");
+    assert!(h.app.undo_is_for_assembly());
+    act(&mut h, Action::Asm(A::ToggleGround(1)));
+    assert_eq!(asm_of(&mut h).grounded(), vec![0, 1]);
+    h.app.undo_redo(true);
+    assert_eq!(asm_of(&mut h).grounded(), vec![0], "undone");
+    h.app.undo_redo(false);
+    assert_eq!(asm_of(&mut h).grounded(), vec![0, 1], "redone");
+    h.app.undo_redo(true);
+    // a dragged component goes back to where it was
+    let before = asm_of(&mut h).solve().unwrap()[1].to_matrix();
+    let from = screen_of(&h, [25.0, 10.0, 10.0]);
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(from)]);
+    h.app.design.asm.view_hover = Some(1);
+    pointer_frame(&mut h, vec![press(from, true)]);
+    for k in 1..=4 {
+        pointer_frame(
+            &mut h,
+            vec![egui::Event::PointerMoved(
+                from + egui::vec2(20.0 * k as f32, 0.0),
+            )],
+        );
+    }
+    pointer_frame(&mut h, vec![press(from + egui::vec2(80.0, 0.0), false)]);
+    pointer_frame(&mut h, vec![]);
+    let moved = asm_of(&mut h).solve().unwrap()[1].to_matrix();
+    assert!((moved - before).norm() > 1.0, "the drag moved it");
+    h.app.undo_redo(true);
+    assert!((asm_of(&mut h).solve().unwrap()[1].to_matrix() - before).norm() < 1e-9);
+    // the copy itself can be undone, and everything back to the first component
+    h.app.undo_redo(true);
+    assert_eq!(asm_of(&mut h).instances.len(), 1);
+    h.app.undo_redo(true);
+    assert!(
+        proj(&mut h).assembly.is_none(),
+        "back to no assembly at all"
+    );
+    assert!(!proj(&mut h).asm_can_undo());
+    // with the assembly view off, Undo is the design's own
+    h.app.design.asm.view = false;
+    assert!(!h.app.undo_is_for_assembly());
+    let before = proj(&mut h).document().len();
+    h.app.undo_redo(true);
+    assert!(
+        proj(&mut h).document().len() < before,
+        "the design's last step was undone"
+    );
+}
+
+#[test]
+fn groups_sub_assemblies_grounds_and_joints_survive_saving_and_reopening() {
+    use kw_app::design::assembly::AsmAction as A;
+    use kw_assembly::{Joint, JointEnd, JointKind};
+    let mut h = two_blocks("asm_roundtrip");
+    act(&mut h, Action::Asm(A::Copy(0)));
+    act(&mut h, Action::Asm(A::Copy(0)));
+    {
+        let a = proj(&mut h).assembly.as_mut().unwrap();
+        let mut j = Joint::new(
+            "pin",
+            JointKind::Revolute,
+            JointEnd {
+                instance: 0,
+                frame: "origin".into(),
+            },
+            JointEnd {
+                instance: 1,
+                frame: "origin".into(),
+            },
+        );
+        j.values = vec![kw_expr::Param::angle_deg(30.0)];
+        j.limits = vec![Some((0.0, 1.5))];
+        j.flip = true;
+        j.offset = [1.0, 2.0, 3.0];
+        a.add_joint(j);
+    }
+    h.app.design.asm.selected = vec![2, 3];
+    act(&mut h, Action::Asm(A::RigidGroupFromSelection));
+    act(&mut h, Action::Asm(A::ToggleHidden(3)));
+    let before = asm_of(&mut h);
+    assert_eq!(before.groups.len(), 1);
+    let path = scratch("asm_roundtrip_file").join("rt.kwf");
+    proj(&mut h).save_as(&path).unwrap();
+    let back = kw_app::project::Project::open(&path).unwrap();
+    let a = back.assembly.clone().expect("assembly stored");
+    assert_eq!(a, before);
+    assert_eq!(
+        a.solve().unwrap()[1].to_matrix(),
+        before.solve().unwrap()[1].to_matrix()
+    );
+    // a sub-assembly of the pinned pair
+    h.app.design.asm.selected = vec![0, 1];
+    act(&mut h, Action::Asm(A::SubAssemblyFromSelection));
+    let sub = asm_of(&mut h);
+    assert!(sub.parts.iter().any(|p| p.sub.is_some()));
+    proj(&mut h).save_as(&path).unwrap();
+    let back = kw_app::project::Project::open(&path).unwrap();
+    let a = back.assembly.unwrap();
+    assert_eq!(a, sub);
+    assert_eq!(a.leaves().unwrap().len(), sub.leaves().unwrap().len());
+}
+
 fn run_command(h: &mut Harness, id: &str) {
     {
         let Screen::Project { project, .. } = &mut h.app.screen else {

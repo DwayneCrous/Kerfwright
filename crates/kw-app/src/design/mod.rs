@@ -3,6 +3,11 @@
 //! a plane or a planar face, the view turns into the flat sketch canvas, *Finish Sketch* drops straight into
 //! the Extrude dialog with a live preview.
 
+pub mod asm_drag;
+pub mod asm_inspect;
+pub mod asm_joint;
+pub mod asm_snap;
+pub mod asm_tree;
 pub mod assembly;
 pub mod bodyprops;
 pub mod browser;
@@ -112,6 +117,16 @@ pub enum Action {
     ToggleSketch(FeatureId),
     /// Make the design a component of the assembly.
     NewComponent,
+    /// A new, empty component, opened for editing.
+    NewEmptyComponent,
+    /// The body ending at this feature becomes a component.
+    ComponentFromBody(FeatureId),
+    /// Open this part of the assembly for editing in place.
+    ActivateComponent(usize),
+    /// Close the component being edited.
+    FinishComponent,
+    /// A command on the assembly (tree, menus, dialogs).
+    Asm(assembly::AsmAction),
     /// The flat pattern of the sheet-metal part.
     FlatPattern,
     /// Edit the last feature of this kind (`FeatureSpec::kind_name`).
@@ -758,6 +773,27 @@ impl DesignWorkspace {
                         self.model.error = e;
                     }
                 }
+                Action::NewEmptyComponent => {
+                    if let Err(e) = self.asm_new_empty_component(project) {
+                        self.model.error = e;
+                    }
+                }
+                Action::ComponentFromBody(head) => {
+                    if let Err(e) = self.asm_component_from_body(project, head) {
+                        self.model.error = e;
+                    }
+                }
+                Action::ActivateComponent(p) => {
+                    if let Err(e) = self.activate_component(project, p) {
+                        self.model.error = e;
+                    }
+                }
+                Action::FinishComponent => {
+                    if let Err(e) = self.finish_component(project) {
+                        self.model.error = e;
+                    }
+                }
+                Action::Asm(a) => self.asm_action(project, a),
                 Action::Select(id) => self.model.selected = Some(id),
                 Action::Edit(id) => self.open_edit(project, id),
                 Action::Delete(id) => {
@@ -862,6 +898,22 @@ impl DesignWorkspace {
                 .show(ui, |ui| self.viewport_ui(ui, project, rs));
         }
         self.run_actions(project);
+        // a component being edited in place is copied into the assembly after every change
+        project.sync_component();
+    }
+
+    /// Forget everything that refers to the document on screen (picks, selections, open dialogs) because
+    /// another document replaces it (a component is opened, or closed). The camera, the ribbon tab and the
+    /// assembly state stay.
+    pub fn switch_document(&mut self) {
+        let asm = std::mem::take(&mut self.asm);
+        let viewport = std::mem::take(&mut self.viewport);
+        let (tab, shaded) = (self.ribbon_tab, self.shaded);
+        *self = DesignWorkspace::default();
+        self.asm = asm;
+        self.viewport = viewport;
+        self.ribbon_tab = tab;
+        self.shaded = shaded;
     }
 
     fn palette_ui(&mut self, ui: &mut egui::Ui) {
@@ -939,9 +991,11 @@ impl DesignWorkspace {
             (None, _) if self.measure_open => 8,
             (None, _) => 4,
         };
+        // dragging a component of the posed assembly takes the pointer from the camera
+        let dragging = self.asm_drag_frame(ui, project);
         let opts = ViewOpts {
             hover: true,
-            navigate: true,
+            navigate: !dragging,
         };
         self.viewport.wireframe = !self.shaded;
         let b = shown.clone();
@@ -965,7 +1019,9 @@ impl DesignWorkspace {
             opts,
         );
         self.overlay_ui(ui, project, &ev, &out);
-        if !self.asm.view {
+        if self.asm.view {
+            self.asm_view_clicks(ui, project, &out);
+        } else {
             self.handle_clicks(ui, project, &ev, &out);
         }
         // dialog

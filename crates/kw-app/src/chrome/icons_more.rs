@@ -297,6 +297,76 @@ pub(super) fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
             );
             dot(0.0, 0.0, orange);
         }
+        Icon::AsBuiltJoint => {
+            // two blocks already in place, with a pin through the seam
+            poly(
+                &[(-12.0, -2.0), (0.0, -2.0), (0.0, 12.0), (-12.0, 12.0)],
+                side,
+                st(blue_d),
+            );
+            poly(
+                &[(0.0, -12.0), (12.0, -12.0), (12.0, 2.0), (0.0, 2.0)],
+                top,
+                st(blue_d),
+            );
+            p.circle_filled(q(0.0, 0.0), 3.4 * s, green);
+            p.circle_stroke(q(0.0, 0.0), 3.4 * s, st(ink));
+        }
+        Icon::RigidGroup => {
+            for (x, y) in [(-6.0, -5.0), (5.0, 5.0)] {
+                iso_box(
+                    p,
+                    Rect::from_center_size(q(x, y), vec2(14.0 * s, 13.0 * s)),
+                    top,
+                    blue,
+                    side,
+                );
+            }
+            p.rect_stroke(
+                Rect::from_center_size(q(0.0, 0.0), vec2(28.0 * s, 26.0 * s)),
+                2.0,
+                Stroke::new(1.4, orange),
+                egui::StrokeKind::Middle,
+            );
+        }
+        Icon::Ground => {
+            line(p, q(0.0, -12.0), q(0.0, 2.0), ink, 2.0);
+            line(p, q(-9.0, 2.0), q(9.0, 2.0), ink, 2.4);
+            for k in 0..4 {
+                let x = -8.0 + k as f32 * 5.5;
+                line(p, q(x, 3.0), q(x - 4.0, 10.0), ink, 1.6);
+            }
+        }
+        Icon::Bom => {
+            for k in 0..4 {
+                let y = -9.0 + k as f32 * 6.0;
+                line(p, q(-11.0, y), q(11.0, y), grey, 1.4);
+            }
+            line(p, q(-4.0, -12.0), q(-4.0, 12.0), grey, 1.4);
+            p.rect_stroke(
+                Rect::from_center_size(q(0.0, 0.0), vec2(24.0 * s, 24.0 * s)),
+                2.0,
+                st(blue_d),
+                egui::StrokeKind::Middle,
+            );
+            dot(-8.0, -9.0, orange);
+        }
+        Icon::AssemblyView => {
+            iso_box(
+                p,
+                Rect::from_center_size(q(-5.0, 4.0), vec2(16.0 * s, 15.0 * s)),
+                top,
+                blue,
+                side,
+            );
+            iso_box(
+                p,
+                Rect::from_center_size(q(6.0, -4.0), vec2(14.0 * s, 13.0 * s)),
+                top,
+                orange,
+                side,
+            );
+        }
         // ------------------------------------------------------------------------- construction
         Icon::PlaneAngle => {
             poly(

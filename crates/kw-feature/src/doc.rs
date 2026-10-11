@@ -440,6 +440,33 @@ impl Document {
         Ok(id)
     }
 
+    /// A copy of the document that builds only the body ending at `head`: the features of that body and
+    /// everything they read (sketches, planes, other bodies they combine with), plus every parameter. The
+    /// body keeps its name, colour and material; the rollback bar is dropped.
+    pub fn extract_body(&self, head: FeatureId) -> Result<Document, TimelineError> {
+        self.index_of(head)
+            .ok_or(TimelineError::UnknownFeature(head))?;
+        let mut keep: HashSet<FeatureId> = HashSet::new();
+        let mut frontier = vec![head];
+        while let Some(id) = frontier.pop() {
+            if keep.insert(id) {
+                frontier.extend(self.dependencies_of(id));
+            }
+        }
+        for f in &self.features {
+            if matches!(f.spec, FeatureSpec::Parameter { .. }) {
+                keep.insert(f.id);
+            }
+        }
+        let root = self.body_root(head);
+        let mut c = self.clone();
+        c.features.retain(|f| keep.contains(&f.id));
+        c.rollback = None;
+        c.appearance.retain(|k, _| *k == root.0);
+        c.validate()?;
+        Ok(c)
+    }
+
     /// Everything that reads `id`, directly or through other features, in timeline order.
     pub fn all_dependents_of(&self, id: FeatureId) -> Vec<FeatureId> {
         let mut found: Vec<FeatureId> = Vec::new();

@@ -323,6 +323,11 @@ impl DesignWorkspace {
         }
         // ---- construction planes, axes and points
         self.draw_datums(&painter, ev, project, s);
+        // ---- joint origins while the assembly is shown
+        if self.asm.view {
+            self.draw_joint_markers(&painter, project, o3, radius * 0.18);
+            self.draw_overlaps(&painter, o3);
+        }
         // ---- the cage of the Form being edited
         self.draw_cage(&painter);
         // ---- the regions of the Extrude dialog's sketch
@@ -390,11 +395,19 @@ impl DesignWorkspace {
                 });
         });
         self.extrude_handle(ui, ev, out);
+        self.asm_note_press(ui.ctx(), project);
         self.params_window(ui.ctx(), project);
         self.measure_window(ui.ctx(), project);
         self.interference_window(ui.ctx());
         self.section_window(ui.ctx(), project);
         self.assembly_window(ui.ctx(), project);
+        self.asm_rename_windows(ui.ctx());
+        self.asm_joint_window(ui.ctx(), project);
+        self.asm_rigid_window(ui.ctx(), project);
+        self.asm_move_window(ui.ctx(), project);
+        self.asm_interference_window(ui.ctx(), project);
+        self.asm_bom_window(ui.ctx(), project);
+        self.asm_joint_props_window(ui.ctx(), project);
         self.flat_window(ui.ctx());
         self.body_props_window(ui.ctx(), project);
     }

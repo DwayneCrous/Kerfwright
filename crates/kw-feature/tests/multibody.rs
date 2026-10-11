@@ -352,3 +352,68 @@ fn splitting_a_combined_body_in_its_overlap_region() {
         );
     }
 }
+
+#[test]
+fn a_body_can_be_extracted_with_only_the_features_that_build_it() {
+    let mut doc = Document::new();
+    doc.add_parameter("w", mm(30.0)).unwrap();
+    let a = block_at(&mut doc, "A", 0.0, 0.0, 30.0, 20.0, 10.0);
+    doc.set_appearance(
+        a,
+        Appearance {
+            name: Some("Plate".into()),
+            colour: Some([200, 0, 0]),
+            material: Some("Steel".into()),
+        },
+    );
+    let b = block_at(&mut doc, "B", 50.0, 0.0, 10.0, 10.0, 10.0);
+    // a fillet-free modification of A that names its base: a hole
+    let ev = eval(&doc);
+    let top = {
+        let o = ev.output(a).unwrap();
+        let br = o.brep().unwrap();
+        let f = br
+            .faces
+            .keys()
+            .find(|f| {
+                br.face_bbox(*f).is_some_and(|bb| {
+                    (bb.min.z - 10.0).abs() < 1e-6 && (bb.max.z - 10.0).abs() < 1e-6
+                })
+            })
+            .unwrap();
+        o.names.reference_to(br, f).unwrap()
+    };
+    let hole = doc
+        .add(
+            "Hole in A",
+            FeatureSpec::Hole(HoleSpec {
+                plane: PlaneSpec::Face(top),
+                points: vec![[mm(15.0), mm(10.0)]],
+                kind: HoleKind::Simple { diameter: mm(4.0) },
+                depth: mm(10.0),
+                base: Some(a),
+                through_all: false,
+            }),
+        )
+        .unwrap();
+    assert_eq!(doc.heads(), vec![b, hole]);
+
+    let only_a = doc.extract_body(hole).unwrap();
+    // A's sketch, A, the hole and the parameter; nothing of B
+    assert_eq!(only_a.len(), 4, "{:?}", only_a.features);
+    assert!(only_a.find_by_name("B").is_none() && only_a.find_by_name("B sketch").is_none());
+    assert_eq!(only_a.heads().len(), 1);
+    assert_eq!(
+        only_a.appearance_of(a).and_then(|p| p.material.clone()),
+        Some("Steel".into())
+    );
+    let ev = eval(&only_a);
+    assert!((vol(&ev, hole) - (6000.0 - PI * 4.0 * 10.0)).abs() < 1e-3);
+    // B alone is just its sketch, itself and the parameter
+    let only_b = doc.extract_body(b).unwrap();
+    assert_eq!(only_b.len(), 3);
+    let ev = eval(&only_b);
+    assert!((vol(&ev, b) - 1000.0).abs() < 1e-6);
+    // an unknown head is refused
+    assert!(only_b.extract_body(a).is_err());
+}

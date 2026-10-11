@@ -8,7 +8,7 @@ use eframe::egui::{self, vec2, Sense, Ui};
 use kw_feature::{FeatureId, FeatureSpec, FeatureState};
 
 /// One tree row: eye toggle (optional), icon, label. Returns (row response, eye clicked).
-fn row(
+pub(super) fn row(
     ui: &mut Ui,
     icon: Icon,
     label: &str,
@@ -76,9 +76,36 @@ impl DesignWorkspace {
                 .color(TEXT_WEAK),
         );
         ui.separator();
+        if let Some(part) = project.editing() {
+            let name = project
+                .assembly
+                .as_ref()
+                .and_then(|a| a.parts.get(part))
+                .map_or("component", |p| p.name.as_str());
+            egui::Frame::new()
+                .fill(ACCENT_SOFT)
+                .corner_radius(3.0)
+                .inner_margin(egui::Margin::same(5))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Editing {name}"))
+                            .size(11.5)
+                            .strong(),
+                    );
+                    if ui
+                        .button("Finish Component")
+                        .on_hover_text("Return to the assembly")
+                        .clicked()
+                    {
+                        self.actions.push(Action::FinishComponent);
+                    }
+                });
+            ui.add_space(3.0);
+        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                self.assembly_tree(ui, project);
                 egui::CollapsingHeader::new(egui::RichText::new("Document Settings").size(12.0))
                     .default_open(false)
                     .show(ui, |ui| {
@@ -205,7 +232,7 @@ impl DesignWorkspace {
                         if resp.double_clicked() {
                             self.body_props = Some(info.root);
                         }
-                        let root = info.root;
+                        let (root, head) = (info.root, info.head);
                         resp.context_menu(|ui| {
                             if ui.button("Properties…").clicked() {
                                 self.body_props = Some(root);
@@ -225,6 +252,12 @@ impl DesignWorkspace {
                             }
                             if ui.button("Show all").clicked() {
                                 self.hidden_bodies.clear();
+                                ui.close();
+                            }
+                            if project.editing().is_none()
+                                && ui.button("New component from body").clicked()
+                            {
+                                self.actions.push(Action::ComponentFromBody(head));
                                 ui.close();
                             }
                         });

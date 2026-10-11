@@ -23,6 +23,23 @@ pub struct Project {
     /// Set by edits to the Phase 5 data, cleared by a save.
     extras_dirty: bool,
     evaluation: Option<(u128, Arc<Evaluation>)>,
+    /// While a component is being edited in place: which, and the root design set aside.
+    editing: Option<Editing>,
+    /// Undo and redo of changes to the assembly (components, joints, motion): earlier states, as stored.
+    asm_undo: Vec<Option<Vec<u8>>>,
+    asm_redo: Vec<Option<Vec<u8>>>,
+}
+
+/// How many assembly states are kept for undo.
+const ASM_UNDO_DEPTH: usize = 64;
+
+/// A component opened for editing: the project's own history is parked here and the component's document
+/// takes its place.
+struct Editing {
+    part: usize,
+    root: History,
+    /// Hash of the component's document as last copied into the assembly.
+    synced: u128,
 }
 
 fn mm(v: f64) -> Param {
@@ -49,6 +66,9 @@ impl Project {
             saved_hash,
             extras_dirty: false,
             evaluation: None,
+            editing: None,
+            asm_undo: Vec::new(),
+            asm_redo: Vec::new(),
         })
     }
 
@@ -93,8 +113,145 @@ impl Project {
         self.history.current()
     }
 
+    /// The project's own design, also while a component is being edited.
+    pub fn root_document(&self) -> Arc<Document> {
+        match &self.editing {
+            Some(e) => e.root.current(),
+            None => self.history.current(),
+        }
+    }
+
     pub fn is_dirty(&self) -> bool {
-        self.extras_dirty || self.document().content_hash() != self.saved_hash
+        self.extras_dirty || self.root_document().content_hash() != self.saved_hash
+    }
+
+    fn asm_bytes(&self) -> Option<Vec<u8>> {
+        self.assembly.as_ref().map(|a| a.to_bytes())
+    }
+
+    /// Remember the assembly as it is now, before a change (Undo in the assembly view goes back to it).
+    pub fn asm_checkpoint(&mut self) {
+        let now = self.asm_bytes();
+        self.asm_checkpoint_with(now);
+    }
+
+    /// Remember `before` (a state taken earlier) as the state to undo to.
+    pub fn asm_checkpoint_with(&mut self, before: Option<Vec<u8>>) {
+        self.asm_undo.push(before);
+        if self.asm_undo.len() > ASM_UNDO_DEPTH {
+            self.asm_undo.remove(0);
+        }
+        self.asm_redo.clear();
+    }
+
+    /// Forget the last checkpoint if nothing changed since (a drag that moved nothing).
+    pub fn asm_drop_checkpoint_if_unchanged(&mut self) {
+        if self.asm_undo.last() == Some(&self.asm_bytes()) {
+            self.asm_undo.pop();
+        }
+    }
+
+    pub fn asm_can_undo(&self) -> bool {
+        !self.asm_undo.is_empty()
+    }
+
+    pub fn asm_can_redo(&self) -> bool {
+        !self.asm_redo.is_empty()
+    }
+
+    fn asm_restore(&mut self, state: Option<Vec<u8>>) -> bool {
+        let assembly = match state {
+            None => None,
+            Some(b) => match kw_assembly::Assembly::from_bytes(&b) {
+                Ok(a) => Some(a),
+                Err(_) => return false,
+            },
+        };
+        self.assembly = assembly;
+        self.extras_dirty = true;
+        true
+    }
+
+    /// Undo the last change to the assembly.
+    pub fn asm_undo(&mut self) -> bool {
+        let Some(prev) = self.asm_undo.pop() else {
+            return false;
+        };
+        let now = self.asm_bytes();
+        if self.asm_restore(prev) {
+            self.asm_redo.push(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo a change to the assembly that was undone.
+    pub fn asm_redo(&mut self) -> bool {
+        let Some(next) = self.asm_redo.pop() else {
+            return false;
+        };
+        let now = self.asm_bytes();
+        if self.asm_restore(next) {
+            self.asm_undo.push(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The component being edited in place (an index into the assembly's parts).
+    pub fn editing(&self) -> Option<usize> {
+        self.editing.as_ref().map(|e| e.part)
+    }
+
+    /// Open component `part` for editing: its document becomes the design until [`finish_component`].
+    /// The undo history of the design is kept aside and comes back with it.
+    pub fn activate_component(&mut self, part: usize) -> Result<(), String> {
+        if self.editing.is_some() {
+            self.finish_component()?;
+        }
+        let asm = self.assembly.as_ref().ok_or("there is no assembly")?;
+        let p = asm.parts.get(part).ok_or("there is no such component")?;
+        if p.sub.is_some() {
+            return Err(
+                "a sub-assembly has no design of its own; open one of its components".into(),
+            );
+        }
+        let doc = p.document.clone();
+        let synced = doc.content_hash();
+        let root = std::mem::replace(&mut self.history, History::new(doc));
+        self.editing = Some(Editing { part, root, synced });
+        self.evaluation = None;
+        Ok(())
+    }
+
+    /// Copy the component being edited into the assembly if it changed since the last copy (so the assembly
+    /// view follows every edit). Returns whether it changed.
+    pub fn sync_component(&mut self) -> bool {
+        let Some(e) = self.editing.as_mut() else {
+            return false;
+        };
+        let doc = self.history.current();
+        let h = doc.content_hash();
+        if h == e.synced {
+            return false;
+        }
+        e.synced = h;
+        if let Some(p) = self.assembly.as_mut().and_then(|a| a.parts.get_mut(e.part)) {
+            p.document = (*doc).clone();
+        }
+        self.extras_dirty = true;
+        true
+    }
+
+    /// Close the component being edited and bring the project's own design back. Returns the part's index.
+    pub fn finish_component(&mut self) -> Result<usize, String> {
+        self.sync_component();
+        let e = self.editing.take().ok_or("no component is being edited")?;
+        self.history = e.root;
+        self.evaluation = None;
+        Ok(e.part)
     }
 
     pub fn mark_extras_dirty(&mut self) {
@@ -103,7 +260,9 @@ impl Project {
 
     /// Save to `path` (which becomes the project's path).
     pub fn save_as(&mut self, path: &Path) -> Result<(), String> {
-        let doc = (*self.document()).clone();
+        // a component being edited is stored with the assembly, the design is the project's own
+        self.sync_component();
+        let doc = (*self.root_document()).clone();
         self.file.document = doc;
         // stale entries are removed, current ones attached
         for name in [
@@ -128,7 +287,7 @@ impl Project {
         }
         self.file.save(path).map_err(|e| e.to_string())?;
         self.path = Some(path.to_path_buf());
-        self.saved_hash = self.document().content_hash();
+        self.saved_hash = self.root_document().content_hash();
         self.extras_dirty = false;
         Ok(())
     }

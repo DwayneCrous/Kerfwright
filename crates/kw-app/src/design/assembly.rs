@@ -5,13 +5,14 @@
 
 use super::{geom, DesignWorkspace};
 use crate::chrome::theme::{BAD, TEXT_WEAK};
-use crate::model::{param_text, parse_param};
+use crate::model::param_text;
 use crate::project::Project;
 use eframe::egui;
 use kw_assembly::{Assembly, Frame, Interference, Joint, JointEnd, JointKind, Part, Pose};
 use kw_brep::BRep;
 use kw_expr::{Dim, Param};
 use kw_feature::{Engine, Hasher128};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Colours of the components in the posed view.
@@ -26,6 +27,15 @@ const PALETTE: [[u8; 3]; 8] = [
     [110, 190, 190],
 ];
 
+fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let m = |x: u8, y: u8| {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    [m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2])]
+}
+
 /// A file the assembly wants the application to ask for (the dialogs live in the application).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileRequest {
@@ -35,6 +45,8 @@ pub enum FileRequest {
     ExportStep,
     /// Choose where to write the flat pattern as DXF.
     ExportDxf,
+    /// Choose where to write the bill of materials as CSV.
+    ExportBom,
     /// File ▸ Import.
     Import,
     /// File ▸ Export in this format.
@@ -68,7 +80,46 @@ struct PoseCache {
     /// The posed assembly, or why it could not be posed.
     pose: Result<Pose, String>,
     rep: Arc<BRep>,
-    colours: Vec<[u8; 3]>,
+    /// Which top-level instance each body of `rep` belongs to.
+    tops: Vec<usize>,
+    /// Which body (index into the pose) every face / edge of `rep` belongs to.
+    face_body: HashMap<kw_brep::FaceId, usize>,
+    edge_body: HashMap<kw_brep::EdgeId, usize>,
+    /// Interference has been checked for this pose.
+    checked: bool,
+}
+
+/// A command on the assembly from the browser tree, a menu or a dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AsmAction {
+    /// Select an instance; `true` adds it to (or takes it from) the selection.
+    Select(usize, bool),
+    SelectJoint(usize),
+    ToggleHidden(usize),
+    /// Show only this component.
+    Isolate(usize),
+    ShowAll,
+    ToggleGround(usize),
+    /// A new instance of the same part, next to the first.
+    Copy(usize),
+    Delete(usize),
+    DeleteJoint(usize),
+    DeleteGroup(usize),
+    RigidGroupFromSelection,
+    SubAssemblyFromSelection,
+    Rename(usize, String),
+    RenameJoint(usize, String),
+    /// The Joint command (`true`: As-Built).
+    OpenJoint(bool),
+    OpenRigid,
+    OpenBom,
+    CheckInterference,
+    /// The active (or only) body of the design becomes a component.
+    ComponentFromActiveBody,
+    /// Open the selected component for editing.
+    ActivateSelected,
+    /// Ground the selected components, or release them when they are all grounded.
+    GroundSelected,
 }
 
 pub struct AssemblyUi {
@@ -84,6 +135,50 @@ pub struct AssemblyUi {
     pub request: Option<FileRequest>,
     pub overlaps: Option<Result<Vec<Interference>, String>>,
     pub message: String,
+    /// The selected instances (indices of the assembly's instances) and joint.
+    pub selected: Vec<usize>,
+    pub selected_joint: Option<usize>,
+    /// The instance the pointer is over (in the tree or in the view).
+    pub hover: Option<usize>,
+    /// Renaming an instance (index, text so far) or a joint.
+    pub rename: Option<(usize, String)>,
+    pub rename_joint: Option<(usize, String)>,
+    /// The joint whose properties window is open, and the text boxes of it.
+    pub edit_joint: Option<usize>,
+    pub edit: Option<super::asm_joint::JointEdit>,
+    /// The Joint / As-Built Joint command, while it is open.
+    pub dialog: Option<super::asm_joint::JointDialog>,
+    /// The Rigid Group command: which components are ticked.
+    pub rigid: Option<Vec<bool>>,
+    /// The interference window, the outlines of the overlaps (world coordinates), and whether to re-check
+    /// after every change.
+    pub interference_open: bool,
+    pub overlap_edges: Vec<Vec<[f64; 3]>>,
+    pub live_check: bool,
+    pub bom_open: bool,
+    /// The component drag in progress, and the component under the pointer in the view.
+    pub drag: Option<kw_assembly::Drag>,
+    pub view_hover: Option<usize>,
+    /// The Move command, while it is open.
+    pub move_form: Option<super::asm_drag::MoveForm>,
+    /// The assembly as it was when the pointer last went down (what Undo returns to after a slider or a
+    /// field was changed).
+    pub press_snapshot: Option<Option<Vec<u8>>>,
+}
+
+impl AssemblyUi {
+    /// The posed assembly of the last refresh, or why it could not be posed.
+    pub fn pose_ref(&self) -> Option<&Result<Pose, String>> {
+        self.cache.as_ref().map(|c| &c.pose)
+    }
+
+    /// The B-rep the view shows (the posed assembly), if there is one.
+    pub fn display_rep(&self) -> Option<Arc<BRep>> {
+        self.cache
+            .as_ref()
+            .filter(|c| c.pose.is_ok())
+            .map(|c| c.rep.clone())
+    }
 }
 
 impl Default for AssemblyUi {
@@ -99,71 +194,34 @@ impl Default for AssemblyUi {
             request: None,
             overlaps: None,
             message: String::new(),
+            selected: Vec::new(),
+            selected_joint: None,
+            hover: None,
+            rename: None,
+            rename_joint: None,
+            edit_joint: None,
+            edit: None,
+            dialog: None,
+            rigid: None,
+            interference_open: false,
+            overlap_edges: Vec::new(),
+            live_check: false,
+            bom_open: false,
+            drag: None,
+            view_hover: None,
+            move_form: None,
+            press_snapshot: None,
         }
     }
 }
 
 fn kind_name(k: JointKind) -> &'static str {
-    match k {
-        JointKind::Rigid => "Rigid",
-        JointKind::Revolute => "Revolute",
-        JointKind::Slider => "Slider",
-        JointKind::Cylindrical => "Cylindrical",
-        JointKind::Planar => "Planar",
-    }
-}
-
-const KINDS: [JointKind; 5] = [
-    JointKind::Rigid,
-    JointKind::Revolute,
-    JointKind::Slider,
-    JointKind::Cylindrical,
-    JointKind::Planar,
-];
-
-/// Default values of a new joint: zero of the right dimension for each degree of freedom.
-fn zero_values(k: JointKind) -> Vec<Param> {
-    match k {
-        JointKind::Rigid => vec![],
-        JointKind::Revolute => vec![Param::angle_deg(0.0)],
-        JointKind::Slider => vec![Param::length(0.0)],
-        JointKind::Cylindrical => vec![Param::angle_deg(0.0), Param::length(0.0)],
-        JointKind::Planar => vec![
-            Param::length(0.0),
-            Param::length(0.0),
-            Param::angle_deg(0.0),
-        ],
-    }
-}
-
-fn dims(k: JointKind) -> &'static [Dim] {
-    match k {
-        JointKind::Rigid => &[],
-        JointKind::Revolute => &[Dim::ANGLE],
-        JointKind::Slider => &[Dim::LENGTH],
-        JointKind::Cylindrical => &[Dim::ANGLE, Dim::LENGTH],
-        JointKind::Planar => &[Dim::LENGTH, Dim::LENGTH, Dim::ANGLE],
-    }
+    k.name()
 }
 
 /// Take instance `i` out of the assembly with the joints that touch it; later instances move up.
 pub fn remove_instance(asm: &mut Assembly, i: usize) {
-    if i >= asm.instances.len() {
-        return;
-    }
-    asm.joints
-        .retain(|j| j.parent.instance != i && j.child.instance != i);
-    for j in &mut asm.joints {
-        for e in [&mut j.parent, &mut j.child] {
-            if e.instance > i {
-                e.instance -= 1;
-            }
-        }
-    }
-    asm.instances.remove(i);
-    if asm.ground > i || asm.ground >= asm.instances.len() {
-        asm.ground = asm.ground.saturating_sub(1);
-    }
+    asm.remove_instance(i);
 }
 
 /// A connection frame on a planar face: at the middle of the face's bounding box, z along the outward
@@ -195,6 +253,7 @@ impl DesignWorkspace {
         }
         let name = self.asm.new_name.trim().to_string();
         let name = if name.is_empty() { "Part".into() } else { name };
+        project.asm_checkpoint();
         let mut frames = vec![Frame::new(
             "origin",
             [0.0; 3],
@@ -202,18 +261,204 @@ impl DesignWorkspace {
             [1.0, 0.0, 0.0],
         )];
         frames.append(&mut self.asm.new_frames);
-        let asm = project
-            .assembly
-            .get_or_insert_with(|| Assembly::new(&project_name(&doc)));
-        let part = asm.add_part(Part {
-            name: name.clone(),
-            document: doc,
-            frames,
-        });
-        let inst = asm.add_instance(&name, part);
+        let asm = Self::assembly_of(project);
+        let part = asm.add_part_unique(Part::new(&name, doc, frames));
+        let inst_name = asm.unique_instance_name(&asm.parts[part].name.clone());
+        let inst = asm.add_instance(&inst_name, part);
         project.mark_extras_dirty();
         self.asm.overlaps = None;
         Ok(inst)
+    }
+
+    /// Note the assembly when the pointer goes down, so a change made by a slider or a field can be undone.
+    pub(super) fn asm_note_press(&mut self, ctx: &egui::Context, project: &Project) {
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            self.asm.press_snapshot = Some(project.assembly.as_ref().map(|a| a.to_bytes()));
+        }
+    }
+
+    /// Make the state noted at the last press the one Undo returns to.
+    pub(super) fn asm_commit_snapshot(&mut self, project: &mut Project) {
+        if let Some(before) = self.asm.press_snapshot.take() {
+            project.asm_checkpoint_with(before);
+        }
+    }
+
+    /// The assembly of the project, made when the first component is.
+    fn assembly_of(project: &mut Project) -> &mut Assembly {
+        let name = project.name();
+        project.assembly.get_or_insert_with(|| Assembly::new(&name))
+    }
+
+    fn origin_frame() -> Frame {
+        Frame::new("origin", [0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
+    }
+
+    /// A new component with nothing in it, opened for editing (Fusion's New Component).
+    pub fn asm_new_empty_component(&mut self, project: &mut Project) -> Result<usize, String> {
+        let name = {
+            let n = self.asm.new_name.trim();
+            if n.is_empty() {
+                "Component".to_string()
+            } else {
+                n.to_string()
+            }
+        };
+        project.asm_checkpoint();
+        let asm = Self::assembly_of(project);
+        let part = asm.add_part_unique(Part::new(
+            &name,
+            kw_feature::Document::new(),
+            vec![Self::origin_frame()],
+        ));
+        let part_name = asm.parts[part].name.clone();
+        let inst_name = asm.unique_instance_name(&part_name);
+        let inst = asm.add_instance(&inst_name, part);
+        project.mark_extras_dirty();
+        self.asm.overlaps = None;
+        self.activate_component(project, part)?;
+        Ok(inst)
+    }
+
+    /// The body ending at feature `head` becomes a component: a copy of the features that build it. The
+    /// body is hidden in the design so it is not drawn twice.
+    pub fn asm_component_from_body(
+        &mut self,
+        project: &mut Project,
+        head: kw_feature::FeatureId,
+    ) -> Result<usize, String> {
+        if project.editing().is_some() {
+            return Err("finish editing the component first".into());
+        }
+        let doc = project.document();
+        let part_doc = doc.extract_body(head).map_err(|e| e.to_string())?;
+        let root = doc.body_root(head);
+        let name = crate::bodies::summaries(&doc)
+            .into_iter()
+            .find(|b| b.head == head)
+            .map(|b| b.name)
+            .unwrap_or_else(|| doc.name_of(head));
+        project.asm_checkpoint();
+        let asm = Self::assembly_of(project);
+        let part = asm.add_part_unique(Part::new(&name, part_doc, vec![Self::origin_frame()]));
+        let part_name = asm.parts[part].name.clone();
+        let inst_name = asm.unique_instance_name(&part_name);
+        let inst = asm.add_instance(&inst_name, part);
+        self.hidden_bodies.insert(root);
+        project.mark_extras_dirty();
+        self.asm.overlaps = None;
+        self.status = format!("'{name}' is now a component.");
+        Ok(inst)
+    }
+
+    /// Build the scene of a screenshot: the design's body as a component, a copy of it, and (by `stage`)
+    /// a joint made from two clicked faces, the Joint command half-way, or the bill of materials.
+    pub fn asm_demo(&mut self, project: &mut Project, stage: &str) -> Result<(), String> {
+        use super::asm_joint::{Anchor, JointDialog};
+        let doc = project.document();
+        let head = crate::bodies::summaries(&doc)
+            .first()
+            .map(|b| b.head)
+            .ok_or("the design has no body")?;
+        self.asm_component_from_body(project, head)?;
+        self.asm_action(project, AsmAction::Copy(0));
+        self.asm.view = true;
+        self.asm_refresh(project);
+        let rep = self.asm.display_rep().ok_or("the assembly does not pose")?;
+        // a flat face of body `i` at height `z` facing up or down
+        let face_of = |i: usize, z: f64, up: bool| -> Option<crate::viewport::Pick> {
+            let body = rep.bodies.keys().nth(i)?;
+            rep.body_faces(body)
+                .into_iter()
+                .find(|f| {
+                    geom::face_frame(&rep, *f)
+                        .is_some_and(|fr| fr.n[2].abs() > 0.99 && (fr.n[2] > 0.0) == up)
+                        && rep.face_bbox(*f).is_some_and(|bb| {
+                            (bb.min.z - z).abs() < 1e-6 && (bb.max.z - z).abs() < 1e-6
+                        })
+                })
+                .map(crate::viewport::Pick::Face)
+        };
+        let top = rep
+            .bodies
+            .keys()
+            .next()
+            .and_then(|b| {
+                rep.body_faces(b)
+                    .into_iter()
+                    .filter_map(|f| rep.face_bbox(f))
+                    .map(|bb| bb.max.z)
+                    .reduce(f64::max)
+            })
+            .ok_or("no height")?;
+        let (bottom_copy, top_first) = (
+            face_of(1, 0.0, false).ok_or("no underside")?,
+            face_of(0, top, true).ok_or("no top face")?,
+        );
+        let mut dlg = JointDialog::new(false);
+        dlg.kind = JointKind::Revolute;
+        for (inst, pick) in [(1, bottom_copy), (0, top_first)] {
+            let origin = super::asm_snap::candidates(&rep, pick)
+                .into_iter()
+                .next()
+                .ok_or("no joint origin")?;
+            dlg.set_anchor(Anchor {
+                instance: inst,
+                origin,
+            });
+        }
+        match stage {
+            "assembly-joint" => {
+                self.asm.dialog = Some(dlg);
+            }
+            _ => {
+                self.asm_joint_commit(project, &dlg)?;
+                if let Some(j) = project.assembly.as_mut().and_then(|a| a.joints.first_mut()) {
+                    j.values[0] = Param::angle_deg(35.0);
+                }
+                self.asm_action(project, AsmAction::Copy(0));
+                self.asm.selected_joint = Some(0);
+                self.asm.selected.clear();
+                if stage == "assembly-bom" {
+                    self.asm.bom_open = true;
+                } else {
+                    self.asm_run_interference(project);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Open component `part` for editing in the Design workspace.
+    pub fn activate_component(&mut self, project: &mut Project, part: usize) -> Result<(), String> {
+        project.activate_component(part)?;
+        self.switch_document();
+        // the component is edited in the design view; the assembly comes back when it is finished
+        self.asm.view = false;
+        let name = project
+            .assembly
+            .as_ref()
+            .and_then(|a| a.parts.get(part))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        self.status = format!("Editing {name}: Finish Component returns to the assembly.");
+        Ok(())
+    }
+
+    /// Close the component being edited.
+    pub fn finish_component(&mut self, project: &mut Project) -> Result<(), String> {
+        let part = project.finish_component()?;
+        self.switch_document();
+        self.asm.view = true;
+        let name = project
+            .assembly
+            .as_ref()
+            .and_then(|a| a.parts.get(part))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        self.status = format!("{name} saved in the assembly.");
+        self.asm.overlaps = None;
+        Ok(())
     }
 
     /// Insert the design in the `.kwf` file at `path` as a component.
@@ -233,13 +478,11 @@ impl DesignWorkspace {
             [0.0, 0.0, 1.0],
             [1.0, 0.0, 0.0],
         )];
+        project.asm_checkpoint();
         let asm = project.assembly.get_or_insert_with(|| Assembly::new(&name));
-        let part = asm.add_part(Part {
-            name: name.clone(),
-            document: file.document,
-            frames,
-        });
-        let inst = asm.add_instance(&name, part);
+        let part = asm.add_part_unique(Part::new(&name, file.document, frames));
+        let inst_name = asm.unique_instance_name(&asm.parts[part].name.clone());
+        let inst = asm.add_instance(&inst_name, part);
         project.mark_extras_dirty();
         self.asm.overlaps = None;
         Ok(inst)
@@ -268,25 +511,25 @@ impl DesignWorkspace {
         };
         let n = asm.joints.len() + 1;
         let kind = form.kind;
-        asm.add_joint(Joint {
-            name: format!("{} {n}", kind_name(kind)),
+        let before = asm.to_bytes();
+        asm.add_joint(Joint::new(
+            &format!("{} {n}", kind_name(kind)),
             kind,
-            parent: JointEnd {
+            JointEnd {
                 instance: form.parent,
                 frame: pfn.clone(),
             },
-            child: JointEnd {
+            JointEnd {
                 instance: form.child,
                 frame: cfn.clone(),
             },
-            values: zero_values(kind),
-            limits: vec![None; kind_dof(kind)],
-        });
+        ));
         // the form must still produce a solvable tree: take the joint back if it does not
         if let Err(e) = asm.solve() {
             asm.joints.pop();
             return Err(e.to_string());
         }
+        project.asm_checkpoint_with(Some(before));
         project.mark_extras_dirty();
         self.asm.overlaps = None;
         Ok(())
@@ -294,8 +537,19 @@ impl DesignWorkspace {
 
     // ----------------------------------------------------------------------------- posing
 
+    pub fn asm_refresh_pub(&mut self, project: &Project) {
+        self.asm_refresh(project);
+    }
+
     fn asm_refresh(&mut self, project: &Project) {
-        let Some(asm) = project.assembly.as_ref() else {
+        // while the Joint command shows its result, that assembly is the one posed
+        let source = self
+            .asm
+            .dialog
+            .as_ref()
+            .and_then(|d| d.preview.as_ref())
+            .or(project.assembly.as_ref());
+        let Some(asm) = source else {
             self.asm.cache = None;
             return;
         };
@@ -308,21 +562,49 @@ impl DesignWorkspace {
             return;
         }
         let pose = asm.pose(&mut self.asm.engine).map_err(|e| e.to_string());
-        let (rep, colours) = match &pose {
-            Ok(p) => (
-                Arc::new(p.rep.clone()),
-                (0..p.bodies.len())
-                    .map(|i| PALETTE[i % PALETTE.len()])
-                    .collect(),
+        let (rep, tops, face_body, edge_body) = match &pose {
+            Ok(p) => {
+                let mut fb = HashMap::new();
+                let mut eb = HashMap::new();
+                for (i, map) in p.maps.iter().enumerate() {
+                    for f in map.faces.values() {
+                        fb.insert(*f, i);
+                    }
+                    for e in map.edges.values() {
+                        eb.insert(*e, i);
+                    }
+                }
+                (Arc::new(p.rep.clone()), p.tops.clone(), fb, eb)
+            }
+            Err(_) => (
+                Arc::new(BRep::new()),
+                Vec::new(),
+                HashMap::new(),
+                HashMap::new(),
             ),
-            Err(_) => (Arc::new(BRep::new()), Vec::new()),
         };
         self.asm.cache = Some(PoseCache {
             key,
             pose,
             rep,
-            colours,
+            tops,
+            face_body,
+            edge_body,
+            checked: false,
         });
+        self.asm.overlap_edges.clear();
+        // the numbers belonged to the old pose (live checking makes them again)
+        self.asm.overlaps = None;
+    }
+
+    /// The top-level instance and body (index into the pose) a face or edge of the posed view belongs to.
+    pub fn asm_pick_owner(&self, pick: crate::viewport::Pick) -> Option<(usize, usize)> {
+        let c = self.asm.cache.as_ref()?;
+        let body = match pick {
+            crate::viewport::Pick::Face(f) => *c.face_body.get(&f)?,
+            crate::viewport::Pick::Edge(e) => *c.edge_body.get(&e)?,
+        };
+        Some((*c.tops.get(body)?, body))
     }
 
     /// What the viewport draws while the assembly view is on: `(key, bodies, colours)`.
@@ -331,14 +613,38 @@ impl DesignWorkspace {
             return None;
         }
         self.asm_refresh(project);
+        if self.asm.live_check && self.asm.cache.as_ref().is_some_and(|c| !c.checked) {
+            self.asm_run_interference(project);
+        }
         let c = self.asm.cache.as_ref()?;
         c.pose.as_ref().ok()?;
-        Some((c.key ^ 0xA55E_0000, c.rep.clone(), c.colours.clone()))
+        // components keep one colour each; the selected ones turn blue
+        let colours: Vec<[u8; 3]> = c
+            .tops
+            .iter()
+            .map(|t| {
+                let base = PALETTE[t % PALETTE.len()];
+                if self.asm.selected.contains(t) {
+                    mix(base, [6, 150, 215], 0.6)
+                } else {
+                    base
+                }
+            })
+            .collect();
+        let mut h = Hasher128::new();
+        h.bytes(&c.key.to_le_bytes());
+        for col in &colours {
+            h.bytes(col);
+        }
+        Some((h.finish() ^ 0xA55E_0000, c.rep.clone(), colours))
     }
 
     /// Check the posed assembly for overlapping components.
     pub fn asm_check_interference(&mut self, project: &Project) {
         self.asm_refresh(project);
+        if let Some(c) = self.asm.cache.as_mut() {
+            c.checked = true;
+        }
         self.asm.overlaps = Some(match self.asm.cache.as_mut().map(|c| &mut c.pose) {
             Some(Ok(p)) => p.interference(1e-6).map_err(|e| e.to_string()),
             Some(Err(e)) => Err(e.clone()),
@@ -358,130 +664,151 @@ impl DesignWorkspace {
 
     // ------------------------------------------------------------------------------- window
 
+    /// The window behind "Drive Joints": a slider for every degree of freedom, the connection frames of the
+    /// parts, and the joint form that works from named frames. Edits are made in place.
     pub fn assembly_window(&mut self, ctx: &egui::Context, project: &mut Project) {
         if !self.asm.open {
             return;
         }
         let mut open = true;
-        let mut asm = project.assembly.clone();
-        let before = asm.clone();
-        // faces picked in the view become frames of the next new component
-        let picked_face = self.model.picks.iter().rev().find_map(|p| match p {
-            crate::viewport::Pick::Face(f) => self
-                .bodies
-                .as_ref()
-                .and_then(|b| face_connection_frame("F", &b.brep, *f)),
-            _ => None,
-        });
-        let mut do_new = false;
+        let mut changed = false;
         let mut do_joint = false;
-        let mut do_check = false;
-        egui::Window::new(egui::RichText::new("ASSEMBLY").size(11.5).strong())
+        let mut edit_joint = None;
+        egui::Window::new(egui::RichText::new("DRIVE JOINTS").size(11.5).strong())
             .open(&mut open)
-            .default_pos(egui::pos2(330.0, 120.0))
-            .default_width(340.0)
+            .default_pos(egui::pos2(330.0, 190.0))
+            .default_width(330.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
-                    ui.checkbox(&mut self.asm.view, "Show the assembly in the view")
-                        .on_hover_text("Draws every component at its solved position");
-                    ui.separator();
-                    // ---- components
-                    ui.label(egui::RichText::new("Components").strong());
-                    match asm.as_mut() {
-                        None => {
+                egui::ScrollArea::vertical()
+                    .max_height(560.0)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut self.asm.view, "Show the assembly in the view")
+                            .on_hover_text("Draws every component at its solved position");
+                        ui.separator();
+                        let Some(a) = project.assembly.as_mut() else {
                             ui.label(
-                                egui::RichText::new("None yet: make the design a component, or insert a file.")
+                                egui::RichText::new(
+                                    "No components yet: use ASSEMBLE > New Component.",
+                                )
+                                .color(TEXT_WEAK)
+                                .size(10.5),
+                            );
+                            return;
+                        };
+                        // ---- the joints' values
+                        if a.joints.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No joints yet: use ASSEMBLE > Joint.")
                                     .color(TEXT_WEAK)
                                     .size(10.5),
                             );
                         }
-                        Some(a) => {
-                            let mut remove = None;
-                            let mut copy = None;
-                            for i in 0..a.instances.len() {
-                                ui.horizontal(|ui| {
-                                    if ui.radio(a.ground == i, "").on_hover_text("Grounded: it does not move").clicked() {
-                                        a.ground = i;
-                                    }
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut a.instances[i].name)
-                                            .desired_width(130.0),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(
-                                            a.parts
-                                                .get(a.instances[i].part)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("?"),
-                                        )
+                        for ji in 0..a.joints.len() {
+                            let (pn, cn) = (
+                                a.instances
+                                    .get(a.joints[ji].parent.instance)
+                                    .map(|i| i.name.clone())
+                                    .unwrap_or_default(),
+                                a.instances
+                                    .get(a.joints[ji].child.instance)
+                                    .map(|i| i.name.clone())
+                                    .unwrap_or_default(),
+                            );
+                            let j = &mut a.joints[ji];
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(&j.name).strong().size(11.5));
+                                ui.label(
+                                    egui::RichText::new(format!("{pn} to {cn}"))
                                         .color(TEXT_WEAK)
                                         .size(10.5),
+                                );
+                                if ui.small_button("Edit…").clicked() {
+                                    edit_joint = Some(ji);
+                                }
+                            });
+                            let names = j.kind.value_names();
+                            for (vi, dim) in j.kind.dims().iter().enumerate() {
+                                let angle = *dim == Dim::ANGLE;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(14.0);
+                                    ui.label(
+                                        egui::RichText::new(names[vi]).color(TEXT_WEAK).size(10.5),
                                     );
-                                    if ui.small_button("Copy").on_hover_text("Another instance of the same part").clicked() {
-                                        copy = Some(i);
-                                    }
-                                    if ui.small_button("x").on_hover_text("Remove with its joints").clicked() {
-                                        remove = Some(i);
+                                    let Param::Lit(q) = &j.values[vi] else {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "= {}",
+                                                param_text(&j.values[vi])
+                                            ))
+                                            .size(10.5),
+                                        );
+                                        return;
+                                    };
+                                    let (lo, hi) =
+                                        j.limits.get(vi).copied().flatten().unwrap_or(if angle {
+                                            (-std::f64::consts::PI, std::f64::consts::PI)
+                                        } else {
+                                            (-100.0, 100.0)
+                                        });
+                                    let mut v = q.value;
+                                    let moved = if angle {
+                                        let mut deg = v.to_degrees();
+                                        let c = ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut deg,
+                                                    lo.to_degrees()..=hi.to_degrees(),
+                                                )
+                                                .suffix("°"),
+                                            )
+                                            .changed();
+                                        v = deg.to_radians();
+                                        c
+                                    } else {
+                                        ui.add(egui::Slider::new(&mut v, lo..=hi).suffix(" mm"))
+                                            .changed()
+                                    };
+                                    if moved {
+                                        j.values[vi] = if angle {
+                                            Param::Lit(kw_expr::Quantity::angle(v))
+                                        } else {
+                                            Param::length(v)
+                                        };
+                                        changed = true;
                                     }
                                 });
                             }
-                            if let Some(i) = copy {
-                                let (n, p) = (a.instances[i].name.clone(), a.instances[i].part);
-                                a.add_instance(&format!("{n} copy"), p);
-                            }
-                            if let Some(i) = remove {
-                                remove_instance(a, i);
-                            }
                         }
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.asm.new_name).desired_width(110.0));
-                        if ui
-                            .button("Make this design a component")
-                            .on_hover_text("The solid you are designing becomes a part; frames you add below are its connection points")
-                            .clicked()
-                        {
-                            do_new = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        let can = picked_face.is_some();
-                        if ui
-                            .add_enabled(can, egui::Button::new("Add frame from picked face"))
-                            .on_hover_text("A connection frame on the planar face you clicked (its z axis points out)")
-                            .clicked()
-                        {
-                            if let Some(f) = &picked_face {
-                                let n = self.asm.new_frames.len() + 1;
-                                let mut f = f.clone();
-                                f.name = format!("F{n}");
-                                self.asm.new_frames.push(f);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Insert component from a file…").clicked() {
+                                self.asm.request = Some(FileRequest::Insert);
                             }
-                        }
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} frame{} + origin",
-                                self.asm.new_frames.len(),
-                                if self.asm.new_frames.len() == 1 { "" } else { "s" }
-                            ))
-                            .color(TEXT_WEAK)
-                            .size(10.5),
-                        );
-                    });
-                    if ui.button("Insert a component from a file…").clicked() {
-                        self.asm.request = Some(FileRequest::Insert);
-                    }
-                    // ---- frames of every part
-                    if let Some(a) = asm.as_mut() {
+                            if ui.button("Export STEP…").clicked() {
+                                self.asm.request = Some(FileRequest::ExportStep);
+                            }
+                        });
+                        // ---- connection frames of every part
                         egui::CollapsingHeader::new("Frames of the parts").show(ui, |ui| {
                             for (pi, p) in a.parts.iter_mut().enumerate() {
                                 ui.label(egui::RichText::new(&p.name).strong().size(11.0));
                                 let mut remove = None;
                                 for (fi, f) in p.frames.iter_mut().enumerate() {
                                     ui.horizontal(|ui| {
-                                        ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(70.0));
+                                        changed |= ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut f.name)
+                                                    .desired_width(70.0),
+                                            )
+                                            .changed();
                                         for (k, c) in f.origin.iter_mut().enumerate() {
-                                            ui.add(egui::DragValue::new(c).speed(0.1).prefix(["x ", "y ", "z "][k]));
+                                            changed |= ui
+                                                .add(
+                                                    egui::DragValue::new(c)
+                                                        .speed(0.1)
+                                                        .prefix(["x ", "y ", "z "][k]),
+                                                )
+                                                .changed();
                                         }
                                         if fi > 0 && ui.small_button("x").clicked() {
                                             remove = Some(fi);
@@ -490,132 +817,52 @@ impl DesignWorkspace {
                                     ui.horizontal(|ui| {
                                         ui.add_space(78.0);
                                         for (k, c) in f.z.iter_mut().enumerate() {
-                                            ui.add(egui::DragValue::new(c).speed(0.01).prefix(["zx ", "zy ", "zz "][k]));
+                                            changed |= ui
+                                                .add(
+                                                    egui::DragValue::new(c)
+                                                        .speed(0.01)
+                                                        .prefix(["zx ", "zy ", "zz "][k]),
+                                                )
+                                                .changed();
                                         }
                                     });
                                     ui.push_id((pi, fi), |_| {});
                                 }
                                 if let Some(fi) = remove {
                                     p.frames.remove(fi);
+                                    changed = true;
                                 }
                             }
                         });
-                    }
-                    ui.separator();
-                    // ---- joints
-                    ui.label(egui::RichText::new("Joints").strong());
-                    if let Some(a) = asm.as_mut() {
-                        let mut remove = None;
-                        for ji in 0..a.joints.len() {
-                            let (pn, cn) = (
-                                a.instances.get(a.joints[ji].parent.instance).map(|i| i.name.clone()).unwrap_or_default(),
-                                a.instances.get(a.joints[ji].child.instance).map(|i| i.name.clone()).unwrap_or_default(),
-                            );
-                            let j = &mut a.joints[ji];
-                            ui.horizontal(|ui| {
-                                ui.add(egui::TextEdit::singleline(&mut j.name).desired_width(110.0));
+                        // ---- a joint between named frames
+                        egui::CollapsingHeader::new("Joint between named frames").show(ui, |ui| {
+                            let n = a.instances.len();
+                            if n < 2 {
                                 ui.label(
-                                    egui::RichText::new(format!("{pn}.{} to {cn}.{}", j.parent.frame, j.child.frame))
+                                    egui::RichText::new("Joints need two components.")
                                         .color(TEXT_WEAK)
                                         .size(10.5),
                                 );
-                                if ui.small_button("x").clicked() {
-                                    remove = Some(ji);
-                                }
-                            });
-                            let ds = dims(j.kind);
-                            for (vi, dim) in ds.iter().enumerate() {
-                                let id = ui.make_persistent_id(("joint_value", ji, vi));
-                                let mut text: String = ui
-                                    .data_mut(|d| d.get_temp::<String>(id))
-                                    .unwrap_or_else(|| param_text(&j.values[vi]));
-                                ui.horizontal(|ui| {
-                                    ui.add_space(14.0);
-                                    ui.label(
-                                        egui::RichText::new(match (j.kind, vi) {
-                                            (JointKind::Revolute, _) => "angle",
-                                            (JointKind::Slider, _) => "distance",
-                                            (JointKind::Cylindrical, 0) => "angle",
-                                            (JointKind::Cylindrical, _) => "distance",
-                                            (JointKind::Planar, 0) => "x",
-                                            (JointKind::Planar, 1) => "y",
-                                            _ => "angle",
-                                        })
-                                        .color(TEXT_WEAK)
-                                        .size(10.5),
-                                    );
-                                    let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(80.0));
-                                    if r.changed() {
-                                        if let Ok(p) = parse_param(&text, *dim) {
-                                            j.values[vi] = p;
-                                        }
-                                    }
-                                    if r.has_focus() {
-                                        ui.data_mut(|d| d.insert_temp(id, text.clone()));
-                                    } else {
-                                        ui.data_mut(|d| d.remove::<String>(id));
-                                    }
-                                    // a slider over the limit (or a turn / 100 mm) moves the joint
-                                    if let Param::Lit(q) = &j.values[vi] {
-                                        let (lo, hi) = j
-                                            .limits
-                                            .get(vi)
-                                            .copied()
-                                            .flatten()
-                                            .unwrap_or(if *dim == Dim::ANGLE {
-                                                (-std::f64::consts::PI, std::f64::consts::PI)
-                                            } else {
-                                                (-100.0, 100.0)
-                                            });
-                                        let mut v = q.value;
-                                        let changed = if *dim == Dim::ANGLE {
-                                            let mut deg = v.to_degrees();
-                                            let c = ui
-                                                .add(egui::Slider::new(&mut deg, lo.to_degrees()..=hi.to_degrees()).show_value(false))
-                                                .changed();
-                                            v = deg.to_radians();
-                                            c
-                                        } else {
-                                            ui.add(egui::Slider::new(&mut v, lo..=hi).show_value(false))
-                                                .changed()
-                                        };
-                                        if changed {
-                                            j.values[vi] = if *dim == Dim::ANGLE {
-                                                Param::angle_deg(v.to_degrees())
-                                            } else {
-                                                Param::length(v)
-                                            };
-                                            ui.data_mut(|d| d.remove::<String>(id));
-                                        }
-                                    }
-                                });
+                                return;
                             }
-                        }
-                        if let Some(ji) = remove {
-                            a.joints.remove(ji);
-                        }
-                        // ---- new joint
-                        ui.add_space(4.0);
-                        let n = a.instances.len();
-                        if n >= 2 {
                             let f = &mut self.asm.joint;
                             f.parent = f.parent.min(n - 1);
                             f.child = f.child.min(n - 1);
-                            ui.horizontal(|ui| {
-                                egui::ComboBox::from_id_salt("joint_kind")
-                                    .selected_text(kind_name(f.kind))
-                                    .show_ui(ui, |ui| {
-                                        for k in KINDS {
-                                            ui.selectable_value(&mut f.kind, k, kind_name(k));
-                                        }
-                                    });
-                            });
+                            egui::ComboBox::from_id_salt("joint_kind")
+                                .selected_text(kind_name(f.kind))
+                                .show_ui(ui, |ui| {
+                                    for k in JointKind::ALL {
+                                        ui.selectable_value(&mut f.kind, k, kind_name(k));
+                                    }
+                                });
                             for (label, inst, fr) in [
                                 ("Parent", &mut f.parent, &mut f.parent_frame),
                                 ("Child", &mut f.child, &mut f.child_frame),
                             ] {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(label).color(TEXT_WEAK).size(10.5));
+                                    ui.label(
+                                        egui::RichText::new(label).color(TEXT_WEAK).size(10.5),
+                                    );
                                     egui::ComboBox::from_id_salt(("joint_inst", label))
                                         .selected_text(a.instances[*inst].name.clone())
                                         .show_ui(ui, |ui| {
@@ -637,80 +884,44 @@ impl DesignWorkspace {
                             if ui.button("Add joint").clicked() {
                                 do_joint = true;
                             }
-                        } else {
-                            ui.label(
-                                egui::RichText::new("Joints need two components.")
-                                    .color(TEXT_WEAK)
-                                    .size(10.5),
-                            );
-                        }
-                    }
-                    ui.separator();
-                    // ---- checks and export
-                    ui.horizontal(|ui| {
-                        if ui.button("Check interference").clicked() {
-                            do_check = true;
-                        }
-                        if ui.button("Export STEP…").clicked() {
-                            self.asm.request = Some(FileRequest::ExportStep);
-                        }
-                    });
-                    match &self.asm.overlaps {
-                        Some(Ok(v)) if v.is_empty() => {
-                            ui.label("No components overlap.");
-                        }
-                        Some(Ok(v)) => {
-                            for o in v {
-                                ui.label(format!("{} and {} share {:.3} mm³", o.a, o.b, o.volume));
-                            }
-                        }
-                        Some(Err(e)) => {
-                            ui.colored_label(BAD, e);
-                        }
-                        None => {}
-                    }
-                    if let Some(c) = &self.asm.cache {
-                        match &c.pose {
-                            Ok(p) => {
-                                if let Some((v, cm)) = p.mass() {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Volume {:.2} mm³, centre ({:.2}, {:.2}, {:.2})",
-                                            v, cm.x, cm.y, cm.z
-                                        ))
-                                        .color(TEXT_WEAK)
-                                        .size(10.5),
-                                    );
+                        });
+                        if let Some(c) = &self.asm.cache {
+                            match &c.pose {
+                                Ok(p) => {
+                                    if let Some((v, cm)) = p.mass() {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Volume {:.2} mm³, centre ({:.2}, {:.2}, {:.2})",
+                                                v, cm.x, cm.y, cm.z
+                                            ))
+                                            .color(TEXT_WEAK)
+                                            .size(10.5),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    ui.colored_label(BAD, e);
                                 }
                             }
-                            Err(e) => {
-                                ui.colored_label(BAD, e);
-                            }
                         }
-                    }
-                    if !self.asm.message.is_empty() {
-                        ui.colored_label(BAD, &self.asm.message);
-                    }
-                });
+                        if !self.asm.message.is_empty() {
+                            ui.colored_label(BAD, &self.asm.message);
+                        }
+                    });
             });
-        if asm != before {
-            project.assembly = asm;
+        if changed {
+            self.asm_commit_snapshot(project);
             project.mark_extras_dirty();
             self.asm.overlaps = None;
         }
-        self.asm.message.clear();
-        if do_new {
-            if let Err(e) = self.asm_new_component(project) {
-                self.asm.message = e;
-            }
+        if let Some(j) = edit_joint {
+            self.asm.edit_joint = Some(j);
         }
+        self.asm.message.clear();
         if do_joint {
             if let Err(e) = self.asm_add_joint(project) {
                 self.asm.message = e;
             }
-        }
-        if do_check {
-            self.asm_check_interference(project);
         }
         // the pose is refreshed for the readout (cheap when nothing changed)
         self.asm_refresh(project);
@@ -718,13 +929,4 @@ impl DesignWorkspace {
             self.asm.open = false;
         }
     }
-}
-
-fn kind_dof(k: JointKind) -> usize {
-    dims(k).len()
-}
-
-fn project_name(doc: &kw_feature::Document) -> String {
-    let _ = doc;
-    "Assembly".into()
 }

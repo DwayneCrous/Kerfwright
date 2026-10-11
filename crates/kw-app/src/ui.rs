@@ -519,31 +519,8 @@ impl KerfwrightApp {
                     flip: true,
                 });
             }
-            "assembly" => {
-                if let Some((_, _, face)) = top_face(project) {
-                    let ev = project.evaluation();
-                    if let Some(rep) = ev.final_solid().and_then(|(_, o)| o.brep().cloned()) {
-                        if let Some(f) =
-                            crate::design::assembly::face_connection_frame("F1", &rep, face)
-                        {
-                            self.design.asm.new_frames.push(f);
-                        }
-                    }
-                }
-                self.design.asm.new_name = "Block".into();
-                if self.design.asm_new_component(project).is_ok() {
-                    if let Some(a) = project.assembly.as_mut() {
-                        a.add_instance("Block copy", 0);
-                    }
-                    self.design.asm.joint.kind = kw_assembly::JointKind::Revolute;
-                    self.design.asm.joint.parent_frame = 1;
-                    let _ = self.design.asm_add_joint(project);
-                    if let Some(j) = project.assembly.as_mut().and_then(|a| a.joints.first_mut()) {
-                        j.values[0] = kw_expr::Param::angle_deg(35.0);
-                    }
-                }
-                self.design.asm.open = true;
-                self.design.asm.view = true;
+            "assembly" | "assembly-joint" | "assembly-bom" => {
+                let _ = self.design.asm_demo(project, what);
             }
             "sheet" => {
                 self.design.ribbon_tab = 1;
@@ -828,6 +805,16 @@ impl KerfwrightApp {
                     Err(e) => format!("export failed: {e}"),
                 };
             }
+            FileRequest::ExportBom => {
+                let name = self.project().map(|p| p.name()).unwrap_or_default();
+                let Some(path) =
+                    self.dialogs
+                        .save_file(&format!("{name}-bom.csv"), "CSV", &["csv"])
+                else {
+                    return;
+                };
+                self.export_bom_path(&path);
+            }
             FileRequest::ExportStep => {
                 let name = self.project().map(|p| p.name()).unwrap_or_default();
                 let Some(path) = self.dialogs.save_file(
@@ -842,6 +829,37 @@ impl KerfwrightApp {
         }
     }
 
+    /// In the Design workspace with the assembly shown (and no component open) Undo and Redo work on the
+    /// assembly; everywhere else on the design.
+    pub fn undo_is_for_assembly(&self) -> bool {
+        self.workspace() == Some(Workspace::Design)
+            && self.design.asm.view
+            && self.project().is_some_and(|p| p.editing().is_none())
+    }
+
+    pub fn undo_redo(&mut self, undo: bool) {
+        let on_assembly = self.undo_is_for_assembly();
+        let Some(p) = self.project_mut() else {
+            return;
+        };
+        if on_assembly {
+            if undo {
+                p.asm_undo();
+            } else {
+                p.asm_redo();
+            }
+            // the selection and any open joint windows referred to the old state
+            self.design.asm.selected.clear();
+            self.design.asm.selected_joint = None;
+            self.design.asm.edit_joint = None;
+            self.design.asm.edit = None;
+        } else if undo {
+            p.history.undo();
+        } else {
+            p.history.redo();
+        }
+    }
+
     pub fn insert_component_path(&mut self, path: &Path) {
         let Screen::Project { project, .. } = &mut self.screen else {
             return;
@@ -849,6 +867,26 @@ impl KerfwrightApp {
         self.message = match self.design.asm_insert_path(project, path) {
             Ok(_) => format!("inserted {}", path.display()),
             Err(e) => format!("insert failed: {e}"),
+        };
+    }
+
+    /// Write the bill of materials as CSV.
+    pub fn export_bom_path(&mut self, path: &Path) {
+        let Screen::Project { project, .. } = &mut self.screen else {
+            return;
+        };
+        self.design.asm_refresh_pub(project);
+        self.message = match self.design.asm.pose_ref() {
+            Some(Ok(p)) => {
+                let csv =
+                    crate::design::asm_inspect::bom_csv(&crate::design::asm_inspect::bom_rows(p));
+                match std::fs::write(path, csv) {
+                    Ok(()) => format!("wrote {}", path.display()),
+                    Err(e) => format!("export failed: {e}"),
+                }
+            }
+            Some(Err(e)) => format!("export failed: {e}"),
+            None => "export failed: there is no assembly yet".into(),
         };
     }
 
@@ -1297,13 +1335,7 @@ impl KerfwrightApp {
         let sketching = self.design.mode == crate::design::Mode::Sketching
             && self.workspace() == Some(Workspace::Design);
         if (undo || redo) && !sketching {
-            if let Some(p) = self.project_mut() {
-                if undo {
-                    p.history.undo();
-                } else {
-                    p.history.redo();
-                }
-            }
+            self.undo_redo(undo);
         }
         // ---- application bar
         let frame = egui::Frame::new()
@@ -1350,27 +1382,35 @@ impl KerfwrightApp {
                         ui.close();
                     }
                 });
+                let on_assembly = self.undo_is_for_assembly();
                 let (can_undo, can_redo) = self
                     .project()
-                    .map(|p| (p.history.can_undo(), p.history.can_redo()))
+                    .map(|p| {
+                        if on_assembly {
+                            (p.asm_can_undo(), p.asm_can_redo())
+                        } else {
+                            (p.history.can_undo(), p.history.can_redo())
+                        }
+                    })
                     .unwrap_or((false, false));
+                let tip = if on_assembly {
+                    "the assembly view: undoes changes to components, joints and motion"
+                } else {
+                    "Ctrl+Z"
+                };
                 if ui
                     .add_enabled(can_undo, egui::Button::new("Undo"))
-                    .on_hover_text("Ctrl+Z")
+                    .on_hover_text(tip)
                     .clicked()
                 {
-                    if let Some(p) = self.project_mut() {
-                        p.history.undo();
-                    }
+                    self.undo_redo(true);
                 }
                 if ui
                     .add_enabled(can_redo, egui::Button::new("Redo"))
-                    .on_hover_text("Ctrl+Y")
+                    .on_hover_text(if on_assembly { tip } else { "Ctrl+Y" })
                     .clicked()
                 {
-                    if let Some(p) = self.project_mut() {
-                        p.history.redo();
-                    }
+                    self.undo_redo(false);
                 }
                 if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
                     self.save();

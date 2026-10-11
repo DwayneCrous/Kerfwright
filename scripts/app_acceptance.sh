@@ -44,6 +44,8 @@ shot design_construct_menu --demo --open-menu CONSTRUCT
 shot design_construction --design-demo construct
 shot design_section --design-demo section
 shot design_assembly --design-demo assembly
+shot design_assembly_joint --design-demo assembly-joint
+shot design_assembly_bom --design-demo assembly-bom
 shot design_sheet_metal --design-demo sheet
 shot design_form --design-demo form
 shot design_tools_tab --design-demo tools

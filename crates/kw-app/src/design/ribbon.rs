@@ -2,6 +2,7 @@
 //! title, a dropdown (`CREATE ▾`) listing all of the group's commands under category headings. The SOLID tab
 //! is always there; the SKETCH tab appears while a sketch is being drawn.
 
+use super::assembly::AsmAction;
 use super::tools::Tool;
 use super::{Action, DesignWorkspace, Mode};
 use crate::chrome::ribbon::{Item, Prim, Section};
@@ -91,6 +92,9 @@ struct Ctx {
     has_tool_feature: bool,
     /// How many bodies there are (Combine needs two).
     bodies: usize,
+    /// How many components the assembly has, and whether one is open for editing.
+    components: usize,
+    editing: bool,
 }
 
 fn it(id: &'static str, icon: Icon, label: &'static str, tip: &str) -> Item {
@@ -375,6 +379,8 @@ impl DesignWorkspace {
             sketches,
             has_solid: project.evaluation().final_solid().is_some(),
             bodies: doc.heads().len(),
+            components: project.assembly.as_ref().map_or(0, |a| a.instances.len()),
+            editing: project.editing().is_some(),
             has_tool_feature: doc.features.iter().any(|f| {
                 matches!(
                     f.spec,
@@ -741,40 +747,138 @@ impl DesignWorkspace {
         }
 
         // ---------------------------------------------------------------- ASSEMBLE
+        let need_two = "the assembly needs two components";
         let asm_new = it(
             "asm_new",
             Icon::Component,
             "New Component",
-            "Make the solid you designed a component of the assembly",
+            "A new, empty component, opened for editing",
+        );
+        let asm_body = it(
+            "asm_body",
+            Icon::Body,
+            "Component from Body",
+            "Make the active body (or the only one) a component",
         )
-        .enabled_if(cx.has_solid, need_solid);
+        .enabled_if(
+            cx.bodies > 0 && !cx.editing,
+            "there is no body to make a component of",
+        );
+        let asm_design = it(
+            "asm_design",
+            Icon::Component,
+            "Component from Design",
+            "Make the whole design a component of the assembly",
+        )
+        .enabled_if(cx.has_solid && !cx.editing, "there is no solid yet");
         let asm_insert = it(
             "asm_insert",
-            Icon::Component,
+            Icon::Folder,
             "Insert Component",
             "Insert the design of another .kwf file as a component",
         );
+        let asm_activate = if cx.editing {
+            it(
+                "asm_finish",
+                Icon::Finish,
+                "Finish Component",
+                "Close the component and return to the assembly",
+            )
+        } else {
+            it(
+                "asm_activate",
+                Icon::Select,
+                "Activate Component",
+                "Edit the selected component in place",
+            )
+            .enabled_if(self.asm.selected.len() == 1, "select one component first")
+        };
         let asm_joint = it(
             "asm_joint",
             Icon::Joint,
             "Joint",
-            "Connect two components: rigid, revolute, slider, cylindrical or planar",
+            "Click a point on each of two components: rigid, revolute, slider, cylindrical, planar or ball",
         )
-        .active(self.asm.open);
+        .enabled_if(cx.components >= 2, need_two)
+        .active(self.asm.dialog.as_ref().is_some_and(|d| !d.as_built));
+        let asm_as_built = it(
+            "asm_as_built",
+            Icon::AsBuiltJoint,
+            "As-Built Joint",
+            "Join two components where they are now, without moving them",
+        )
+        .enabled_if(cx.components >= 2, need_two)
+        .active(self.asm.dialog.as_ref().is_some_and(|d| d.as_built));
+        let asm_rigid = it(
+            "asm_rigid",
+            Icon::RigidGroup,
+            "Rigid Group",
+            "Make the chosen components move as one",
+        )
+        .enabled_if(cx.components >= 2, need_two);
+        let asm_ground = it(
+            "asm_ground",
+            Icon::Ground,
+            "Ground",
+            "Ground or release the selected components",
+        )
+        .enabled_if(!self.asm.selected.is_empty(), "select a component first");
+        let asm_move = it(
+            "asm_move",
+            Icon::Move,
+            "Move Component",
+            "Type a shift and a turn for the selected free component (or drag it in the view)",
+        )
+        .enabled_if(!self.asm.selected.is_empty(), "select a component first");
+        let asm_view = it(
+            "asm_view",
+            Icon::AssemblyView,
+            "Assembly View",
+            "Show the components at their solved positions",
+        )
+        .enabled_if(cx.components > 0, "there are no components yet")
+        .active(self.asm.view);
         let asm_motion = it(
             "asm_motion",
             Icon::Motion,
-            "Motion",
+            "Drive Joints",
             "Move the joints with sliders and watch the assembly",
         )
-        .active(self.asm.view);
+        .enabled_if(cx.components > 0, "there are no components yet")
+        .active(self.asm.open);
+        let asm_check = it(
+            "asm_check",
+            Icon::Interference,
+            "Interference",
+            "Find components that overlap and show the overlap",
+        )
+        .enabled_if(cx.components >= 2, need_two);
+        let asm_bom = it(
+            "asm_bom",
+            Icon::Bom,
+            "Bill of Materials",
+            "Parts, how many of each, volume, material and mass",
+        )
+        .enabled_if(cx.components > 0, "there are no components yet");
         if let Some(id) = rb::menu_group(
             ui,
             "ASSEMBLE",
-            &[asm_new.clone().into(), asm_joint.clone().into()],
             &[
-                Section::new("COMPONENTS", vec![asm_new, asm_insert]),
-                Section::new("CONNECT", vec![asm_joint, asm_motion]),
+                asm_new.clone().into(),
+                asm_joint.clone().into(),
+                asm_as_built.clone().into(),
+            ],
+            &[
+                Section::new(
+                    "COMPONENT",
+                    vec![asm_new, asm_body, asm_design, asm_insert, asm_activate],
+                ),
+                Section::new(
+                    "JOINTS",
+                    vec![asm_joint, asm_as_built, asm_rigid, asm_ground],
+                ),
+                Section::new("MOTION", vec![asm_view, asm_move, asm_motion]),
+                Section::new("INSPECT", vec![asm_check, asm_bom]),
             ],
         ) {
             picked.push(id);
@@ -1085,22 +1189,65 @@ impl DesignWorkspace {
                 return;
             }
             "asm_new" => {
-                self.asm.open = true;
+                self.actions.push(Action::NewEmptyComponent);
+                return;
+            }
+            "asm_body" => {
+                self.actions
+                    .push(Action::Asm(AsmAction::ComponentFromActiveBody));
+                return;
+            }
+            "asm_design" => {
                 self.actions.push(Action::NewComponent);
                 return;
             }
             "asm_insert" => {
-                self.asm.open = true;
                 self.asm.request = Some(super::assembly::FileRequest::Insert);
                 return;
             }
+            "asm_activate" => {
+                self.actions.push(Action::Asm(AsmAction::ActivateSelected));
+                return;
+            }
+            "asm_finish" => {
+                self.actions.push(Action::FinishComponent);
+                return;
+            }
             "asm_joint" => {
-                self.asm.open = !self.asm.open;
+                self.actions.push(Action::Asm(AsmAction::OpenJoint(false)));
+                return;
+            }
+            "asm_as_built" => {
+                self.actions.push(Action::Asm(AsmAction::OpenJoint(true)));
+                return;
+            }
+            "asm_rigid" => {
+                self.actions.push(Action::Asm(AsmAction::OpenRigid));
+                return;
+            }
+            "asm_ground" => {
+                self.actions.push(Action::Asm(AsmAction::GroundSelected));
+                return;
+            }
+            "asm_view" => {
+                self.asm.view = !self.asm.view;
+                return;
+            }
+            "asm_move" => {
+                self.asm.view = true;
+                self.asm.move_form = Some(super::asm_drag::MoveForm::new());
                 return;
             }
             "asm_motion" => {
-                self.asm.open = true;
-                self.asm.view = !self.asm.view;
+                self.asm.open = !self.asm.open;
+                return;
+            }
+            "asm_check" => {
+                self.actions.push(Action::Asm(AsmAction::CheckInterference));
+                return;
+            }
+            "asm_bom" => {
+                self.actions.push(Action::Asm(AsmAction::OpenBom));
                 return;
             }
             "section" => {

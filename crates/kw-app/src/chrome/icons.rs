@@ -63,6 +63,11 @@ pub enum Icon {
     Component,
     Joint,
     Motion,
+    AsBuiltJoint,
+    RigidGroup,
+    Ground,
+    Bom,
+    AssemblyView,
     // ----- construction
     PlaneAngle,
     PlaneMid,
