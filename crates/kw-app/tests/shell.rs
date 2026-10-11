@@ -3059,12 +3059,56 @@ fn regions_of_overlapping_shapes_are_chosen_in_the_view_and_extruded() {
         "{} vs {want}",
         vol(&mut h)
     );
-    // clicking the same place again drops the choice; with nothing chosen everything is extruded
+    // as in Onshape, the sketch is hidden once a feature has used it ...
+    let sk_id = proj(&mut h)
+        .document()
+        .features
+        .iter()
+        .find(|f| matches!(f.spec, kw_feature::FeatureSpec::Sketch(_)))
+        .unwrap()
+        .id;
+    assert!(h.app.design.hidden_sketches.contains(&sk_id));
+    // ... its eye brings it back, and another Extrude takes a different region of the same sketch
+    act(&mut h, Action::ToggleSketch(sk_id));
+    assert!(!h.app.design.hidden_sketches.contains(&sk_id));
+    act(&mut h, Action::Select(sk_id));
     act(
         &mut h,
-        Action::Open(Tool::extrude(None, kw_feature::BodyOp::New)),
+        Action::Open(Tool::extrude(Some(sk_id), kw_feature::BodyOp::New)),
     );
     h.frame();
+    // the overlap of the square and the circle (x < 15): where I click now
+    let pos = h
+        .app
+        .design
+        .viewport
+        .project([13.0 + o.x, 5.0 + o.y, 0.0 + o.z])
+        .expect("on screen");
+    click_at(&mut h, pos);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude {
+            more, depth, op, ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        assert_eq!(more.regions.len(), 1, "one region chosen");
+        *depth = "6 mm".into();
+        *op = kw_feature::BodyOp::New;
+    }
+    h.frame();
+    commit(&mut h);
+    let want2 = 0.5 * std::f64::consts::PI * 9.0 * 6.0;
+    assert!(
+        (vol(&mut h) - want2).abs() < 0.1,
+        "{} vs {want2}",
+        vol(&mut h)
+    );
+    // both extrusions hang on the one sketch: it is hidden again, and deleting it takes both
+    assert!(h.app.design.hidden_sketches.contains(&sk_id));
+    let doc = proj(&mut h).document();
+    assert_eq!(doc.all_dependents_of(sk_id).len(), 2);
 }
 
 #[test]

@@ -650,6 +650,11 @@ impl DesignWorkspace {
         };
         match ok {
             Some(id) => {
+                // as in Onshape, a sketch that has just been used is hidden (its eye in the browser brings
+                // it back, to make another feature from other regions of it)
+                if dlg.editing.is_none() {
+                    self.hidden_sketches.extend(dlg.tool.sketches());
+                }
                 self.model.selected = Some(id);
                 self.dialog = None;
                 self.preview = None;
@@ -864,11 +869,16 @@ impl DesignWorkspace {
         } else {
             0
         };
-        let segs = geom::sketch_segments(&ev, &doc, &self.hidden_sketches);
-        let key = geom_key
-            ^ base_key
-            ^ ((segs.len() as u128) << 96)
-            ^ ((self.hidden_sketches.len() as u128) << 90);
+        // the sketch a tool is working on is shown while the tool is open, even when it was hidden
+        let mut hidden_now = self.hidden_sketches.clone();
+        if let Some(d) = &self.dialog {
+            for sk in d.tool.sketches() {
+                hidden_now.remove(&sk);
+            }
+        }
+        let segs = geom::sketch_segments(&ev, &doc, &hidden_now);
+        let key =
+            geom_key ^ base_key ^ ((segs.len() as u128) << 96) ^ ((hidden_now.len() as u128) << 90);
         let highlight = self.model.picks.last().copied();
         // all picked faces / edges show as selected, and edges are easy to hit while a tool wants them
         self.viewport.extra_selected = self.model.picks.clone();

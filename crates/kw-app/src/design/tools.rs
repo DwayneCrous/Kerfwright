@@ -640,6 +640,21 @@ impl Tool {
         }
     }
 
+    /// The sketches this tool builds from (what disappears from the view once the feature is made).
+    pub fn sketches(&self) -> Vec<FeatureId> {
+        match self {
+            Tool::Extrude { sketch, .. }
+            | Tool::Revolve { sketch, .. }
+            | Tool::Rib { sketch, .. } => sketch.iter().copied().collect(),
+            Tool::Pipe { path, .. } => path.iter().copied().collect(),
+            Tool::Loft { sketches, .. } => sketches.iter().flatten().copied().collect(),
+            Tool::Sweep { profile, path, .. } => {
+                profile.iter().chain(path.iter()).copied().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Does this tool take faces or edges from the viewport?
     pub fn picks_edges(&self) -> bool {
         matches!(
