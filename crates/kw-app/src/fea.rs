@@ -306,6 +306,7 @@ pub struct FeaWorkspace {
     job: Option<Job<FeaResult>>,
     version: u64,
     initialised: bool,
+    pub requests: Vec<&'static str>,
 }
 
 impl Default for FeaWorkspace {
@@ -331,11 +332,61 @@ impl Default for FeaWorkspace {
             job: None,
             version: 0,
             initialised: false,
+            requests: Vec::new(),
         }
     }
 }
 
 impl FeaWorkspace {
+    /// The ribbon of the Simulation workspace.
+    pub fn ribbon(&mut self, ui: &mut egui::Ui) {
+        use crate::chrome::{ribbon as rb, Icon};
+        let mut cur = 0usize;
+        rb::tabs(ui, &[("STATIC STRESS", true)], &mut cur);
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            rb::group(ui, "STUDY", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Play,
+                    "Solve",
+                    self.job_idle(),
+                    false,
+                    "Mesh and solve the study",
+                )
+                .clicked()
+                {
+                    self.requests.push("solve");
+                }
+            });
+            rb::group(ui, "RESULTS", |ui| {
+                let has = self.result.is_some();
+                for (f, label) in [
+                    (Field::Model, "Model"),
+                    (Field::VonMises, "Von Mises"),
+                    (Field::Displacement, "Displacement"),
+                ] {
+                    if rb::button(
+                        ui,
+                        Icon::Fea,
+                        label,
+                        has,
+                        self.field == f,
+                        "Colour the model by this result",
+                    )
+                    .clicked()
+                    {
+                        self.field = f;
+                    }
+                }
+            });
+        });
+    }
+
+    fn job_idle(&self) -> bool {
+        self.job.is_none()
+    }
+
     fn store(&self, project: &mut Project) {
         project.fea = Some(self.study.clone());
         project.mark_extras_dirty();
@@ -412,6 +463,13 @@ impl FeaWorkspace {
                 None => ui.ctx().request_repaint(),
             }
         }
+        for r in std::mem::take(&mut self.requests) {
+            if r == "solve" {
+                if let (Some(b), true) = (&brep, self.job.is_none()) {
+                    self.start(b);
+                }
+            }
+        }
         egui::Panel::left("fea_side")
             .default_size(320.0)
             .show(ui, |ui| self.side(ui, project, brep.as_ref()));
@@ -441,8 +499,9 @@ impl FeaWorkspace {
                     },
                 },
                 highlight,
+                crate::viewport::ViewOpts::default(),
             );
-            if let Some(Some(Pick::Face(f))) = hit {
+            if let Some(Some(Pick::Face(f))) = hit.click {
                 if let Some(tag) = self.viewport.model().and_then(|m| m.face_tag(f)) {
                     self.picked = Some((f, tag));
                 }

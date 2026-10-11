@@ -1,21 +1,21 @@
 //! The application: a welcome page and, once a project is open, the project view with its workspaces.
 
 use crate::cam::CamWorkspace;
+use crate::chrome::{icons, ribbon as rb, theme, Icon};
+use crate::design::DesignWorkspace;
 use crate::dialogs::{Dialogs, NativeDialogs};
 use crate::ecad::EcadWorkspace;
 use crate::fea::FeaWorkspace;
-use crate::model::ModelWorkspace;
 use crate::project::Project;
 use crate::recent::RecentList;
 use crate::render::RenderWorkspace;
-use crate::sketch::SketchWorkspace;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
-    Sketch,
-    Model,
+    /// Sketch and Model together, like Fusion's Design environment.
+    Design,
     Cam,
     Fea,
     Ecad,
@@ -23,9 +23,8 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 6] = [
-        Workspace::Sketch,
-        Workspace::Model,
+    pub const ALL: [Workspace; 5] = [
+        Workspace::Design,
         Workspace::Cam,
         Workspace::Fea,
         Workspace::Ecad,
@@ -34,23 +33,31 @@ impl Workspace {
 
     pub fn label(self) -> &'static str {
         match self {
-            Workspace::Sketch => "Sketch",
-            Workspace::Model => "Model",
-            Workspace::Cam => "CAM",
-            Workspace::Fea => "FEA",
-            Workspace::Ecad => "ECAD",
-            Workspace::Render => "Render",
+            Workspace::Design => "DESIGN",
+            Workspace::Cam => "MANUFACTURE",
+            Workspace::Fea => "SIMULATION",
+            Workspace::Ecad => "ELECTRONICS",
+            Workspace::Render => "RENDER",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            Workspace::Sketch => "Constrained 2-D sketches that become features.",
-            Workspace::Model => "The feature timeline and the 3-D model.",
+            Workspace::Design => "Sketches and the 3-D model with its timeline.",
             Workspace::Cam => "Toolpaths, stock simulation and G-code.",
             Workspace::Fea => "Meshing and static stress analysis.",
             Workspace::Ecad => "Circuit board placement, routing and fabrication outputs.",
             Workspace::Render => "Realtime and path-traced images.",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Workspace::Design => Icon::Extrude,
+            Workspace::Cam => Icon::Cam,
+            Workspace::Fea => Icon::Fea,
+            Workspace::Ecad => Icon::Board,
+            Workspace::Render => Icon::Render,
         }
     }
 }
@@ -78,8 +85,7 @@ pub struct KerfwrightApp {
     recents_file: Option<PathBuf>,
     dialogs: Box<dyn Dialogs>,
     pub pending: Option<Pending>,
-    pub model: ModelWorkspace,
-    pub sketch: SketchWorkspace,
+    pub design: DesignWorkspace,
     pub ecad: EcadWorkspace,
     pub cam: CamWorkspace,
     pub fea: FeaWorkspace,
@@ -93,6 +99,7 @@ pub struct KerfwrightApp {
     pub quit_ok: bool,
     /// Save a screenshot of the window to this file after `screenshot_after` frames, then quit.
     pub screenshot: Option<(PathBuf, u64)>,
+    themed: bool,
 }
 
 impl Default for KerfwrightApp {
@@ -118,8 +125,8 @@ impl KerfwrightApp {
             recents_file,
             dialogs,
             pending: None,
-            model: ModelWorkspace::default(),
-            sketch: SketchWorkspace::default(),
+            design: DesignWorkspace::default(),
+            themed: false,
             ecad: EcadWorkspace::default(),
             cam: CamWorkspace::default(),
             fea: FeaWorkspace::default(),
@@ -155,13 +162,16 @@ impl KerfwrightApp {
         }
     }
 
-    /// Open the Sketch workspace on an existing sketch feature.
+    /// Open the Design workspace editing an existing sketch feature.
     pub fn edit_sketch(&mut self, id: kw_feature::FeatureId) -> Result<(), String> {
         let Screen::Project { project, .. } = &mut self.screen else {
             return Err("no project is open".into());
         };
-        self.sketch.begin_edit(project, id)?;
-        self.set_workspace(Workspace::Sketch);
+        self.design.edit_sketch(project, id);
+        if !self.design.model.error.is_empty() {
+            return Err(self.design.model.error.clone());
+        }
+        self.set_workspace(Workspace::Design);
         Ok(())
     }
 
@@ -178,6 +188,116 @@ impl KerfwrightApp {
             self.ecad.check(project);
         }
         self.set_workspace(Workspace::Ecad);
+    }
+
+    /// Put the Design workspace into a state for screenshots and demos: `idle`, `pick`, `sketch`, `extrude`
+    /// (rectangle sketched on XY, Extrude dialog open), `face` (sketch on the top face of the demo block),
+    /// `faceextrude`, `hole`, `fillet`, `params`.
+    pub fn design_demo(&mut self, what: &str) {
+        use crate::design::{geom, tools::Tool, Action, Mode};
+        self.open_demo();
+        self.set_workspace(Workspace::Design);
+        let Screen::Project { project, .. } = &mut self.screen else {
+            return;
+        };
+        let rect = |w: f64, h: f64| {
+            let mut sk = kw_sketch::Sketch::new();
+            let pts: Vec<_> = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
+                .iter()
+                .map(|p| sk.add_point(p.0, p.1))
+                .collect();
+            let l: Vec<_> = (0..4)
+                .map(|i| sk.add_line(pts[i], pts[(i + 1) % 4]))
+                .collect();
+            let _ = sk.horizontal(l[0]);
+            let _ = sk.horizontal(l[2]);
+            let _ = sk.vertical(l[1]);
+            let _ = sk.vertical(l[3]);
+            let _ = sk.fix(pts[0]);
+            sk
+        };
+        let top_face = |project: &mut Project| {
+            let ev = project.evaluation();
+            let (_, out) = ev.final_solid()?;
+            let brep = out.brep()?.clone();
+            let names = out.names.clone();
+            let mut best = None;
+            for f in brep.faces.keys() {
+                if let (Some(fr), Some(bb)) = (geom::face_frame(&brep, f), brep.face_bbox(f)) {
+                    if fr.n[2] > 0.99
+                        && (best.is_none()
+                            || bb.max.z
+                                > best
+                                    .map(|b: (kw_brep::FaceId, f64)| b.1)
+                                    .unwrap_or(f64::MIN))
+                    {
+                        best = Some((f, bb.max.z));
+                    }
+                }
+            }
+            let (f, _) = best?;
+            Some((
+                geom::face_frame(&brep, f)?,
+                names.reference_to(&brep, f)?,
+                f,
+            ))
+        };
+        match what {
+            "pick" => self.design.actions.push(Action::StartSketch),
+            "sketch" | "extrude" => {
+                self.design
+                    .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
+                self.design
+                    .sketch
+                    .app
+                    .editor
+                    .replace_sketch(rect(30.0, 20.0));
+                self.design.sketch.app.zoom_to_fit();
+                if what == "extrude" {
+                    self.design.finish_sketch(project);
+                }
+            }
+            "face" | "faceextrude" => {
+                if let Some((frame, reference, _)) = top_face(project) {
+                    self.design.begin_sketch(
+                        project,
+                        kw_feature::PlaneSpec::Face(reference),
+                        frame,
+                    );
+                    let mut sk = kw_sketch::Sketch::new();
+                    let c = sk.add_point(20.0, 12.0);
+                    sk.add_circle(c, 5.0);
+                    self.design.sketch.app.editor.replace_sketch(sk);
+                    self.design.sketch.app.zoom_to_fit();
+                    if what == "faceextrude" {
+                        self.design.finish_sketch(project);
+                        if let Some(d) = self.design.dialog.as_mut() {
+                            if let Tool::Extrude {
+                                op, flip, depth, ..
+                            } = &mut d.tool
+                            {
+                                *op = kw_feature::BodyOp::Cut;
+                                *flip = true;
+                                *depth = "4 mm".into();
+                            }
+                        }
+                    }
+                }
+            }
+            "hole" => self.design.open_tool(project, Tool::default_hole()),
+            "fillet" => self.design.open_tool(
+                project,
+                Tool::Fillet {
+                    radius: "2 mm".into(),
+                },
+            ),
+            "params" => {
+                self.design.model.add_parameter(project, "width", "30");
+                self.design.params_open = true;
+            }
+            _ => {}
+        }
+        let _ = Mode::Idle;
     }
 
     /// The demo part with a pocket planned in the CAM workspace (for demos and screenshots).
@@ -269,15 +389,14 @@ impl KerfwrightApp {
     }
 
     fn enter(&mut self, project: Project) {
-        self.model = ModelWorkspace::default();
-        self.sketch = SketchWorkspace::default();
+        self.design = DesignWorkspace::default();
         self.ecad = EcadWorkspace::default();
         self.cam = CamWorkspace::default();
         self.fea = FeaWorkspace::default();
         self.render = RenderWorkspace::default();
         self.screen = Screen::Project {
             project: Box::new(project),
-            workspace: Workspace::Model,
+            workspace: Workspace::Design,
         };
     }
 
@@ -431,6 +550,10 @@ impl KerfwrightApp {
     /// Draw a frame; `rs` is the GPU state the 3-D views draw with (`None` in headless tests).
     pub fn show_with(&mut self, ui: &mut egui::Ui, rs: Option<&eframe::egui_wgpu::RenderState>) {
         self.frames += 1;
+        if !self.themed {
+            theme::apply(ui.ctx());
+            self.themed = true;
+        }
         match &self.screen {
             Screen::Welcome => self.welcome_ui(ui),
             Screen::Project { .. } => self.project_ui(ui, rs),
@@ -487,119 +610,274 @@ impl KerfwrightApp {
     }
 
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.heading(egui::RichText::new("Kerfwright").size(40.0));
-                ui.label("Sketch, model, machine, analyse and design boards in one place.");
-            });
-            ui.add_space(24.0);
-            ui.columns(2, |cols| {
-                // ---- left: start something
-                cols[0].group(|ui| {
-                    ui.heading("Start");
-                    ui.add_space(6.0);
-                    ui.label("New project");
-                    ui.horizontal(|ui| {
-                        ui.label("Name");
-                        ui.text_edit_singleline(&mut self.new_name);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::CHROME))
+            .show(ui, |ui| {
+                let width = ui.available_width().min(980.0);
+                let margin = ((ui.available_width() - width) / 2.0).max(0.0);
+                ui.add_space(36.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    icons::paint(
+                        ui.painter(),
+                        egui::Rect::from_min_size(
+                            ui.cursor().min + egui::vec2(0.0, 2.0),
+                            egui::vec2(44.0, 44.0),
+                        ),
+                        Icon::Extrude,
+                        true,
+                    );
+                    ui.add_space(54.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Kerfwright")
+                                .size(34.0)
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Sketch, model, machine, analyse and design boards in one place.",
+                            )
+                            .size(13.0)
+                            .color(theme::TEXT_WEAK),
+                        );
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Folder");
-                        let shown = self
-                            .new_folder
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "(none chosen)".into());
-                        ui.monospace(shown);
-                        if ui.button("Browse…").clicked() {
-                            if let Some(f) = self.dialogs.choose_folder() {
-                                self.new_folder = Some(f);
-                            }
-                        }
-                    });
-                    if ui.button("Create project").clicked() {
-                        let name = self.new_name.clone();
-                        match self.new_folder.clone() {
-                            Some(f) => {
-                                if let Err(e) = self.create_project(&name, &f) {
-                                    self.message = e;
-                                }
-                            }
-                            None => self.message = "choose a folder first".into(),
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Open project…").clicked() {
-                        if let Some(p) = self.dialogs.open_project() {
-                            let _ = self.open_path(&p);
-                        }
-                    }
-                    if ui.button("Open the demo part").clicked() {
-                        self.open_demo();
-                    }
                 });
-                // ---- right: recent projects
-                cols[1].group(|ui| {
-                    ui.heading("Recent projects");
-                    ui.add_space(6.0);
-                    if self.recents.paths.is_empty() {
-                        ui.weak("Nothing yet — create or open a project.");
-                    }
-                    let mut open: Option<PathBuf> = None;
-                    let mut forget: Option<PathBuf> = None;
-                    for p in &self.recents.paths {
-                        let exists = p.exists();
-                        ui.horizontal(|ui| {
-                            let name = p
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            let text = egui::RichText::new(name);
-                            if exists {
+                ui.add_space(26.0);
+                ui.horizontal_top(|ui| {
+                    ui.add_space(margin);
+                    // ---- start
+                    egui::Frame::new()
+                        .fill(egui::Color32::WHITE)
+                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                        .corner_radius(4)
+                        .inner_margin(18)
+                        .show(ui, |ui| {
+                            ui.set_width(width * 0.42);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("NEW DESIGN")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(theme::TEXT_WEAK),
+                                );
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([60.0, 22.0], egui::Label::new("Name"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.new_name)
+                                            .desired_width(width * 0.42 - 90.0),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([60.0, 22.0], egui::Label::new("Folder"));
+                                    let shown = self
+                                        .new_folder
+                                        .as_ref()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_else(|| "(none chosen)".into());
+                                    ui.label(egui::RichText::new(shown).monospace().size(11.5));
+                                    if ui.button("Browse…").clicked() {
+                                        if let Some(f) = self.dialogs.choose_folder() {
+                                            self.new_folder = Some(f);
+                                        }
+                                    }
+                                });
+                                ui.add_space(8.0);
                                 if ui
-                                    .link(text)
-                                    .on_hover_text(p.display().to_string())
+                                    .add_sized(
+                                        [width * 0.42 - 12.0, 30.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("Create project")
+                                                .color(egui::Color32::WHITE)
+                                                .strong(),
+                                        )
+                                        .fill(theme::ACCENT),
+                                    )
                                     .clicked()
                                 {
-                                    open = Some(p.clone());
+                                    let name = self.new_name.clone();
+                                    match self.new_folder.clone() {
+                                        Some(f) => {
+                                            if let Err(e) = self.create_project(&name, &f) {
+                                                self.message = e;
+                                            }
+                                        }
+                                        None => self.message = "choose a folder first".into(),
+                                    }
                                 }
-                            } else {
-                                ui.weak(text.strikethrough());
-                                ui.weak("(missing)");
-                                if ui.small_button("forget").clicked() {
-                                    forget = Some(p.clone());
+                                ui.add_space(14.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+                                if ui
+                                    .add_sized(
+                                        [width * 0.42 - 12.0, 28.0],
+                                        egui::Button::new("Open project…"),
+                                    )
+                                    .clicked()
+                                {
+                                    if let Some(p) = self.dialogs.open_project() {
+                                        let _ = self.open_path(&p);
+                                    }
                                 }
-                            }
-                            ui.weak(
-                                p.parent()
-                                    .map(|d| d.display().to_string())
-                                    .unwrap_or_default(),
-                            );
+                                ui.add_space(4.0);
+                                if ui
+                                    .add_sized(
+                                        [width * 0.42 - 12.0, 28.0],
+                                        egui::Button::new("Open the demo part"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.open_demo();
+                                }
+                                if !self.message.is_empty() {
+                                    ui.add_space(8.0);
+                                    ui.colored_label(theme::BAD, &self.message);
+                                }
+                            });
                         });
-                    }
-                    if let Some(p) = forget {
-                        self.recents.remove(&p);
-                        if let Some(f) = &self.recents_file {
-                            let _ = self.recents.save(f);
-                        }
-                    }
-                    if let Some(p) = open {
-                        let _ = self.open_path(&p);
-                    }
+                    ui.add_space(18.0);
+                    // ---- recent
+                    egui::Frame::new()
+                        .fill(egui::Color32::WHITE)
+                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                        .corner_radius(4)
+                        .inner_margin(18)
+                        .show(ui, |ui| {
+                            ui.set_width(width * 0.58 - 60.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("RECENT PROJECTS")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(theme::TEXT_WEAK),
+                                );
+                                ui.add_space(8.0);
+                                if self.recents.paths.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Nothing yet - create or open a project.",
+                                        )
+                                        .color(theme::TEXT_WEAK),
+                                    );
+                                }
+                                let mut open: Option<PathBuf> = None;
+                                let mut forget: Option<PathBuf> = None;
+                                for p in &self.recents.paths {
+                                    let exists = p.exists();
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), 38.0),
+                                        if exists {
+                                            egui::Sense::click()
+                                        } else {
+                                            egui::Sense::hover()
+                                        },
+                                    );
+                                    if resp.hovered() && exists {
+                                        ui.painter().rect_filled(rect, 3.0, theme::ACCENT_SOFT);
+                                    }
+                                    icons::paint(
+                                        ui.painter(),
+                                        egui::Rect::from_min_size(
+                                            rect.min + egui::vec2(6.0, 5.0),
+                                            egui::vec2(28.0, 28.0),
+                                        ),
+                                        Icon::Body,
+                                        exists,
+                                    );
+                                    let name = p
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    ui.painter().text(
+                                        rect.min + egui::vec2(44.0, 11.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        name,
+                                        egui::FontId::proportional(13.5),
+                                        if exists {
+                                            theme::TEXT
+                                        } else {
+                                            theme::TEXT_WEAK
+                                        },
+                                    );
+                                    let dir = p
+                                        .parent()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    ui.painter().text(
+                                        rect.min + egui::vec2(44.0, 27.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        if exists {
+                                            dir
+                                        } else {
+                                            format!("{dir} - missing")
+                                        },
+                                        egui::FontId::proportional(10.5),
+                                        theme::TEXT_WEAK,
+                                    );
+                                    if exists && resp.clicked() {
+                                        open = Some(p.clone());
+                                    }
+                                    if !exists {
+                                        let r = egui::Rect::from_min_size(
+                                            rect.right_top() + egui::vec2(-60.0, 8.0),
+                                            egui::vec2(54.0, 22.0),
+                                        );
+                                        if ui.put(r, egui::Button::new("Forget")).clicked() {
+                                            forget = Some(p.clone());
+                                        }
+                                    }
+                                }
+                                if let Some(p) = forget {
+                                    self.recents.remove(&p);
+                                    if let Some(f) = &self.recents_file {
+                                        let _ = self.recents.save(f);
+                                    }
+                                }
+                                if let Some(p) = open {
+                                    let _ = self.open_path(&p);
+                                }
+                            });
+                        });
                 });
             });
-            ui.add_space(12.0);
-            if !self.message.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(220, 120, 80), &self.message);
-            }
-        });
     }
 
     fn project_ui(&mut self, ui: &mut egui::Ui, rs: Option<&eframe::egui_wgpu::RenderState>) {
-        // ---- top bar
-        egui::Panel::top("app_top").show(ui, |ui| {
+        // ---- keyboard shortcuts
+        let (save, undo, redo) = ui.ctx().input(|i| {
+            let ctrl = i.modifiers.command;
+            (
+                ctrl && i.key_pressed(egui::Key::S),
+                ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
+                ctrl && (i.key_pressed(egui::Key::Y)
+                    || (i.key_pressed(egui::Key::Z) && i.modifiers.shift)),
+            )
+        });
+        if save {
+            self.save();
+        }
+        let sketching = self.design.mode == crate::design::Mode::Sketching
+            && self.workspace() == Some(Workspace::Design);
+        if (undo || redo) && !sketching {
+            if let Some(p) = self.project_mut() {
+                if undo {
+                    p.history.undo();
+                } else {
+                    p.history.redo();
+                }
+            }
+        }
+        // ---- application bar
+        let frame = egui::Frame::new()
+            .fill(theme::CHROME)
+            .inner_margin(egui::Margin::symmetric(6, 3));
+        egui::Panel::top("app_bar").frame(frame).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                if rb::small(ui, Icon::Home, "Back to the welcome page", false).clicked() {
+                    self.request(Pending::CloseProject);
+                }
                 ui.menu_button("File", |ui| {
                     if ui.button("Save   Ctrl+S").clicked() {
                         self.save();
@@ -621,138 +899,129 @@ impl KerfwrightApp {
                         ui.close();
                     }
                 });
-                ui.menu_button("Edit", |ui| {
-                    let (can_undo, can_redo) = self
-                        .project()
-                        .map(|p| (p.history.can_undo(), p.history.can_redo()))
-                        .unwrap_or((false, false));
-                    if ui
-                        .add_enabled(can_undo, egui::Button::new("Undo   Ctrl+Z"))
-                        .clicked()
-                    {
-                        if let Some(p) = self.project_mut() {
-                            p.history.undo();
-                        }
-                        ui.close();
+                let (can_undo, can_redo) = self
+                    .project()
+                    .map(|p| (p.history.can_undo(), p.history.can_redo()))
+                    .unwrap_or((false, false));
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("Undo"))
+                    .on_hover_text("Ctrl+Z")
+                    .clicked()
+                {
+                    if let Some(p) = self.project_mut() {
+                        p.history.undo();
                     }
-                    if ui
-                        .add_enabled(can_redo, egui::Button::new("Redo   Ctrl+Y"))
-                        .clicked()
-                    {
-                        if let Some(p) = self.project_mut() {
-                            p.history.redo();
-                        }
-                        ui.close();
+                }
+                if ui
+                    .add_enabled(can_redo, egui::Button::new("Redo"))
+                    .on_hover_text("Ctrl+Y")
+                    .clicked()
+                {
+                    if let Some(p) = self.project_mut() {
+                        p.history.redo();
                     }
-                });
+                }
+                if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
+                    self.save();
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(p) = self.project() {
-                        let dirty = if p.is_dirty() { " •" } else { "" };
-                        ui.strong(format!("{}{}", p.name(), dirty));
+                        let dirty = if p.is_dirty() { "*" } else { "" };
+                        ui.label(
+                            egui::RichText::new(format!("{}{}", p.name(), dirty))
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        icons::paint(
+                            ui.painter(),
+                            egui::Rect::from_center_size(
+                                ui.cursor().right_center() + egui::vec2(-18.0, 0.0),
+                                egui::vec2(16.0, 16.0),
+                            ),
+                            Icon::Body,
+                            true,
+                        );
                     }
                 });
             });
         });
-        // keyboard shortcuts
-        let (save, undo, redo) = ui.ctx().input(|i| {
-            let ctrl = i.modifiers.command;
-            (
-                ctrl && i.key_pressed(egui::Key::S),
-                ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
-                ctrl && (i.key_pressed(egui::Key::Y)
-                    || (i.key_pressed(egui::Key::Z) && i.modifiers.shift)),
-            )
-        });
-        if save {
-            self.save();
-        }
-        if (undo || redo) && self.workspace() != Some(Workspace::Sketch) {
-            if let Some(p) = self.project_mut() {
-                if undo {
-                    p.history.undo();
-                } else {
-                    p.history.redo();
-                }
-            }
-        }
-        // ---- workspace rail
-        egui::Panel::left("app_rail")
-            .exact_size(92.0)
+        // ---- ribbon
+        let current = self.workspace().unwrap_or(Workspace::Design);
+        let mut picked: Option<Workspace> = None;
+        let ribbon_frame = egui::Frame::new()
+            .fill(theme::CHROME)
+            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .inner_margin(egui::Margin::symmetric(8, 4));
+        egui::Panel::top("ribbon")
+            .frame(ribbon_frame)
             .show(ui, |ui| {
-                ui.add_space(6.0);
-                let current = self.workspace();
-                for w in Workspace::ALL {
-                    let sel = current == Some(w);
-                    let b = egui::Button::new(egui::RichText::new(w.label()).size(15.0))
-                        .selected(sel)
-                        .min_size(egui::vec2(80.0, 40.0));
-                    if ui.add(b).on_hover_text(w.blurb()).clicked() {
-                        self.set_workspace(w);
-                    }
-                    ui.add_space(2.0);
-                }
+                ui.horizontal(|ui| {
+                    picked = workspace_menu(ui, current);
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| match (&mut self.screen, current) {
+                        (Screen::Project { project, .. }, Workspace::Design) => {
+                            self.design.ribbon(ui, project)
+                        }
+                        (_, Workspace::Cam) => self.cam.ribbon(ui),
+                        (_, Workspace::Fea) => self.fea.ribbon(ui),
+                        (_, Workspace::Ecad) => self.ecad.ribbon(ui),
+                        (_, Workspace::Render) => self.render.ribbon(ui),
+                        (_, Workspace::Design) => {}
+                    });
+                });
             });
+        if let Some(w) = picked {
+            self.set_workspace(w);
+        }
         // ---- status
-        egui::Panel::bottom("app_status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let path = self
-                    .project()
-                    .and_then(|p| p.path.as_ref())
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "not saved yet".into());
-                ui.weak(path);
-                if !self.message.is_empty() {
-                    ui.separator();
-                    ui.label(&self.message);
-                }
+        egui::Panel::bottom("app_status")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let path = self
+                        .project()
+                        .and_then(|p| p.path.as_ref())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "not saved yet".into());
+                    ui.label(egui::RichText::new(path).size(11.0).color(theme::TEXT_WEAK));
+                    if !self.message.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new(&self.message).size(11.0));
+                    }
+                    if let Some(msg) = self.design.status_line() {
+                        ui.separator();
+                        ui.label(egui::RichText::new(msg).size(11.0));
+                    }
+                });
             });
-        });
         // ---- the workspace
-        let w = self.workspace().unwrap_or(Workspace::Model);
-        match w {
-            Workspace::Model => {
-                let Screen::Project { project, .. } = &mut self.screen else {
-                    return;
-                };
-                egui::CentralPanel::default().show(ui, |ui| self.model.show(ui, project, rs));
-            }
-            Workspace::Sketch => {
-                let Screen::Project { project, .. } = &mut self.screen else {
-                    return;
-                };
-                let mut done = None;
-                egui::CentralPanel::default().show(ui, |ui| done = self.sketch.show(ui, project));
-                if let Some(id) = done {
-                    self.model.selected = Some(id);
-                    self.set_workspace(Workspace::Model);
-                }
+        let Screen::Project { project, .. } = &mut self.screen else {
+            return;
+        };
+        match current {
+            Workspace::Design => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| self.design.show(ui, project, rs));
             }
             Workspace::Cam => {
-                let Screen::Project { project, .. } = &mut self.screen else {
-                    return;
-                };
                 let (cam, dialogs) = (&mut self.cam, &mut self.dialogs);
                 egui::CentralPanel::default()
                     .show(ui, |ui| cam.show(ui, project, rs, dialogs.as_mut()));
             }
             Workspace::Render => {
-                let Screen::Project { project, .. } = &mut self.screen else {
-                    return;
-                };
                 let (render, dialogs) = (&mut self.render, &mut self.dialogs);
                 egui::CentralPanel::default()
                     .show(ui, |ui| render.show(ui, project, dialogs.as_mut()));
             }
             Workspace::Fea => {
-                let Screen::Project { project, .. } = &mut self.screen else {
-                    return;
-                };
                 egui::CentralPanel::default().show(ui, |ui| self.fea.show(ui, project, rs));
             }
             Workspace::Ecad => {
-                let Screen::Project { project, .. } = &mut self.screen else {
-                    return;
-                };
                 let (ecad, dialogs) = (&mut self.ecad, &mut self.dialogs);
                 egui::CentralPanel::default()
                     .show(ui, |ui| ecad.show(ui, project, dialogs.as_mut()));
@@ -792,6 +1061,46 @@ impl KerfwrightApp {
                 });
             });
     }
+}
+
+/// The workspace drop-down at the left of the ribbon ("DESIGN v"). Returns the workspace picked.
+fn workspace_menu(ui: &mut egui::Ui, current: Workspace) -> Option<Workspace> {
+    let mut picked = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 18.0);
+        ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::WHITE;
+        ui.menu_button(
+            egui::RichText::new(format!("{} v", current.label()))
+                .size(12.5)
+                .strong(),
+            |ui| {
+                ui.set_min_width(190.0);
+                for w in Workspace::ALL {
+                    ui.horizontal(|ui| {
+                        icons::paint(
+                            ui.painter(),
+                            egui::Rect::from_min_size(
+                                ui.cursor().min + egui::vec2(0.0, 2.0),
+                                egui::vec2(18.0, 18.0),
+                            ),
+                            w.icon(),
+                            true,
+                        );
+                        ui.add_space(22.0);
+                        if ui
+                            .selectable_label(w == current, w.label())
+                            .on_hover_text(w.blurb())
+                            .clicked()
+                        {
+                            picked = Some(w);
+                            ui.close();
+                        }
+                    });
+                }
+            },
+        );
+    });
+    picked
 }
 
 impl eframe::App for KerfwrightApp {

@@ -22,14 +22,21 @@ cargo test --release -p kw-app -p kw-sketcher -p kw-viewer -p kw-store 2>&1 | te
 step "screenshots of every screen"
 cargo build --release -p kw-app
 BIN=target/release/kerfwright
-shot() { name="$1"; shift; "$BIN" "$@" --screenshot "$OUT/$name.png"; }
+shot() { name="$1"; shift; "$BIN" "$@" --screenshot "$OUT/$name.png" --screenshot-after "${AFTER:-40}"; }
 shot welcome
-shot model --demo
-shot sketch --demo --edit-sketch
+shot design_idle --demo
+shot design_pick_plane --design-demo pick
+shot design_sketch_on_plane --design-demo sketch
+shot design_extrude_preview --design-demo extrude
+shot design_sketch_on_face --design-demo face
+shot design_cut_through_face --design-demo faceextrude
+shot design_hole_dialog --design-demo hole
+shot design_fillet_dialog --design-demo fillet
+shot design_parameters --design-demo params
 shot cam --cam-demo
 shot fea --fea-demo
 shot ecad --ecad-demo
 shot render --render-demo
-shot render_path_traced --render-demo --render-pt --screenshot-after 90
+AFTER=90 shot render_path_traced --render-demo --render-pt
 
 printf '\nApplication checks passed. Screenshots and logs are in %s\n' "$OUT"

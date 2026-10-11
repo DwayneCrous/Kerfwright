@@ -36,6 +36,8 @@ png = "0.18"
 kw-sketch.workspace = true
 kw-sketcher = { path = "../kw-sketcher" }
 
+kw-nurbs.workspace = true
+
 [dev-dependencies]
 kw-fabcheck.workspace = true
 kw-gsim.workspace = true

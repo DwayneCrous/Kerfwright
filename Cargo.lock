@@ -2108,6 +2108,7 @@ dependencies = [
  "kw-gsim",
  "kw-math",
  "kw-mesh3d",
+ "kw-nurbs",
  "kw-render",
  "kw-sketch",
  "kw-sketcher",

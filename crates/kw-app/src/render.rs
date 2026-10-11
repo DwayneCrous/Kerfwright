@@ -86,6 +86,7 @@ pub struct RenderWorkspace {
     dirty: bool,
     fitted: bool,
     pub message: String,
+    pub requests: Vec<&'static str>,
 }
 
 impl Default for RenderWorkspace {
@@ -110,6 +111,7 @@ impl Default for RenderWorkspace {
             dirty: true,
             fitted: false,
             message: String::new(),
+            requests: Vec::new(),
         }
     }
 }
@@ -128,6 +130,70 @@ fn to_pixels(img: &[[f64; 3]]) -> Vec<u8> {
 }
 
 impl RenderWorkspace {
+    /// The ribbon of the Render workspace.
+    pub fn ribbon(&mut self, ui: &mut egui::Ui) {
+        use crate::chrome::{ribbon as rb, Icon};
+        let mut cur = 0usize;
+        rb::tabs(ui, &[("RENDER", true)], &mut cur);
+        ui.add_space(2.0);
+        let mut req: Vec<&'static str> = Vec::new();
+        ui.horizontal(|ui| {
+            rb::group(ui, "MODE", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Body,
+                    "Realtime",
+                    true,
+                    self.mode == Mode::Realtime,
+                    "Fast shaded view with transparency and ambient occlusion",
+                )
+                .clicked()
+                {
+                    req.push("realtime");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Render,
+                    "Path Trace",
+                    true,
+                    self.mode == Mode::PathTrace,
+                    "Physically based image, refined progressively on the GPU",
+                )
+                .clicked()
+                {
+                    req.push("trace");
+                }
+            });
+            rb::group(ui, "IMAGE", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Fit,
+                    "Denoise",
+                    self.mode == Mode::PathTrace && !self.noisy.is_empty(),
+                    false,
+                    "Filter the noise out of the path-traced image",
+                )
+                .clicked()
+                {
+                    req.push("denoise");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Folder,
+                    "Save PNG",
+                    !self.pixels.is_empty(),
+                    false,
+                    "Save the image",
+                )
+                .clicked()
+                {
+                    req.push("save");
+                }
+            });
+        });
+        self.requests.extend(req);
+    }
+
     fn ensure_gpu(&mut self) -> bool {
         if !self.gpu_tried {
             self.gpu_tried = true;
@@ -289,6 +355,32 @@ impl RenderWorkspace {
                     self.denoise_job = None;
                 }
                 None => ui.ctx().request_repaint(),
+            }
+        }
+        for r in std::mem::take(&mut self.requests) {
+            match r {
+                "realtime" => {
+                    self.mode = Mode::Realtime;
+                    self.tracer = None;
+                    self.dirty = true;
+                }
+                "trace" => self.start_path_trace(),
+                "denoise" => {
+                    if self.denoise_job.is_none() {
+                        self.start_denoise();
+                    }
+                }
+                "save" => {
+                    if let Some(p) =
+                        dialogs.save_file(&format!("{}.png", project.name()), "PNG", &["png"])
+                    {
+                        self.message = match self.save_png(&p) {
+                            Ok(()) => format!("wrote {}", p.display()),
+                            Err(e) => format!("could not write: {e}"),
+                        };
+                    }
+                }
+                _ => {}
             }
         }
         egui::Panel::left("render_side")

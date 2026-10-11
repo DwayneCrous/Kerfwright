@@ -251,7 +251,7 @@ use kw_feature::FeatureSpec;
 fn demo_app(dir: &std::path::Path) -> Harness {
     let mut h = Harness::new(app_in(dir));
     h.app.create_project("Model", dir).unwrap();
-    h.app.set_workspace(Workspace::Model);
+    h.app.set_workspace(Workspace::Design);
     h
 }
 
@@ -271,7 +271,7 @@ fn sketch_extrude_fillet_through_the_workspace_commands_and_undo() {
             h.app.project_mut().unwrap(),
             kw_app::project::Project::empty(),
         ),
-        std::mem::take(&mut h.app.model),
+        std::mem::take(&mut h.app.design.model),
     );
     let sk = m
         .add_rect_sketch(&mut p, "xy", "0", "0", "40", "20")
@@ -346,7 +346,7 @@ fn the_model_workspace_draws_with_and_without_features_and_a_failed_feature() {
     let mut h = demo_app(&dir);
     h.frame();
     h.app.open_demo();
-    h.app.set_workspace(Workspace::Model);
+    h.app.set_workspace(Workspace::Design);
     h.frame();
     h.frame();
     // a feature whose expression refers to nothing fails to evaluate; the list still draws
@@ -355,7 +355,7 @@ fn the_model_workspace_draws_with_and_without_features_and_a_failed_feature() {
             h.app.project_mut().unwrap(),
             kw_app::project::Project::empty(),
         ),
-        std::mem::take(&mut h.app.model),
+        std::mem::take(&mut h.app.design.model),
     );
     let sk = p.document().features[0].id;
     let n = p.document().len();
@@ -365,7 +365,7 @@ fn the_model_workspace_draws_with_and_without_features_and_a_failed_feature() {
     assert!(!m.error.is_empty(), "an unknown name must be reported");
     assert_eq!(p.document().len(), n, "and must not enter the timeline");
     *h.app.project_mut().unwrap() = p;
-    h.app.model = m;
+    h.app.design.model = m;
     h.frame();
 }
 
@@ -394,7 +394,7 @@ fn rectangle(w: f64, h: f64) -> kw_sketch::Sketch {
 fn a_finished_sketch_becomes_a_feature_that_extrudes_and_can_be_edited_again() {
     let dir = scratch("sketch_flow");
     let mut h = demo_app(&dir);
-    h.app.set_workspace(Workspace::Sketch);
+    h.app.set_workspace(Workspace::Design);
     h.frame();
     h.frame();
     let mut p = std::mem::replace(
@@ -437,9 +437,9 @@ fn a_finished_sketch_becomes_a_feature_that_extrudes_and_can_be_edited_again() {
     assert!(ws.begin_edit(&mut p, ex).is_err());
     // the embedded sketcher draws (start page, then the editing view)
     *h.app.project_mut().unwrap() = p;
-    h.app.sketch = ws;
+    h.app.design.sketch = ws;
     h.frame();
-    h.app.sketch.begin_new(NewPlane::Yz);
+    h.app.design.sketch.begin_new(NewPlane::Yz);
     h.frame();
     h.frame();
 }
@@ -728,7 +728,7 @@ fn the_fea_workspace_solves_a_cantilever_close_to_beam_theory_and_stores_its_stu
             h.app.project_mut().unwrap(),
             kw_app::project::Project::empty(),
         ),
-        std::mem::take(&mut h.app.model),
+        std::mem::take(&mut h.app.design.model),
     );
     let sk = m
         .add_rect_sketch(&mut p, "xy", "0", "0", "100", "10")
@@ -936,7 +936,9 @@ fn the_viewport_renders_the_model_offscreen_and_picks_faces_and_edges() {
 
 #[test]
 fn an_empty_model_renders_without_a_crash() {
-    let Some(g) = kw_render::RenderGpu::try_new() else { return };
+    let Some(g) = kw_render::RenderGpu::try_new() else {
+        return;
+    };
     let model = ModelScene::empty();
     let mut view = kw_app::viewport::GpuView::new(&g.device, (200, 150));
     view.renderer.upload(&g.device, &model.scene);
@@ -947,5 +949,568 @@ fn an_empty_model_renders_without_a_crash() {
     let mut f = kw_render::Frame::new(&g.device, &g.queue, (200, 150), false);
     f.upload(&g.device, &model.scene);
     let (_t, v) = kw_render::offscreen(&g.device, (200, 150));
-    f.render(&g.device, &g.queue, &cam, &v, &kw_render::FrameOptions::default());
+    f.render(
+        &g.device,
+        &g.queue,
+        &cam,
+        &v,
+        &kw_render::FrameOptions::default(),
+    );
+}
+
+// ------------------------------------------------------------------------- Design workspace (Fusion-style)
+
+use kw_app::design::{geom, tools::Tool, Action, Mode};
+use kw_app::viewport::ViewOut;
+
+fn design_harness(name: &str) -> (Harness, std::path::PathBuf) {
+    let dir = scratch(name);
+    let mut h = Harness::new(app_in(&dir));
+    h.app.create_project("Design", &dir).unwrap();
+    h.app.set_workspace(Workspace::Design);
+    h.frame();
+    (h, dir)
+}
+
+fn proj(h: &mut Harness) -> &mut kw_app::project::Project {
+    h.app.project_mut().unwrap()
+}
+
+fn vol(h: &mut Harness) -> f64 {
+    volume(proj(h))
+}
+
+fn act(h: &mut Harness, a: Action) {
+    h.app.design.actions.push(a);
+    h.frame();
+}
+
+/// Sketch a rectangle on the XY plane and finish it: the Extrude dialog must be open with that sketch.
+fn sketch_block(h: &mut Harness, w: f64, hh: f64, depth: &str) {
+    act(h, Action::StartSketch);
+    assert_eq!(h.app.design.mode, Mode::PickPlane);
+    act(
+        h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    assert_eq!(h.app.design.mode, Mode::Sketching);
+    h.app
+        .design
+        .sketch
+        .app
+        .editor
+        .replace_sketch(rectangle(w, hh));
+    act(h, Action::FinishSketch);
+    assert_eq!(h.app.design.mode, Mode::Idle);
+    let Some(d) = h.app.design.dialog.as_mut() else {
+        panic!("the Extrude dialog opens straight after Finish Sketch")
+    };
+    let Tool::Extrude {
+        sketch,
+        depth: dd,
+        op,
+        ..
+    } = &mut d.tool
+    else {
+        panic!("{:?}", d.tool)
+    };
+    assert!(sketch.is_some(), "the new sketch is preselected");
+    assert_eq!(*op, kw_feature::BodyOp::New, "no body yet: New Body");
+    *dd = depth.into();
+    h.frame();
+}
+
+fn commit(h: &mut Harness) {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    assert!(
+        h.app.design.commit_dialog(project),
+        "{}",
+        h.app.design.model.error
+    );
+    h.frame();
+}
+
+fn top_face(h: &mut Harness, z: f64) -> kw_brep::FaceId {
+    let ev = proj(h).evaluation();
+    let (_, o) = ev.final_solid().unwrap();
+    let b = o.brep().unwrap();
+    b.faces
+        .keys()
+        .find(|f| {
+            geom::face_frame(b, *f).is_some_and(|fr| fr.n[2] > 0.99)
+                && b.face_bbox(*f)
+                    .is_some_and(|bb| (bb.max.z - z).abs() < 1e-6)
+        })
+        .expect("a top face")
+}
+
+fn click(h: &mut Harness, pick: Option<Pick>) {
+    let out = ViewOut {
+        rect: eframe::egui::Rect::NOTHING,
+        click: Some(pick),
+        double_click: None,
+        hover: None,
+        click_pos: None,
+        response: None,
+    };
+    let Harness { ctx, app, t } = h;
+    let raw = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360.0, 860.0))),
+        time: Some(*t),
+        ..Default::default()
+    };
+    *t += 1.0 / 60.0;
+    let kw_app::ui::Screen::Project { project, .. } = &mut app.screen else {
+        panic!()
+    };
+    let ev = project.evaluation();
+    let _ = ctx.run_ui(raw, |ui| app.design.handle_clicks(ui, project, &ev, &out));
+    h.frame();
+}
+
+#[test]
+fn sketch_on_a_plane_then_straight_into_a_previewed_extrude() {
+    let (mut h, _d) = design_harness("fusion_flow");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    // the live preview shows the new solid before OK
+    let pv = h.app.design.preview.clone().expect("a preview");
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    let pb = pv.brep.expect("the preview solid");
+    let pvol = pb
+        .mass_properties(pb.bodies.keys().next().unwrap())
+        .unwrap()
+        .volume;
+    assert!((pvol - 3000.0).abs() < 1e-6, "{pvol}");
+    assert!(
+        proj(&mut h).evaluation().final_solid().is_none(),
+        "nothing is committed until OK"
+    );
+    commit(&mut h);
+    assert!((vol(&mut h) - 3000.0).abs() < 1e-6);
+    assert!(h.app.design.dialog.is_none());
+    let doc = proj(&mut h).document();
+    assert_eq!(doc.len(), 2, "one sketch and one extrude");
+    assert_eq!(h.app.design.model.selected, Some(doc.features[1].id));
+    // undo removes the extrude, then the sketch
+    proj(&mut h).history.undo();
+    assert!(proj(&mut h).evaluation().final_solid().is_none());
+}
+
+#[test]
+fn pick_a_planar_face_sketch_on_it_and_cut_a_hole_with_the_extrude_dialog() {
+    let (mut h, _d) = design_harness("face_flow");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    // Create Sketch, then click the top face
+    act(&mut h, Action::StartSketch);
+    let f = top_face(&mut h, 5.0);
+    click(&mut h, Some(Pick::Face(f)));
+    assert_eq!(
+        h.app.design.mode,
+        Mode::Sketching,
+        "{}",
+        h.app.design.status
+    );
+    // the outline of the face is shown as reference geometry
+    assert!(
+        h.app.design.sketch.app.reference.len() >= 4,
+        "{} reference lines",
+        h.app.design.sketch.app.reference.len()
+    );
+    let mut sk = kw_sketch::Sketch::new();
+    let c = sk.add_point(15.0, 10.0);
+    sk.add_circle(c, 3.0);
+    h.app.design.sketch.app.editor.replace_sketch(sk);
+    act(&mut h, Action::FinishSketch);
+    let d = h.app.design.dialog.as_mut().expect("Extrude dialog");
+    let Tool::Extrude {
+        op, flip, depth, ..
+    } = &mut d.tool
+    else {
+        panic!()
+    };
+    assert_eq!(
+        *op,
+        kw_feature::BodyOp::Join,
+        "a sketch on a body defaults to Join"
+    );
+    *op = kw_feature::BodyOp::Cut;
+    *flip = true;
+    *depth = "2 mm".into();
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let want = 3000.0 - std::f64::consts::PI * 9.0 * 2.0;
+    assert!(
+        (vol(&mut h) - want).abs() < 0.5,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+    // the sketch feature sits on the face by name
+    let doc = proj(&mut h).document();
+    assert!(doc.features.iter().any(|f| matches!(&f.spec, FeatureSpec::Sketch(s) if matches!(s.plane, kw_feature::PlaneSpec::Face(_)))));
+}
+
+#[test]
+fn a_curved_face_cannot_be_sketched_on_and_escape_leaves_the_mode() {
+    let (mut h, _d) = design_harness("curved");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    let mut sk = kw_sketch::Sketch::new();
+    let c = sk.add_point(0.0, 0.0);
+    sk.add_circle(c, 8.0);
+    h.app.design.sketch.app.editor.replace_sketch(sk);
+    act(&mut h, Action::FinishSketch);
+    let Some(d) = h.app.design.dialog.as_mut() else {
+        panic!()
+    };
+    if let Tool::Extrude { depth, .. } = &mut d.tool {
+        *depth = "10 mm".into();
+    }
+    h.frame();
+    commit(&mut h);
+    // the cylinder's side face is not planar
+    let ev = proj(&mut h).evaluation();
+    let (_, o) = ev.final_solid().unwrap();
+    let b = o.brep().unwrap().clone();
+    let side = b
+        .faces
+        .keys()
+        .find(|f| geom::face_frame(&b, *f).is_none())
+        .expect("a curved face");
+    act(&mut h, Action::StartSketch);
+    click(&mut h, Some(Pick::Face(side)));
+    assert_eq!(
+        h.app.design.mode,
+        Mode::PickPlane,
+        "the mode stays so that the user can pick again"
+    );
+    assert!(h.app.design.status.contains("not planar"));
+    // the flat end faces work
+    let top = top_face(&mut h, 10.0);
+    click(&mut h, Some(Pick::Face(top)));
+    assert_eq!(h.app.design.mode, Mode::Sketching);
+    // discarding leaves everything as it was
+    let n = proj(&mut h).document().len();
+    act(&mut h, Action::CancelSketch);
+    assert_eq!(h.app.design.mode, Mode::Idle);
+    assert_eq!(proj(&mut h).document().len(), n);
+}
+
+#[test]
+fn the_timeline_reorders_rolls_back_suppresses_and_edits_in_place() {
+    let (mut h, _d) = design_harness("timeline");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let doc = proj(&mut h).document();
+    let (sk, ex) = (doc.features[0].id, doc.features[1].id);
+    // an extrude cannot move before its sketch: refused with a message, nothing changes
+    act(&mut h, Action::Move(ex, 0));
+    assert!(!h.app.design.model.error.is_empty());
+    assert_eq!(proj(&mut h).document().features[0].id, sk);
+    // a parameter can be added and moved to the front
+    h.app.design.model.error.clear();
+    {
+        let Harness { app, .. } = &mut h;
+        let kw_app::ui::Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.model.add_parameter(project, "w", "10");
+    }
+    let p = proj(&mut h).document().features[2].id;
+    act(&mut h, Action::Move(p, 0));
+    assert!(
+        h.app.design.model.error.is_empty(),
+        "{}",
+        h.app.design.model.error
+    );
+    assert_eq!(proj(&mut h).document().features[0].id, p);
+    // rolling back to the sketch removes the solid; rolling forward brings it back
+    act(&mut h, Action::RollbackTo(sk));
+    assert!(proj(&mut h).evaluation().final_solid().is_none());
+    // new features are refused while the model is rolled back (they would land after the bar, unseen)
+    h.app.design.model.error.clear();
+    act(
+        &mut h,
+        Action::Open(Tool::Fillet {
+            radius: "1 mm".into(),
+        }),
+    );
+    assert!(
+        h.app.design.dialog.is_none()
+            && h.app
+                .design
+                .model
+                .error
+                .contains("Roll the timeline forward")
+    );
+    h.app.design.model.error.clear();
+    act(&mut h, Action::ClearRollback);
+    assert!((vol(&mut h) - 3000.0).abs() < 1e-6);
+    // suppress the extrude and bring it back
+    act(&mut h, Action::Suppress(ex, true));
+    assert!(proj(&mut h).evaluation().final_solid().is_none());
+    act(&mut h, Action::Suppress(ex, false));
+    // edit the extrude in place: the same dialog, with the old values
+    act(&mut h, Action::Edit(ex));
+    let d = h.app.design.dialog.as_mut().expect("edit dialog");
+    assert!(d.editing.is_some());
+    let Tool::Extrude { depth, .. } = &mut d.tool else {
+        panic!()
+    };
+    assert_eq!(depth, "5 mm");
+    *depth = "8 mm".into();
+    h.frame();
+    assert!(
+        (vol(&mut h) - 3000.0).abs() < 1e-6,
+        "the preview does not change the model"
+    );
+    commit(&mut h);
+    assert!((vol(&mut h) - 4800.0).abs() < 1e-6);
+    assert_eq!(
+        proj(&mut h).document().get(ex).unwrap().id,
+        ex,
+        "same feature, new spec"
+    );
+    // cancel keeps the model
+    act(&mut h, Action::Edit(ex));
+    h.app.design.close_dialog();
+    assert!((vol(&mut h) - 4800.0).abs() < 1e-6);
+    // edit the sketch: the extrude follows
+    act(&mut h, Action::Edit(sk));
+    assert_eq!(h.app.design.mode, Mode::Sketching);
+    h.app
+        .design
+        .sketch
+        .app
+        .editor
+        .replace_sketch(rectangle(30.0, 40.0));
+    act(&mut h, Action::FinishSketch);
+    assert_eq!(h.app.design.mode, Mode::Idle);
+    assert!(
+        h.app.design.dialog.is_none(),
+        "editing a sketch does not open Extrude"
+    );
+    assert!((vol(&mut h) - 9600.0).abs() < 1e-6);
+    // deleting a sketch that has a dependent is refused
+    act(&mut h, Action::Delete(sk));
+    assert!(!h.app.design.model.error.is_empty());
+}
+
+#[test]
+fn revolve_chamfer_shell_hole_and_patterns_match_closed_forms() {
+    let (mut h, _d) = design_harness("tools");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let base = 3000.0;
+    // chamfer one top edge by 1 mm: removes 0.5 * 1 * 1 * 30
+    let edge = {
+        let ev = proj(&mut h).evaluation();
+        let b = ev.final_solid().unwrap().1.brep().unwrap().clone();
+        b.edges
+            .keys()
+            .find(|e| {
+                let ed = &b.edges[*e];
+                let (p, q) = (b.vertices[ed.start].point, b.vertices[ed.end].point);
+                (p.z - 5.0).abs() < 1e-9
+                    && (q.z - 5.0).abs() < 1e-9
+                    && ((p.x - q.x).abs() - 30.0).abs() < 1e-9
+                    && p.y.abs() < 1e-9
+            })
+            .expect("a 30 mm top edge")
+    };
+    act(
+        &mut h,
+        Action::Open(Tool::Chamfer {
+            d1: "1 mm".into(),
+            d2: "1 mm".into(),
+        }),
+    );
+    click(&mut h, Some(Pick::Edge(edge)));
+    assert_eq!(h.app.design.model.picks.len(), 1);
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    assert!(
+        (vol(&mut h) - (base - 15.0)).abs() < 1e-3,
+        "chamfer: {}",
+        vol(&mut h)
+    );
+    proj(&mut h).history.undo();
+    // shell with the top face open, 1 mm walls
+    act(
+        &mut h,
+        Action::Open(Tool::Shell {
+            thickness: "1 mm".into(),
+        }),
+    );
+    let top = top_face(&mut h, 5.0);
+    click(&mut h, Some(Pick::Face(top)));
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    assert!(
+        (vol(&mut h) - (base - 28.0 * 18.0 * 4.0)).abs() < 1e-2,
+        "shell: {}",
+        vol(&mut h)
+    );
+    proj(&mut h).history.undo();
+    // a hole on the top face
+    act(&mut h, Action::Open(Tool::default_hole()));
+    let top = top_face(&mut h, 5.0);
+    click(&mut h, Some(Pick::Face(top)));
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Hole {
+            x,
+            y,
+            diameter,
+            depth,
+            ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        (*x, *y, *diameter, *depth) = ("8 mm".into(), "10 mm".into(), "4 mm".into(), "5 mm".into());
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let hole = std::f64::consts::PI * 4.0 * 5.0;
+    assert!(
+        (vol(&mut h) - (base - hole)).abs() < 0.5,
+        "hole: {}",
+        vol(&mut h)
+    );
+    // a rectangular pattern of the hole (3 in all, 8 mm apart along x)
+    act(
+        &mut h,
+        Action::Open(Tool::Pattern {
+            source: None,
+            dx: "8 mm".into(),
+            dy: "0 mm".into(),
+            dz: "0 mm".into(),
+            count: "3".into(),
+        }),
+    );
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    assert!(
+        (vol(&mut h) - (base - 3.0 * hole)).abs() < 1.0,
+        "pattern: {}",
+        vol(&mut h)
+    );
+    // a missing choice is reported, not a crash
+    act(
+        &mut h,
+        Action::Open(Tool::Mirror {
+            source: None,
+            plane: 1,
+        }),
+    );
+    if let Some(d) = h.app.design.dialog.as_mut() {
+        if let Tool::Mirror { source, .. } = &mut d.tool {
+            *source = None;
+        }
+    }
+    h.frame();
+    assert!(h.app.design.preview.clone().unwrap().error.is_some());
+    h.app.design.close_dialog();
+}
+
+#[test]
+fn revolving_a_profile_gives_the_closed_form_volume() {
+    let (mut h, _d) = design_harness("revolve");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    // rectangle x in [0, 10], y in [2, 5]: revolved about the sketch X axis -> a tube
+    let mut sk = kw_sketch::Sketch::new();
+    let pts: Vec<_> = [(0.0, 2.0), (10.0, 2.0), (10.0, 5.0), (0.0, 5.0)]
+        .iter()
+        .map(|p| sk.add_point(p.0, p.1))
+        .collect();
+    for i in 0..4 {
+        sk.add_line(pts[i], pts[(i + 1) % 4]);
+    }
+    h.app.design.sketch.app.editor.replace_sketch(sk);
+    act(&mut h, Action::FinishSketch);
+    // turn the Extrude dialog into Revolve
+    let id = h.app.design.model.selected.unwrap();
+    h.app.design.close_dialog();
+    act(
+        &mut h,
+        Action::Open(Tool::Revolve {
+            sketch: Some(id),
+            angle: "360 deg".into(),
+            axis_y: false,
+            op: kw_feature::BodyOp::New,
+        }),
+    );
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let want = std::f64::consts::PI * (25.0 - 4.0) * 10.0;
+    assert!(
+        (vol(&mut h) - want).abs() / want < 1e-3,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+}
+
+#[test]
+fn the_view_cube_and_camera_animation_and_plane_overlay_work() {
+    use kw_app::chrome::viewcube;
+    assert_eq!(viewcube::face_view("TOP").map(|v| v.1 > 1.5), Some(true));
+    assert_eq!(
+        viewcube::face_view("FRONT"),
+        Some((-std::f64::consts::FRAC_PI_2, 0.0))
+    );
+    assert!(viewcube::face_view("NOPE").is_none());
+    // yaw turns the short way round
+    let (y, _) = viewcube::lerp_view((3.0, 0.0), (-3.0, 0.0), 0.5);
+    assert!(y.abs() > 3.0 && y.abs() < 3.3, "{y}");
+    let (y0, p0) = viewcube::lerp_view((0.2, 0.3), (1.0, 0.9), 0.0);
+    let (y1, p1) = viewcube::lerp_view((0.2, 0.3), (1.0, 0.9), 1.0);
+    assert!(
+        (y0 - 0.2).abs() < 1e-12
+            && (p0 - 0.3).abs() < 1e-12
+            && (y1 - 1.0).abs() < 1e-12
+            && (p1 - 0.9).abs() < 1e-12
+    );
+    // while picking a plane, the pointer over the middle of an empty view is over the origin, i.e. on a plane
+    let (mut h, _d) = design_harness("overlay");
+    act(&mut h, Action::StartSketch);
+    let r = h.app.design.viewport.rect();
+    assert!(r.width() > 100.0);
+    let pos = r.center();
+    {
+        let Harness { ctx, app, t } = &mut h;
+        let raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360.0, 860.0))),
+            time: Some(*t),
+            events: vec![egui::Event::PointerMoved(pos)],
+            ..Default::default()
+        };
+        *t += 1.0 / 60.0;
+        let _ = ctx.run_ui(raw, |ui| app.show(ui));
+    }
+    assert!(
+        h.app.design.hover_plane.is_some(),
+        "a plane is under the pointer"
+    );
 }

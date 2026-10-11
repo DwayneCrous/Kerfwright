@@ -365,9 +365,11 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let (Some(vb), Some(ib), true) =
-                (&self.vertex_buf, &self.index_buf, self.settings.show_mesh && self.index_count > 0)
-            {
+            if let (Some(vb), Some(ib), true) = (
+                &self.vertex_buf,
+                &self.index_buf,
+                self.settings.show_mesh && self.index_count > 0,
+            ) {
                 pass.set_pipeline(&self.mesh_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));

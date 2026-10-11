@@ -33,6 +33,7 @@ pub struct EcadWorkspace {
     layer_on: Vec<bool>,
     pour_net: usize,
     route_job: Option<Job<(Board, RouteReport)>>,
+    pub requests: Vec<&'static str>,
 }
 
 impl Default for EcadWorkspace {
@@ -50,6 +51,7 @@ impl Default for EcadWorkspace {
             layer_on: Vec::new(),
             pour_net: 0,
             route_job: None,
+            requests: Vec::new(),
         }
     }
 }
@@ -67,6 +69,101 @@ fn layer_colour(l: usize, layers: usize) -> egui::Color32 {
 }
 
 impl EcadWorkspace {
+    /// The ribbon of the Electronics workspace.
+    pub fn ribbon(&mut self, ui: &mut egui::Ui) {
+        use crate::chrome::{ribbon as rb, Icon};
+        let mut cur = 0usize;
+        rb::tabs(ui, &[("BOARD", true), ("SCHEMATIC", false)], &mut cur);
+        ui.add_space(2.0);
+        let busy = self.route_job.is_some();
+        let mut req: Vec<&'static str> = Vec::new();
+        ui.horizontal(|ui| {
+            rb::group(ui, "BOARD", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Board,
+                    "Sample Board",
+                    !busy,
+                    false,
+                    "Generate the selected sample board",
+                )
+                .clicked()
+                {
+                    req.push("generate");
+                }
+            });
+            rb::group(ui, "PLACE & ROUTE", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Pattern,
+                    "Place",
+                    !busy,
+                    false,
+                    "Place all parts again",
+                )
+                .clicked()
+                {
+                    req.push("place");
+                }
+                if rb::button(ui, Icon::Line, "Route All", !busy, busy, "Route every net").clicked()
+                {
+                    req.push("route");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Finish,
+                    "Check (DRC)",
+                    !busy,
+                    false,
+                    "Design-rule check and connectivity",
+                )
+                .clicked()
+                {
+                    req.push("check");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Plane,
+                    "Pour",
+                    !busy,
+                    false,
+                    "Pour the chosen net on the bottom layer",
+                )
+                .clicked()
+                {
+                    req.push("pour");
+                }
+            });
+            rb::group(ui, "OUTPUT", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Folder,
+                    "Fabrication Files",
+                    true,
+                    false,
+                    "Gerber, drill, IDF and pick-and-place into a folder",
+                )
+                .clicked()
+                {
+                    req.push("fab");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Body,
+                    "STEP",
+                    true,
+                    false,
+                    "The board with its components as a STEP file",
+                )
+                .clicked()
+                {
+                    req.push("step");
+                }
+            });
+        });
+        self.requests.extend(req);
+    }
+
     // ------------------------------------------------------------------------------ actions
 
     pub fn generate_sample(&mut self, project: &mut Project, index: usize) {
@@ -221,6 +318,41 @@ impl EcadWorkspace {
                     self.route_job = None;
                 }
                 None => ui.ctx().request_repaint(),
+            }
+        }
+        for r in std::mem::take(&mut self.requests) {
+            match r {
+                "generate" => {
+                    let i = self.sample;
+                    self.generate_sample(project, i);
+                }
+                "place" => self.replace(project),
+                "route" => self.start_route(project),
+                "check" => self.check(project),
+                "pour" => self.pour(project),
+                "fab" => {
+                    if let Some(b) = project.board.clone() {
+                        if let Some(dir) = dialogs.choose_folder() {
+                            self.message = match self.export_fabrication(&b, &dir) {
+                                Ok(n) => format!("wrote {n} files to {}", dir.display()),
+                                Err(e) => format!("export failed: {e}"),
+                            };
+                        }
+                    }
+                }
+                "step" => {
+                    if let Some(b) = project.board.clone() {
+                        if let Some(path) =
+                            dialogs.save_file(&format!("{}.step", b.name), "STEP", &["step", "stp"])
+                        {
+                            self.message = match std::fs::write(&path, step::step(&b)) {
+                                Ok(()) => format!("wrote {}", path.display()),
+                                Err(e) => format!("export failed: {e}"),
+                            };
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         egui::Panel::right("ecad_side")

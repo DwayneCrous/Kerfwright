@@ -267,6 +267,8 @@ pub struct CamWorkspace {
     /// Increases whenever the displayed toolpath changes (the viewport rebuilds its scene).
     shown: u64,
     initialised_for: Option<u128>,
+    /// Ribbon buttons ask for things here (`generate`, `simulate`); `show` carries them out.
+    pub requests: Vec<&'static str>,
 }
 
 impl Default for CamWorkspace {
@@ -281,11 +283,88 @@ impl Default for CamWorkspace {
             sim_job: None,
             shown: 0,
             initialised_for: None,
+            requests: Vec::new(),
         }
     }
 }
 
 impl CamWorkspace {
+    /// The ribbon of the Manufacture workspace.
+    pub fn ribbon(&mut self, ui: &mut egui::Ui) {
+        use crate::chrome::{ribbon as rb, Icon};
+        let mut cur = 0usize;
+        rb::tabs(
+            ui,
+            &[
+                ("MILLING", true),
+                ("TURNING", false),
+                ("ADDITIVE", false),
+                ("INSPECTION", false),
+            ],
+            &mut cur,
+        );
+        ui.add_space(2.0);
+        let op = self.settings.op;
+        let mut req: Vec<&'static str> = Vec::new();
+        let mut set: Option<OpKind> = None;
+        ui.horizontal(|ui| {
+            rb::group(ui, "2D", |ui| {
+                for (k, icon, label) in [
+                    (OpKind::Pocket, Icon::Rectangle, "Pocket"),
+                    (OpKind::Adaptive, Icon::Offset, "Adaptive Clearing"),
+                    (OpKind::ContourOutside, Icon::Spline, "2D Contour"),
+                ] {
+                    if rb::button(
+                        ui,
+                        icon,
+                        label,
+                        true,
+                        op == k,
+                        "Choose the operation and generate its toolpath",
+                    )
+                    .clicked()
+                    {
+                        set = Some(k);
+                        req.push("generate");
+                    }
+                }
+            });
+            rb::group(ui, "3D", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Cam,
+                    "3D Finish",
+                    true,
+                    op == OpKind::Finish3d,
+                    "Ball-nose raster finishing of the model",
+                )
+                .clicked()
+                {
+                    set = Some(OpKind::Finish3d);
+                    req.push("generate");
+                }
+            });
+            rb::group(ui, "ACTIONS", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Play,
+                    "Simulate",
+                    self.selected.is_some(),
+                    false,
+                    "Remove stock with the selected operation",
+                )
+                .clicked()
+                {
+                    req.push("simulate");
+                }
+            });
+        });
+        if let Some(k) = set {
+            self.settings.op = k;
+        }
+        self.requests.extend(req);
+    }
+
     /// Take the region and heights from the model's bounding box.
     pub fn fit_to_model(&mut self, brep: &kw_brep::BRep) {
         if let Some(body) = brep.bodies.keys().next() {
@@ -470,6 +549,17 @@ impl CamWorkspace {
                 None => ui.ctx().request_repaint(),
             }
         }
+        for r in std::mem::take(&mut self.requests) {
+            match r {
+                "generate" => {
+                    if self.job.is_none() {
+                        self.start(brep.as_ref());
+                    }
+                }
+                "simulate" => self.start_sim(project, brep.as_ref()),
+                _ => {}
+            }
+        }
         egui::Panel::left("cam_side")
             .default_size(320.0)
             .show(ui, |ui| self.side(ui, project, brep.as_ref(), dialogs));
@@ -498,6 +588,7 @@ impl CamWorkspace {
                     m
                 },
                 None,
+                crate::viewport::ViewOpts::default(),
             );
         });
     }

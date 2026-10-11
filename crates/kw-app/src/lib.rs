@@ -3,6 +3,8 @@
 
 pub mod bridge;
 pub mod cam;
+pub mod chrome;
+pub mod design;
 pub mod dialogs;
 pub mod ecad;
 pub mod fea;

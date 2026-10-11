@@ -2,7 +2,6 @@
 //! sketch feature of the project. "Finish sketch" writes the sketch back into the feature timeline.
 
 use crate::project::Project;
-use eframe::egui;
 use kw_expr::Param;
 use kw_feature::{FeatureId, FeatureSpec, PlaneSpec, SketchRecipe, SketchSpec};
 use kw_sketch::Sketch;
@@ -61,6 +60,15 @@ impl Default for SketchWorkspace {
 }
 
 impl SketchWorkspace {
+    /// Start a sketch on any plane the engine accepts (an origin plane or a face).
+    pub fn begin_new_on(&mut self, plane: PlaneSpec) {
+        self.app.editor.replace_sketch(Sketch::new());
+        self.app.zoom_to_fit();
+        self.loaded_vars.clear();
+        self.editing = Editing::New(PlaneSpecKey(plane));
+        self.error.clear();
+    }
+
     pub fn begin_new(&mut self, plane: NewPlane) {
         self.app.editor.replace_sketch(Sketch::new());
         self.app.zoom_to_fit();
@@ -151,83 +159,6 @@ impl SketchWorkspace {
                 self.error = e.to_string();
                 None
             }
-        }
-    }
-
-    /// Draw the workspace. Returns the feature when the user finished a sketch.
-    pub fn show(&mut self, ui: &mut egui::Ui, project: &mut Project) -> Option<FeatureId> {
-        match self.editing {
-            Editing::Nothing => {
-                self.start_page(ui, project);
-                None
-            }
-            _ => {
-                let mut finished = None;
-                egui::Panel::top("sketch_bar").show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        match &self.editing {
-                            Editing::New(_) => ui.strong("New sketch"),
-                            Editing::Existing(id) => {
-                                ui.strong(format!("Editing {}", project.document().name_of(*id)))
-                            }
-                            Editing::Nothing => ui.strong(""),
-                        };
-                        if ui.button("Finish sketch").clicked() {
-                            finished = self.finish(project);
-                        }
-                        if ui.button("Discard").clicked() {
-                            self.cancel();
-                        }
-                        if !self.error.is_empty() {
-                            ui.colored_label(egui::Color32::from_rgb(230, 110, 90), &self.error);
-                        }
-                    });
-                });
-                egui::CentralPanel::default().show(ui, |ui| self.app.show(ui));
-                finished
-            }
-        }
-    }
-
-    fn start_page(&mut self, ui: &mut egui::Ui, project: &mut Project) {
-        ui.add_space(12.0);
-        ui.heading("Sketch");
-        ui.label("Draw a constrained 2-D profile, then extrude it in the Model workspace.");
-        ui.add_space(12.0);
-        ui.group(|ui| {
-            ui.strong("New sketch");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.plane, NewPlane::Xy, "XY plane");
-                ui.selectable_value(&mut self.plane, NewPlane::Yz, "YZ plane");
-                ui.selectable_value(&mut self.plane, NewPlane::Xz, "XZ plane");
-            });
-            if ui.button("Start sketching").clicked() {
-                self.begin_new(self.plane);
-            }
-        });
-        ui.add_space(8.0);
-        let doc = project.document();
-        let sketches: Vec<_> = doc
-            .features
-            .iter()
-            .filter(|f| matches!(f.spec, FeatureSpec::Sketch(_)))
-            .map(|f| (f.id, f.name.clone()))
-            .collect();
-        ui.group(|ui| {
-            ui.strong("Edit an existing sketch");
-            if sketches.is_empty() {
-                ui.weak("This project has no sketches yet.");
-            }
-            for (id, name) in sketches {
-                if ui.button(format!("Edit {name}")).clicked() {
-                    if let Err(e) = self.begin_edit(project, id) {
-                        self.error = e;
-                    }
-                }
-            }
-        });
-        if !self.error.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(230, 110, 90), &self.error);
         }
     }
 }

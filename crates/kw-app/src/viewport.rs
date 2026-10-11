@@ -150,10 +150,14 @@ impl ModelScene {
             .map(|t| SceneObject {
                 tess: t,
                 transform: Isometry3::identity(),
-                color: [150, 170, 200],
+                color: [196, 200, 208],
             })
             .collect();
-        let scene = Scene::build(&objects);
+        let mut scene = Scene::build(&objects);
+        if tess.is_empty() {
+            scene.center = nalgebra::Vector3::zeros();
+            scene.radius = 40.0;
+        }
         ModelScene { scene, tess }
     }
 
@@ -214,6 +218,58 @@ impl ModelScene {
     }
 }
 
+/// Options of one viewport frame.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewOpts {
+    /// Highlight the face or edge under the pointer (needs an id-buffer read when the pointer moves).
+    pub hover: bool,
+    /// Orbit / pan / zoom with the mouse.
+    pub navigate: bool,
+}
+
+impl Default for ViewOpts {
+    fn default() -> Self {
+        ViewOpts {
+            hover: true,
+            navigate: true,
+        }
+    }
+}
+
+/// What happened in the viewport this frame.
+#[derive(Debug, Clone)]
+pub struct ViewOut {
+    pub rect: egui::Rect,
+    /// `Some(None)` = clicked on empty space.
+    pub click: Option<Option<Pick>>,
+    pub double_click: Option<Option<Pick>>,
+    pub hover: Option<Pick>,
+    /// Pointer position of a click (screen), when there was one.
+    pub click_pos: Option<egui::Pos2>,
+    pub response: Option<egui::Response>,
+}
+
+impl ViewOut {
+    fn none(rect: egui::Rect) -> ViewOut {
+        ViewOut {
+            rect,
+            click: None,
+            double_click: None,
+            hover: None,
+            click_pos: None,
+            response: None,
+        }
+    }
+}
+
+/// An animation of the camera direction.
+#[derive(Debug, Clone, Copy)]
+struct Anim {
+    from: (f64, f64),
+    to: (f64, f64),
+    start: f64,
+}
+
 /// The viewport widget state.
 pub struct Viewport3d {
     gpu: Option<GpuView>,
@@ -221,10 +277,16 @@ pub struct Viewport3d {
     pub camera: OrbitCamera,
     /// Draw edges only (to see toolpaths inside the material).
     pub wireframe: bool,
+    pub show_edges: bool,
     model: Option<ModelScene>,
     /// Identifies the geometry currently uploaded.
     key: Option<u128>,
     fitted: bool,
+    anim: Option<Anim>,
+    hover: Option<Pick>,
+    last_pointer: Option<egui::Pos2>,
+    rect: egui::Rect,
+    ppp: f32,
 }
 
 impl Default for Viewport3d {
@@ -234,9 +296,15 @@ impl Default for Viewport3d {
             tex: None,
             camera: OrbitCamera::new(50.0, 1.5),
             wireframe: false,
+            show_edges: true,
             model: None,
             key: None,
             fitted: false,
+            anim: None,
+            hover: None,
+            last_pointer: None,
+            rect: egui::Rect::NOTHING,
+            ppp: 1.0,
         }
     }
 }
@@ -246,8 +314,70 @@ impl Viewport3d {
         self.model.as_ref()
     }
 
-    /// Show the viewport. `geometry` is rebuilt only when `key` changes. Returns a pick if the user clicked
-    /// on the model (`Some(None)` = clicked on empty space).
+    pub fn rect(&self) -> egui::Rect {
+        self.rect
+    }
+
+    /// The hovered pick (updated while the pointer moves over the view).
+    pub fn hovered(&self) -> Option<Pick> {
+        self.hover
+    }
+
+    /// Turn the camera to look from direction (yaw, pitch), animated.
+    pub fn look(&mut self, yaw: f64, pitch: f64, now: f64) {
+        self.anim = Some(Anim {
+            from: (self.camera.yaw, self.camera.pitch),
+            to: (yaw, pitch),
+            start: now,
+        });
+    }
+
+    /// Frame the whole model again.
+    pub fn fit(&mut self) {
+        if let Some(m) = &self.model {
+            self.camera.target = nalgebra::Vector3::zeros();
+            self.camera.fit(m.scene.radius.max(1e-3));
+        }
+    }
+
+    /// World origin in scene (re-centred) coordinates.
+    pub fn origin_in_scene(&self) -> nalgebra::Vector3<f64> {
+        self.model
+            .as_ref()
+            .map(|m| -m.scene.center)
+            .unwrap_or_else(nalgebra::Vector3::zeros)
+    }
+
+    /// Project a point given in scene coordinates to a screen position (logical points).
+    pub fn project(&self, p: [f64; 3]) -> Option<egui::Pos2> {
+        let (w, h) = (
+            self.rect.width() as f64 * self.ppp as f64,
+            self.rect.height() as f64 * self.ppp as f64,
+        );
+        let q = self
+            .camera
+            .project(&nalgebra::Vector3::new(p[0], p[1], p[2]), w, h)?;
+        Some(egui::pos2(
+            self.rect.min.x + q.0 as f32 / self.ppp,
+            self.rect.min.y + q.1 as f32 / self.ppp,
+        ))
+    }
+
+    /// The ray (scene coordinates) through a screen position.
+    pub fn ray(&self, pos: egui::Pos2) -> (nalgebra::Vector3<f64>, nalgebra::Vector3<f64>) {
+        let (w, h) = (
+            self.rect.width() as f64 * self.ppp as f64,
+            self.rect.height() as f64 * self.ppp as f64,
+        );
+        self.camera.pixel_ray(
+            (pos.x - self.rect.min.x) as f64 * self.ppp as f64,
+            (pos.y - self.rect.min.y) as f64 * self.ppp as f64,
+            w,
+            h,
+        )
+    }
+
+    /// Show the viewport. `geometry` is rebuilt only when `key` changes.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -265,7 +395,9 @@ impl Viewport3d {
                 None => ModelScene::empty(),
             },
             highlight,
+            ViewOpts::default(),
         )
+        .click
     }
 
     /// Like [`Viewport3d::show`], with the geometry built by `build` whenever `key` changes.
@@ -276,12 +408,14 @@ impl Viewport3d {
         key: u128,
         build: impl FnOnce() -> ModelScene,
         highlight: Option<Pick>,
-    ) -> Option<Option<Pick>> {
+        opts: ViewOpts,
+    ) -> ViewOut {
         let size = ui.available_size().max(egui::vec2(64.0, 64.0));
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        self.rect = rect;
         let Some(rs) = rs else {
             ui.painter()
-                .rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+                .rect_filled(rect, 0.0, egui::Color32::from_gray(210));
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -289,9 +423,17 @@ impl Viewport3d {
                 egui::FontId::proportional(16.0),
                 egui::Color32::GRAY,
             );
-            return None;
+            // geometry is still built so that picks and overlays work without a GPU (tests)
+            if self.key != Some(key) {
+                let m = build();
+                self.camera.update_clip(m.scene.radius.max(1e-3));
+                self.model = Some(m);
+                self.key = Some(key);
+            }
+            return ViewOut::none(rect);
         };
         let ppp = ui.ctx().pixels_per_point();
+        self.ppp = ppp;
         let px = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
         // ---- targets
         let device = &rs.device;
@@ -338,24 +480,41 @@ impl Viewport3d {
             self.camera.update_clip(m.scene.radius.max(1e-3));
             self.model = Some(m);
             self.key = Some(key);
+            self.hover = None;
+        }
+        // ---- camera animation
+        let now = ui.ctx().input(|i| i.time);
+        if let Some(a) = self.anim {
+            let t = ((now - a.start) / 0.35).clamp(0.0, 1.0);
+            let (yaw, pitch) = crate::chrome::viewcube::lerp_view(a.from, a.to, t);
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch;
+            if t >= 1.0 {
+                self.anim = None;
+            } else {
+                ui.ctx().request_repaint();
+            }
         }
         // ---- input
         self.camera.aspect = (rect.width() / rect.height()).max(0.1) as f64;
-        if resp.dragged_by(egui::PointerButton::Primary) {
-            let d = resp.drag_delta();
-            self.camera.orbit(d.x as f64, d.y as f64);
-        }
-        if resp.dragged_by(egui::PointerButton::Secondary)
-            || resp.dragged_by(egui::PointerButton::Middle)
-        {
-            let d = resp.drag_delta();
-            self.camera
-                .pan(d.x as f64, d.y as f64, rect.height() as f64);
-        }
-        if resp.hovered() {
-            let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom(scroll as f64 / 120.0);
+        if opts.navigate {
+            if resp.dragged_by(egui::PointerButton::Primary) {
+                let d = resp.drag_delta();
+                self.camera.orbit(d.x as f64, d.y as f64);
+                self.anim = None;
+            }
+            if resp.dragged_by(egui::PointerButton::Secondary)
+                || resp.dragged_by(egui::PointerButton::Middle)
+            {
+                let d = resp.drag_delta();
+                self.camera
+                    .pan(d.x as f64, d.y as f64, rect.height() as f64);
+            }
+            if resp.hovered() {
+                let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    self.camera.zoom(scroll as f64 / 120.0);
+                }
             }
         }
         if let Some(m) = &self.model {
@@ -363,7 +522,13 @@ impl Viewport3d {
         }
         // ---- draw
         gpu.renderer.settings.show_mesh = !self.wireframe;
+        gpu.renderer.settings.show_edges = self.show_edges;
+        gpu.renderer.settings.background = crate::chrome::theme::VIEWPORT;
         gpu.renderer.selected = highlight
+            .and_then(|p| self.model.as_ref().map(|m| m.id_of(p)))
+            .unwrap_or(0);
+        gpu.renderer.hovered = self
+            .hover
             .and_then(|p| self.model.as_ref().map(|m| m.id_of(p)))
             .unwrap_or(0);
         gpu.render(device, &rs.queue, &self.camera);
@@ -375,20 +540,60 @@ impl Viewport3d {
                 egui::Color32::WHITE,
             );
         }
-        // ---- pick
-        if resp.clicked_by(egui::PointerButton::Primary) {
-            if let Some(pos) = resp.interact_pointer_pos() {
+        // ---- hover (one id-buffer pixel, only when the pointer moved)
+        let mut out = ViewOut::none(rect);
+        if opts.hover {
+            let pos = resp.hover_pos();
+            if pos != self.last_pointer {
+                self.last_pointer = pos;
+                self.hover = pos.and_then(|pos| {
+                    let x = ((pos.x - rect.min.x) * ppp) as u32;
+                    let y = ((pos.y - rect.min.y) * ppp) as u32;
+                    let id = gpu.pick_id(device, &rs.queue, x, y);
+                    self.model.as_ref().and_then(|m| m.resolve(id))
+                });
+            }
+        } else {
+            self.hover = None;
+        }
+        out.hover = self.hover;
+        // ---- clicks
+        let pick_at =
+            |gpu: &GpuView, model: &Option<ModelScene>, pos: egui::Pos2| -> Option<Pick> {
                 let x = ((pos.x - rect.min.x) * ppp) as u32;
                 let y = ((pos.y - rect.min.y) * ppp) as u32;
                 let id = gpu.pick_id(device, &rs.queue, x, y);
-                return Some(self.model.as_ref().and_then(|m| m.resolve(id)));
+                model.as_ref().and_then(|m| m.resolve(id))
+            };
+        if resp.clicked_by(egui::PointerButton::Primary) {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                out.click = Some(pick_at(gpu, &self.model, pos));
+                out.click_pos = Some(pos);
             }
         }
-        None
+        if resp.double_clicked_by(egui::PointerButton::Primary) {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                out.double_click = Some(pick_at(gpu, &self.model, pos));
+            }
+        }
+        out.response = Some(resp);
+        out
     }
 }
 
 impl ModelScene {
+    /// The polylines of the B-rep edges (world coordinates).
+    pub fn edge_polylines(&self) -> Vec<Vec<[f64; 3]>> {
+        let mut out = Vec::new();
+        for t in &self.tess {
+            for (_, start, count) in &t.edges.ranges {
+                let pts = &t.edges.points[*start as usize..(*start + *count) as usize];
+                out.push(pts.iter().map(|p| [p.x, p.y, p.z]).collect());
+            }
+        }
+        out
+    }
+
     /// Add line segments (world coordinates) to the scene, drawn like edges and not pickable.
     pub fn add_segments(&mut self, segments: &[([f64; 3], [f64; 3])]) {
         for (a, b) in segments {

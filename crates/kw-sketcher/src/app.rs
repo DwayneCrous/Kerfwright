@@ -6,7 +6,7 @@ use kw_sketch::{geom, ConstraintId, ConstraintKind, EntityId, EntityKind, Sketch
 
 type P2 = (f64, f64);
 
-const TOOLS: &[(Tool, &str, &str)] = &[
+pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Select, "Select", "Esc"),
     (Tool::Point, "Point", "P"),
     (Tool::Line, "Line", "L"),
@@ -20,7 +20,7 @@ const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Offset, "Offset", "O"),
 ];
 
-const CONSTRAINTS: &[(ConstraintTool, &str)] = &[
+pub const CONSTRAINTS: &[(ConstraintTool, &str)] = &[
     (ConstraintTool::Coincident, "Coincident"),
     (ConstraintTool::Horizontal, "Horizontal"),
     (ConstraintTool::Vertical, "Vertical"),
@@ -75,6 +75,8 @@ fn constraint_label(k: &ConstraintKind) -> &'static str {
 pub struct SketcherApp {
     /// Inside another application: no "New" / demo entries (the host owns the document).
     pub embedded: bool,
+    /// Faint reference polylines (plane coordinates), e.g. the outline of the face being sketched on.
+    pub reference: Vec<Vec<(f64, f64)>>,
     pub editor: Editor,
     pub view: View,
     /// Quit after this many frames (smoke test).
@@ -96,6 +98,7 @@ impl Default for SketcherApp {
     fn default() -> Self {
         Self {
             embedded: false,
+            reference: Vec::new(),
             editor: Editor::default(),
             view: View::default(),
             exit_after_frames: None,
@@ -304,7 +307,7 @@ impl SketcherApp {
         });
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui) {
+    pub fn inspector(&mut self, ui: &mut egui::Ui) {
         ui.heading("Solver");
         match &self.editor.report {
             None => {
@@ -413,7 +416,7 @@ impl SketcherApp {
         }
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context) {
+    pub fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(c) = self.editor.last_dimension.take() {
             if let Some(v) = self.editor.sketch.dimension_value(c) {
                 let v = if matches!(
@@ -504,7 +507,7 @@ impl SketcherApp {
         }
     }
 
-    fn shortcuts(&mut self, ctx: &egui::Context) {
+    pub fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -560,13 +563,24 @@ impl SketcherApp {
 
     // ---------------------------------------------------------------- canvas
 
-    fn canvas_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn canvas_ui(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
         self.canvas = rect;
         if self.first_frame {
             self.first_frame = false;
-            match self.editor.sketch.bounds() {
+            let mut b = self.editor.sketch.bounds();
+            // the reference outline (e.g. the face being sketched on) frames the view too
+            for p in self.reference.iter().flatten() {
+                b = Some(match b {
+                    None => (*p, *p),
+                    Some((lo, hi)) => (
+                        (lo.0.min(p.0), lo.1.min(p.1)),
+                        (hi.0.max(p.0), hi.1.max(p.1)),
+                    ),
+                });
+            }
+            match b {
                 Some((lo, hi)) => self.view.fit(rect, lo, hi),
                 None => self.view = View::default(),
             }
@@ -697,6 +711,13 @@ impl SketcherApp {
             Stroke::new(1.0, Color32::from_rgb(70, 150, 70)),
         );
 
+        for poly in &self.reference {
+            let pts: Vec<Pos2> = poly.iter().map(|p| v.to_screen(rect, *p)).collect();
+            painter.add(Shape::line(
+                pts,
+                Stroke::new(1.5, Color32::from_gray(if ctx_dark { 110 } else { 165 })),
+            ));
+        }
         let sk = &self.editor.sketch;
         let tol = 0.75 / v.scale;
         let selected: Vec<EntityId> = self.editor.selection.clone();
