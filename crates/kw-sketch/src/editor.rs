@@ -2227,6 +2227,10 @@ impl Editor {
         self.checkpoint();
         let mut vars = Vec::new();
         for e in self.selection.clone() {
+            if let Some(ent) = self.sketch.entities.get_mut(e) {
+                // locked geometry from the model is shown purple
+                ent.projected = true;
+            }
             let mut all = vec![e];
             all.extend(self.sketch.children(e));
             for c in all {
@@ -2242,6 +2246,74 @@ impl Editor {
             self.sketch.set_fixed(v, true);
         }
         self.refresh();
+    }
+
+    /// Select what a dragged rectangle covers. A *window* (`crossing == false`, dragged left to right)
+    /// takes what lies completely inside it; a *crossing* box (right to left) also what it touches.
+    /// Points inside the rectangle are taken either way. `additive` keeps the current selection.
+    pub fn select_in_box(&mut self, a: P2, b: P2, crossing: bool, additive: bool) {
+        let (lo, hi) = ((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)));
+        let inside = |p: P2| p.0 >= lo.0 && p.0 <= hi.0 && p.1 >= lo.1 && p.1 <= hi.1;
+        let tol = (self.tolerance * 0.1).max(1e-6);
+        let mut hit: Vec<EntityId> = Vec::new();
+        for (id, ent) in self.sketch.entities.iter() {
+            let covered = match &ent.kind {
+                EntityKind::Point(_) => self.sketch.point(id).is_ok_and(inside),
+                _ => match geom::polyline(&self.sketch, id, tol) {
+                    Ok(poly) if !poly.is_empty() => {
+                        if crossing {
+                            poly.iter().any(|p| inside(*p))
+                                || poly
+                                    .windows(2)
+                                    .any(|w| Self::segment_hits_box(w[0], w[1], lo, hi))
+                        } else {
+                            poly.iter().all(|p| inside(*p))
+                        }
+                    }
+                    _ => false,
+                },
+            };
+            if covered {
+                hit.push(id);
+            }
+        }
+        if !additive {
+            self.selection.clear();
+        }
+        for e in hit {
+            if !self.selection.contains(&e) {
+                self.selection.push(e);
+            }
+        }
+    }
+
+    /// Does the segment `p`–`q` cross the box `lo`–`hi`? (Liang–Barsky clipping.)
+    fn segment_hits_box(p: P2, q: P2, lo: P2, hi: P2) -> bool {
+        let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+        let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+        for (pk, qk) in [
+            (-dx, p.0 - lo.0),
+            (dx, hi.0 - p.0),
+            (-dy, p.1 - lo.1),
+            (dy, hi.1 - p.1),
+        ] {
+            if pk == 0.0 {
+                if qk < 0.0 {
+                    return false;
+                }
+            } else {
+                let r = qk / pk;
+                if pk < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// The curves among the selection (points on their own are not patterned).

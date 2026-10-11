@@ -493,3 +493,31 @@ fn dimension_text_may_be_a_formula_over_parameters_and_other_dimensions() {
     let (v, _) = h2.app.eval_dimension_text(a, "45").unwrap();
     assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
 }
+
+#[test]
+fn dragging_in_empty_space_draws_a_selection_box_window_and_crossing() {
+    let mut h = Harness::new(SketcherApp::default());
+    h.key(Key::R, Modifiers::NONE);
+    h.click((0.0, 0.0));
+    h.click((10.0, 6.0));
+    h.key(Key::Escape, Modifiers::NONE);
+    assert_eq!(h.app.editor.tool, Tool::Select);
+    let view_before = h.app.view.scale;
+    let origin_before = h.screen((0.0, 0.0));
+    // left to right around everything: a window takes all four sides and corners
+    h.drag((-3.0, -3.0), (13.0, 9.0));
+    let sel = &h.app.editor.selection;
+    assert_eq!(sel.len(), 8, "{}", sel.len());
+    // the view did not pan or zoom
+    assert_eq!(h.app.view.scale, view_before);
+    assert!((h.screen((0.0, 0.0)) - origin_before).length() < 1e-3);
+    // right to left over the middle of the top side: a crossing box touches just that side
+    h.drag((6.0, 8.0), (4.0, 4.5));
+    let n = h.app.editor.selection.len();
+    assert_eq!(n, 1, "{n}");
+    // a window that does not contain a whole side takes nothing
+    h.drag((4.0, 8.0), (6.0, 4.5));
+    assert!(h.app.editor.selection.is_empty());
+    // the shaded profile and the glyphs draw (no panic) with the display options off and on
+    h.frame(vec![]);
+}

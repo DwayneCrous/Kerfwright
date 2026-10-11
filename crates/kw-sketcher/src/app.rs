@@ -4,7 +4,9 @@ use kw_dxf::{export_sketch, import_sketch, parse, write, ImportOptions};
 use kw_sketch::editor::{
     ConstraintTool, Editor, EntityState, Input, Ray, Snap, SnapSettings, Tool,
 };
-use kw_sketch::{geom, ConstraintId, ConstraintKind, EntityId, EntityKind, Sketch, SketchStatus};
+use kw_sketch::{
+    geom, regions, ConstraintId, ConstraintKind, EntityId, EntityKind, Sketch, SketchStatus,
+};
 
 type P2 = (f64, f64);
 
@@ -59,6 +61,128 @@ fn state_color(s: EntityState) -> Color32 {
     }
 }
 
+/// Fill the area between `polys` (outer outline and holes, screen points) with `colour`, as horizontal
+/// slabs: between two neighbouring vertex heights every edge that spans the slab is a straight line, so
+/// the area is a stack of trapezoids (an even-odd fill, drawn as a mesh with no seams).
+fn fill_polys(painter: &egui::Painter, polys: &[Vec<Pos2>], colour: Color32) {
+    let mut ys: Vec<f32> = polys.iter().flatten().map(|p| p.y).collect();
+    ys.sort_by(f32::total_cmp);
+    ys.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    let mut mesh = egui::epaint::Mesh::default();
+    for w in ys.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        let ym = 0.5 * (y0 + y1);
+        // x of every edge crossing the slab at its top, middle and bottom
+        let mut xs: Vec<(f32, f32, f32)> = Vec::new();
+        for poly in polys {
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                if a.y == b.y || a.y.min(b.y) > ym || a.y.max(b.y) < ym {
+                    continue;
+                }
+                let at = |y: f32| a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y);
+                xs.push((at(ym), at(y0), at(y1)));
+            }
+        }
+        xs.sort_by(|p, q| p.0.total_cmp(&q.0));
+        for pair in xs.as_chunks::<2>().0 {
+            let base = mesh.vertices.len() as u32;
+            for (x, y) in [
+                (pair[0].1, y0),
+                (pair[1].1, y0),
+                (pair[1].2, y1),
+                (pair[0].2, y1),
+            ] {
+                mesh.colored_vertex(Pos2::new(x, y), colour);
+            }
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base, base + 2, base + 3);
+        }
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// The icon of a constraint, centred on `c`.
+fn constraint_glyph(painter: &egui::Painter, c: Pos2, k: &ConstraintKind, col: Color32) {
+    use ConstraintKind::*;
+    painter.rect(
+        Rect::from_center_size(c, Vec2::splat(14.0)),
+        2.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+        Stroke::new(1.0, Color32::from_gray(190)),
+        egui::StrokeKind::Inside,
+    );
+    let st = Stroke::new(1.4, col);
+    let l = |a: Vec2, b: Vec2| {
+        painter.line_segment([c + a, c + b], st);
+    };
+    let v = Vec2::new;
+    match k {
+        Horizontal(_) | HorizontalPts { .. } => l(v(-4.5, 0.0), v(4.5, 0.0)),
+        Vertical(_) | VerticalPts { .. } => l(v(0.0, -4.5), v(0.0, 4.5)),
+        Parallel { .. } => {
+            l(v(-3.5, 4.0), v(0.5, -4.0));
+            l(v(-0.5, 4.0), v(3.5, -4.0));
+        }
+        Perpendicular { .. } => {
+            l(v(-4.5, 4.0), v(4.5, 4.0));
+            l(v(0.0, 4.0), v(0.0, -4.0));
+        }
+        Collinear { .. } => {
+            l(v(-5.0, 0.0), v(5.0, 0.0));
+            for x in [-3.5, 3.5] {
+                painter.circle_filled(c + v(x, 0.0), 1.4, col);
+            }
+        }
+        Coincident { .. } => {
+            painter.circle_stroke(c, 3.5, st);
+            painter.circle_filled(c, 1.3, col);
+        }
+        PointOnCurve { .. } => {
+            l(v(-5.0, 3.0), v(5.0, 3.0));
+            painter.circle_filled(c + v(0.0, -1.0), 1.8, col);
+        }
+        Midpoint { .. } => {
+            painter.add(Shape::closed_line(
+                vec![c + v(0.0, -4.5), c + v(4.5, 3.5), c + v(-4.5, 3.5)],
+                st,
+            ));
+        }
+        Concentric { .. } => {
+            painter.circle_stroke(c, 4.5, st);
+            painter.circle_stroke(c, 2.0, st);
+        }
+        EqualLength { .. } | EqualRadius { .. } => {
+            l(v(-4.0, -1.8), v(4.0, -1.8));
+            l(v(-4.0, 1.8), v(4.0, 1.8));
+        }
+        Tangent { .. } | Joint { .. } => {
+            painter.circle_stroke(c + v(0.0, 2.0), 3.5, st);
+            l(v(-5.0, -1.5), v(5.0, -1.5));
+        }
+        Fix(_) => {
+            painter.rect_filled(
+                Rect::from_center_size(c + v(0.0, 2.0), v(7.0, 5.0)),
+                1.0,
+                col,
+            );
+            painter.circle_stroke(c + v(0.0, -1.5), 2.2, st);
+        }
+        Symmetric { .. } => {
+            painter.extend(Shape::dashed_line(
+                &[c + v(0.0, -5.0), c + v(0.0, 5.0)],
+                st,
+                2.0,
+                2.0,
+            ));
+            for x in [-3.5, 3.5] {
+                painter.circle_filled(c + v(x, 0.0), 1.5, col);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn constraint_label(k: &ConstraintKind) -> &'static str {
     use ConstraintKind::*;
     match k {
@@ -99,6 +223,11 @@ pub struct SketcherApp {
     canvas: Rect,
     first_frame: bool,
     show_grid: bool,
+    show_constraints: bool,
+    show_dimensions: bool,
+    show_profiles: bool,
+    /// A rubber-band selection in progress: where it started and where it is now (screen).
+    box_select: Option<(Pos2, Pos2)>,
     file_open: bool,
     file_path: String,
     file_msg: String,
@@ -146,6 +275,10 @@ impl Default for SketcherApp {
             canvas: Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)),
             first_frame: true,
             show_grid: true,
+            show_constraints: true,
+            show_dimensions: true,
+            show_profiles: true,
+            box_select: None,
             file_open: false,
             file_path: "sketch.dxf".into(),
             file_msg: String::new(),
@@ -363,6 +496,15 @@ impl SketcherApp {
     }
 
     pub fn inspector(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Display")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.show_grid, "Show grid");
+                ui.checkbox(&mut self.show_profiles, "Show profiles")
+                    .on_hover_text("Shade the closed regions that can be extruded");
+                ui.checkbox(&mut self.show_constraints, "Show constraints");
+                ui.checkbox(&mut self.show_dimensions, "Show dimensions");
+            });
         egui::CollapsingHeader::new("Snaps")
             .default_open(true)
             .show(ui, |ui| self.snaps_ui(ui));
@@ -475,7 +617,7 @@ impl SketcherApp {
                         }
                     }
                     if ui
-                        .small_button("✕")
+                        .small_button("x")
                         .on_hover_text("remove constraint")
                         .clicked()
                     {
@@ -823,6 +965,9 @@ impl SketcherApp {
                     }
                     self.editor.begin_drag(e, w);
                     self.grabbing = self.editor.is_dragging();
+                } else {
+                    // dragging from empty space draws a selection box
+                    self.box_select = Some((pos, pos));
                 }
             }
         }
@@ -834,10 +979,25 @@ impl SketcherApp {
                 self.editor.end_drag();
                 self.grabbing = false;
             }
-        } else if select && response.dragged_by(PointerButton::Primary) {
-            // dragging empty space pans
-            let d = response.drag_delta();
-            self.view.pan(d.x, d.y);
+        } else if let Some((start, _)) = self.box_select {
+            if let Some(pos) = response.interact_pointer_pos() {
+                self.box_select = Some((start, pos));
+            }
+            if response.drag_stopped() {
+                if let Some((a, b)) = self.box_select.take() {
+                    if (b - a).length() > 3.0 {
+                        // dragged to the right: only what is inside; to the left: also what it touches
+                        let crossing = b.x < a.x;
+                        let additive = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+                        self.editor.select_in_box(
+                            self.view.to_world(rect, a),
+                            self.view.to_world(rect, b),
+                            crossing,
+                            additive,
+                        );
+                    }
+                }
+            }
         }
         if response.clicked_by(PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
@@ -944,7 +1104,6 @@ impl SketcherApp {
 
     /// The Snaps palette: what the cursor snaps to and infers.
     pub fn snaps_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.show_grid, "Show grid");
         let s = &mut self.editor.snaps;
         ui.checkbox(&mut s.grid, "Snap to grid");
         ui.checkbox(&mut s.points, "Points");
@@ -1005,6 +1164,84 @@ impl SketcherApp {
             })
     }
 
+    /// Small icons beside the geometry for the constraints that act on it (not the dimensions).
+    fn paint_constraint_glyphs(&self, painter: &egui::Painter, rect: Rect) {
+        let sk = &self.editor.sketch;
+        let (red, con) = self
+            .editor
+            .report
+            .as_ref()
+            .map(|r| (r.redundant.clone(), r.conflicting.clone()))
+            .unwrap_or_default();
+        // glyphs on the same spot are laid out side by side
+        let mut used: Vec<(Pos2, usize)> = Vec::new();
+        for (cid, c) in &sk.constraints {
+            if sk.dimension_var(cid).is_some() || !c.enabled {
+                continue;
+            }
+            let Some(at) = self.glyph_anchor(&c.kind) else {
+                continue;
+            };
+            let mut pos = self.view.to_screen(rect, at.0) + at.1;
+            let n = used
+                .iter_mut()
+                .find(|(p, _)| (*p - pos).length() < 12.0)
+                .map(|(_, n)| {
+                    *n += 1;
+                    *n
+                })
+                .unwrap_or_else(|| {
+                    used.push((pos, 0));
+                    0
+                });
+            pos.x += 15.0 * n as f32;
+            let colour = if con.contains(&cid) {
+                state_color(EntityState::Conflicting)
+            } else if red.contains(&cid) {
+                state_color(EntityState::Redundant)
+            } else {
+                Color32::from_gray(90)
+            };
+            constraint_glyph(painter, pos, &c.kind, colour);
+        }
+    }
+
+    /// Where a constraint's glyph goes: a sketch point and a screen offset.
+    fn glyph_anchor(&self, k: &ConstraintKind) -> Option<(P2, Vec2)> {
+        use ConstraintKind::*;
+        let sk = &self.editor.sketch;
+        let mid = |es: &[EntityId]| -> Option<P2> {
+            let pts: Vec<P2> = es
+                .iter()
+                .flat_map(|e| {
+                    // a line or curve: its end points; a point: itself
+                    let mut v = sk.children(*e);
+                    v.push(*e);
+                    v
+                })
+                .filter_map(|e| sk.point(e).ok())
+                .collect();
+            if pts.is_empty() {
+                return None;
+            }
+            let n = pts.len() as f64;
+            Some((
+                pts.iter().map(|p| p.0).sum::<f64>() / n,
+                pts.iter().map(|p| p.1).sum::<f64>() / n,
+            ))
+        };
+        let es = k.entities();
+        match k {
+            Horizontal(_)
+            | Vertical(_)
+            | EqualLength { .. }
+            | Parallel { .. }
+            | Perpendicular { .. }
+            | Collinear { .. } => Some((mid(&es)?, Vec2::new(0.0, 14.0))),
+            _ => Some((mid(&es)?, Vec2::new(10.0, 10.0))),
+        }
+    }
+
     fn paint(&self, painter: &egui::Painter, rect: Rect, hover: Option<Pos2>) {
         let ctx_dark = painter.ctx().global_style().visuals.dark_mode;
         painter.rect_filled(
@@ -1061,8 +1298,27 @@ impl SketcherApp {
             ));
         }
         let sk = &self.editor.sketch;
-        let tol = 0.75 / v.scale;
+        let tol = 0.15 / v.scale;
         let selected: Vec<EntityId> = self.editor.selection.clone();
+        // closed regions: the profiles that can be extruded
+        if self.show_profiles {
+            let regions = regions::fill_regions(sk, tol.max(0.5 / v.scale));
+            let total: usize = regions.iter().map(|r| r.outer.len()).sum();
+            if total < 20_000 {
+                for r in &regions {
+                    let to = |poly: &Vec<P2>| -> Vec<Pos2> {
+                        poly.iter().map(|p| v.to_screen(rect, *p)).collect()
+                    };
+                    let mut polys = vec![to(&r.outer)];
+                    polys.extend(r.holes.iter().map(to));
+                    fill_polys(
+                        &painter,
+                        &polys,
+                        Color32::from_rgba_unmultiplied(100, 160, 255, 50),
+                    );
+                }
+            }
+        }
         // curves first, points on top
         for (id, ent) in &sk.entities {
             if matches!(ent.kind, EntityKind::Point(_)) {
@@ -1072,6 +1328,10 @@ impl SketcherApp {
                 continue;
             };
             let mut color = state_color(self.editor.entity_state(id));
+            // geometry projected from the model is purple (unless something is wrong with it)
+            if ent.projected && matches!(self.editor.entity_state(id), EntityState::Constrained) {
+                color = Color32::from_rgb(150, 70, 190);
+            }
             let mut width = 2.0;
             if selected.contains(&id) {
                 color = Color32::from_rgb(255, 150, 30);
@@ -1118,6 +1378,9 @@ impl SketcherApp {
 
         // dimension labels: blue for the ones that drive the sketch, grey in brackets for reference ones
         for (cid, c) in &sk.constraints {
+            if !self.show_dimensions {
+                break;
+            }
             let Some(val) = sk.dimension_value(cid) else {
                 continue;
             };
@@ -1166,6 +1429,43 @@ impl SketcherApp {
                 colour,
             );
         }
+        if self.show_constraints {
+            self.paint_constraint_glyphs(&painter, rect);
+        }
+        // the selection box
+        if let Some((a, b)) = self.box_select {
+            let r = Rect::from_two_pos(a, b);
+            let crossing = b.x < a.x;
+            let (fill, edge) = if crossing {
+                (
+                    Color32::from_rgba_unmultiplied(80, 190, 110, 40),
+                    Color32::from_rgb(60, 160, 90),
+                )
+            } else {
+                (
+                    Color32::from_rgba_unmultiplied(80, 150, 255, 40),
+                    Color32::from_rgb(60, 120, 230),
+                )
+            };
+            painter.rect_filled(r, 0.0, fill);
+            if crossing {
+                painter.extend(Shape::dashed_line(
+                    &[
+                        r.left_top(),
+                        r.right_top(),
+                        r.right_bottom(),
+                        r.left_bottom(),
+                        r.left_top(),
+                    ],
+                    Stroke::new(1.0, edge),
+                    5.0,
+                    3.0,
+                ));
+            } else {
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+            }
+        }
+
         // rubber band, inference lines and the snap marker
         let hover = self.demo_cursor.map(|w| v.to_screen(rect, w)).or(hover);
         if self.editor.tool != Tool::Select {

@@ -18,6 +18,7 @@ pub mod entity;
 pub mod geom;
 pub mod graph;
 pub mod ops;
+pub mod regions;
 pub mod residual;
 pub mod sketch;
 pub mod solve;

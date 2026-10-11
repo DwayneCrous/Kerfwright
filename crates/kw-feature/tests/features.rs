@@ -613,14 +613,17 @@ fn a_sketch_with_reused_slots_records_and_rebuilds() {
     old.entities = vec![
         EntityRec {
             construction: false,
+            projected: false,
             kind: EntityKindRec::Line { p1: 1, p2: 2 },
         },
         EntityRec {
             construction: false,
+            projected: false,
             kind: EntityKindRec::Point { x: 0, y: 1 },
         },
         EntityRec {
             construction: false,
+            projected: false,
             kind: EntityKindRec::Point { x: 2, y: 3 },
         },
     ];
@@ -1084,4 +1087,23 @@ fn scaling_a_body_scales_every_kind_of_face() {
             }
         }
     }
+}
+
+#[test]
+fn the_projected_mark_of_sketch_geometry_survives_the_recipe() {
+    let mut sk = kw_sketch::Sketch::new();
+    let l = sk.add_line_xy(0.0, 0.0, 5.0, 0.0);
+    sk.entities[l].projected = true;
+    let recipe = kw_feature::SketchRecipe::from_sketch(&sk);
+    let json = serde_json::to_string(&recipe).unwrap();
+    let back: kw_feature::SketchRecipe = serde_json::from_str(&json).unwrap();
+    let (sk2, ids) = back.to_sketch().unwrap();
+    assert!(sk2.entities[ids[0]].projected || sk2.entities.values().any(|e| e.projected));
+    // files written before the mark existed read as not projected
+    let old = json
+        .replace(",\"projected\":true", "")
+        .replace("\"projected\":true,", "");
+    let back: kw_feature::SketchRecipe = serde_json::from_str(&old).unwrap();
+    let (sk3, _) = back.to_sketch().unwrap();
+    assert!(sk3.entities.values().all(|e| !e.projected));
 }

@@ -56,4 +56,6 @@ pub struct Entity {
     pub kind: EntityKind,
     /// Construction geometry is solved but not used for profiles.
     pub construction: bool,
+    /// Pulled in from the model (Project / Intersect): shown in purple, and locked in place.
+    pub projected: bool,
 }

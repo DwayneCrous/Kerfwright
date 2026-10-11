@@ -90,6 +90,7 @@ impl Sketch {
         self.entities.insert(Entity {
             kind: EntityKind::Point(PointVars { x: vx, y: vy }),
             construction: false,
+            projected: false,
         })
     }
 
@@ -98,6 +99,7 @@ impl Sketch {
         self.entities.insert(Entity {
             kind: EntityKind::Line { p1, p2 },
             construction: false,
+            projected: false,
         })
     }
 
@@ -112,6 +114,7 @@ impl Sketch {
         self.entities.insert(Entity {
             kind: EntityKind::Circle { center, radius: r },
             construction: false,
+            projected: false,
         })
     }
 
@@ -126,6 +129,7 @@ impl Sketch {
         self.entities.insert(Entity {
             kind: EntityKind::Arc { center, start, end },
             construction: false,
+            projected: false,
         })
     }
 
@@ -147,6 +151,7 @@ impl Sketch {
                 minor_radius: b,
             },
             construction: false,
+            projected: false,
         })
     }
 
@@ -164,6 +169,7 @@ impl Sketch {
         Ok(self.entities.insert(Entity {
             kind: EntityKind::Spline { degree, control },
             construction: false,
+            projected: false,
         }))
     }
 
@@ -172,6 +178,7 @@ impl Sketch {
         self.entities.insert(Entity {
             kind: EntityKind::FitSpline { points },
             construction: false,
+            projected: false,
         })
     }
 

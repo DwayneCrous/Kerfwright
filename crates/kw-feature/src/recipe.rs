@@ -64,6 +64,8 @@ pub enum EntityKindRec {
 pub struct EntityRec {
     pub kind: EntityKindRec,
     pub construction: bool,
+    #[serde(default)]
+    pub projected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,6 +193,7 @@ impl SketchRecipe {
             .map(|id| &sk.entities[*id])
             .map(|e| EntityRec {
                 construction: e.construction,
+                projected: e.projected,
                 kind: match &e.kind {
                     EntityKind::Point(p) => EntityKindRec::Point {
                         x: p.x.0 as u32,
@@ -422,6 +425,7 @@ impl SketchRecipe {
             made[i] = Some(sk.entities.insert(Entity {
                 kind,
                 construction: e.construction,
+                projected: e.projected,
             }));
         }
         let ids: Vec<EntityId> = made
