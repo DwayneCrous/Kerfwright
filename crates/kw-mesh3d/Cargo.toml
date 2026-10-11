@@ -1,0 +1,21 @@
+[package]
+name = "kw-mesh3d"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+rayon.workspace = true
+robust.workspace = true
+kw-math.workspace = true
+kw-brep.workspace = true
+kw-tess.workspace = true
+kw-job.workspace = true
+rstar.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+kw-boolean.workspace = true

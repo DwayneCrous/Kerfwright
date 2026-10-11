@@ -1,0 +1,34 @@
+# Heidenhain TNC conversational (Klartext)
+name = Heidenhain
+decimals = 3
+rot_decimals = 4
+trim = none
+plus = true
+line_numbers = "{n} "
+line_start = 0
+line_step = 1
+comment = ;{text}
+modal = true
+helical_arcs = false
+cw_text = -
+ccw_text = +
+program_start = BEGIN PGM {name} MM\nBLK FORM 0.1 Z X+0 Y+0 Z-50\nBLK FORM 0.2 X+200 Y+200 Z+0
+program_end = M5\nEND PGM {name} MM
+tool_change = TOOL CALL {tool} Z S1000
+spindle_on_cw = M3
+spindle_on_ccw = M4
+spindle_off = M5
+coolant_on = M8
+coolant_off = M9
+rapid = L {X} {Y} {Z} R0 FMAX
+feed = L {X} {Y} {Z} R0 {F}
+arc_cw = CC {CX} {CY}\nC {X} {Y} DR{dir} R0 {F}
+arc_ccw = CC {CX} {CY}\nC {X} {Y} DR{dir} R0 {F}
+drill_start = CYCL DEF 200 DRILLING Q200={sdis} Q201={depth} Q206=150 Q202=5 Q210=0 Q203={rfp} Q204=50 Q211=0
+drill_peck_start = CYCL DEF 200 DRILLING Q200={sdis} Q201={depth} Q206=150 Q202={q} Q210=0 Q203={rfp} Q204=50 Q211=0
+drill_at = L {X} {Y} R0 FMAX M99
+drill_end =
+rapid5 = L {X} {Y} {Z} {A} {B} {C} R0 FMAX
+feed5 = L {X} {Y} {Z} {A} {B} {C} R0 {F}
+tcp_on = FUNCTION TCPM F TCP AXIS POS PATHCTRL AXIS
+tcp_off = FUNCTION RESET TCPM

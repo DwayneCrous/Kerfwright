@@ -1,0 +1,30 @@
+# Siemens SINUMERIK 840D (standard cycles, MCALL)
+name = Siemens840D
+decimals = 3
+rot_decimals = 4
+trim = zeros
+line_numbers = "N{n} "
+line_start = 10
+line_step = 10
+comment = ;{text}
+modal = true
+program_start = @%_N_{name}_MPF\n@;$PATH=/_N_MPF_DIR\nG71 G90 G94 G17 G40 G500
+program_end = M05\nM30
+tool_change = T={tool}\nM6\nD1
+spindle_on_cw = S{rpm} M3
+spindle_on_ccw = S{rpm} M4
+spindle_off = M5
+coolant_on = M8
+coolant_off = M9
+rapid = G0 {X} {Y} {Z}
+feed = G1 {X} {Y} {Z} {F}
+arc_cw = G2 {X} {Y} {Z} {I} {J} {F}
+arc_ccw = G3 {X} {Y} {Z} {I} {J} {F}
+drill_start = F{f}\nMCALL CYCLE81({rtp},{rfp},{sdis},{dp},0)
+drill_peck_start = F{f}\nMCALL CYCLE81({rtp},{rfp},{sdis},{dp},0)
+drill_at = G0 {X} {Y}
+drill_end = MCALL
+rapid5 = G0 {X} {Y} {Z} {A} {B} {C}
+feed5 = G1 {X} {Y} {Z} {A} {B} {C} {F}
+tcp_on = TRAORI
+tcp_off = TRAFOOF

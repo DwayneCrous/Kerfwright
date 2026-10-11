@@ -1,0 +1,16 @@
+[package]
+name = "kw-store"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+serde.workspace = true
+ciborium.workspace = true
+kw-feature.workspace = true
+kw-cam.workspace = true
+kw-fem.workspace = true
+kw-ecad.workspace = true

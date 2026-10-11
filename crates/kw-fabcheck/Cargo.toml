@@ -1,0 +1,11 @@
+[package]
+name = "kw-fabcheck"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+i_overlay.workspace = true

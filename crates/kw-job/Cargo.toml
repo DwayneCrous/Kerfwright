@@ -1,0 +1,11 @@
+[package]
+name = "kw-job"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+rayon.workspace = true

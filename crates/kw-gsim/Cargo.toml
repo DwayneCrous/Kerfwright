@@ -1,0 +1,10 @@
+[package]
+name = "kw-gsim"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]

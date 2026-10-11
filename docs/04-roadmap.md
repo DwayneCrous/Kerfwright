@@ -77,6 +77,8 @@ Assumptions: a team of ~8–12 senior engineers (2 kernel, 1 solver/numerics, 1 
 - ECAD: A\* router completes ≥ 98 % of nets on the 20-board benchmark with 0 DRC violations; Gerber output validates in two independent viewers; IDF/STEP board opens in the MCAD workspace with correct component placement.
 - Rendering: 60 FPS at 1 M triangles with OIT+GTAO+edges on reference GPU; path-tracer converges to ≤ 1 % mean-squared error vs. a reference image after N spp with denoiser PSNR ≥ 30 dB.
 
+**Status:** implemented; results, the definitions of the suites / simulators / viewers / reference GPU that this list leaves open, and the qualifications are in [`phase5-report.md`](phase5-report.md). `kw-voronoi` was cut (adaptive clearing does not use a medial axis).
+
 ## Phase 6 — Cloud real-time collaboration & hardening (months 38–46)
 **Build:** `kw-collab` (CRDT for feature recipes: ordered list w/ stable IDs, LWW parameters, move ops), sync server on Tokio (WebSocket/QUIC, auth, presence), versioning/branching/merge of documents, server-side headless evaluation workers (cached by `input_hash`), WASM/WebGPU viewer + light editor, background CAM/FEA job queue, telemetry (opt-in), crash recovery, signed installers, accessibility pass, security review.
 

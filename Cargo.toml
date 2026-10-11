@@ -22,6 +22,15 @@ members = [
     "crates/kw-subd",
     "crates/kw-assembly",
     "crates/kw-script",
+    "crates/kw-job",
+    "crates/kw-mesh3d",
+    "crates/kw-fem",
+    "crates/kw-gsim",
+    "crates/kw-cam",
+    "crates/kw-ecad",
+    "crates/kw-fabcheck",
+    "crates/kw-render",
+    "crates/kw-store",
     "crates/kw-app",
 ]
 
@@ -47,6 +56,10 @@ ciborium = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rhai = { version = "1", default-features = false, features = ["std", "no_closure"] }
 bytemuck = { version = "1", features = ["derive"] }
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
+rstar = "0.12"
+cavalier_contours = "0.4"
+i_overlay = "4"
 kw-math = { path = "crates/kw-math" }
 kw-nurbs = { path = "crates/kw-nurbs" }
 kw-brep = { path = "crates/kw-brep" }
@@ -66,6 +79,15 @@ kw-sheet = { path = "crates/kw-sheet" }
 kw-subd = { path = "crates/kw-subd" }
 kw-assembly = { path = "crates/kw-assembly" }
 kw-script = { path = "crates/kw-script" }
+kw-job = { path = "crates/kw-job" }
+kw-mesh3d = { path = "crates/kw-mesh3d" }
+kw-fem = { path = "crates/kw-fem" }
+kw-gsim = { path = "crates/kw-gsim" }
+kw-cam = { path = "crates/kw-cam" }
+kw-ecad = { path = "crates/kw-ecad" }
+kw-fabcheck = { path = "crates/kw-fabcheck" }
+kw-render = { path = "crates/kw-render" }
+kw-store = { path = "crates/kw-store" }
 
 [profile.release]
 debug = 1
