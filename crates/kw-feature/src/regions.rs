@@ -1,18 +1,13 @@
-//! Regions of a sketch: the pieces the closed loops cut the plane into.
+//! Regions of a sketch: the faces of its planar arrangement (see `kw_sketch::arrangement`).
 //!
-//! Every closed loop of a sketch is a loop of its own, whether it lies inside another one (a hole) or crosses
-//! it. A *region* is named by the set of loops it lies inside: for a circle that overlaps a rectangle the
-//! regions are {rectangle}, {circle} and {rectangle, circle}. Polygons (the loops sampled finely) decide which
-//! regions exist and let the view draw and pick them; the solids themselves are made exactly by the kernel
-//! (see `tools.rs`).
+//! Where curves cross, they are cut; every enclosed area is a region of its own, whether it lies inside another
+//! shape (a hole), crosses one, or is cut off by a line. A region is named by the labels of the entities on its
+//! boundary and by a point inside it ([`RegionPick`]); the solids are made from the faces themselves.
 
-use crate::eval::EvalError;
-use crate::profile::sketch_profile_labeled;
-use i_overlay::core::fill_rule::FillRule;
-use i_overlay::core::overlay_rule::OverlayRule;
-use i_overlay::float::single::SingleFloatOverlay;
+use crate::profile::{sketch_faces, FaceSet};
+use crate::spec::RegionPick;
 use kw_math::Frame3;
-use kw_model::ProfileLoop;
+use kw_sketch::arrangement::{point_in_polygon, P2 as AP2};
 use kw_sketch::{EntityId, Sketch};
 
 pub type P2 = [f64; 2];
@@ -20,203 +15,111 @@ pub type P2 = [f64; 2];
 pub type Shape = Vec<Vec<P2>>;
 pub type Shapes = Vec<Shape>;
 
-/// A closed loop of the sketch.
-#[derive(Debug, Clone)]
-pub struct SketchLoop {
-    /// Names the loop in a region signature: the smallest label of its entities.
-    pub key: u32,
-    /// Labels of the loop's entities, in loop order.
-    pub labels: Vec<u32>,
-    pub profile: ProfileLoop,
-    /// The loop sampled, in sketch-plane coordinates.
-    pub polygon: Vec<P2>,
-}
-
 /// A region and where it is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Region {
-    pub signature: Vec<u32>,
+    /// How the region is named in a feature.
+    pub pick: RegionPick,
+    /// Labels of the entities on its boundary (sorted, distinct).
+    pub labels: Vec<u32>,
+    /// A point inside it.
+    pub interior: P2,
+    /// Its outline and holes, sampled, in sketch-plane coordinates.
     pub shapes: Shapes,
     pub area: f64,
+    /// How many shapes enclose it (0 = none; the default regions are the even ones).
+    pub depth: usize,
+    /// The face of the arrangement.
+    pub face: usize,
 }
 
-fn sample(l: &ProfileLoop, plane: &Frame3) -> Vec<P2> {
-    use kw_nurbs::Curve3;
-    let to2 = |p: kw_math::Point3<f64>| {
-        let d = p - plane.origin;
-        [d.dot(&plane.x), d.dot(&plane.y)]
-    };
-    let mut out: Vec<P2> = Vec::new();
-    for e in &l.edges {
-        let (a, b) = if e.reversed {
-            (e.range.1, e.range.0)
-        } else {
-            (e.range.0, e.range.1)
-        };
-        let n = match &e.curve {
-            kw_nurbs::CurveGeom::Line(_) => 1,
-            _ => 64,
-        };
-        for k in 0..n {
-            out.push(to2(e.curve.point_at(a + (b - a) * k as f64 / n as f64)));
-        }
-    }
-    out
+/// The regions of a sketch with the arrangement they come from.
+pub struct SketchRegions {
+    pub faces: FaceSet,
+    pub regions: Vec<Region>,
 }
 
-/// The closed loops of a sketch, each on its own. `entities[i]` is the entity with label `i`.
-pub fn sketch_loops(
-    sk: &Sketch,
-    entities: &[EntityId],
-    plane: Frame3,
-) -> Result<Vec<SketchLoop>, EvalError> {
-    let lp = sketch_profile_labeled(sk, entities, plane)?;
-    let all = std::iter::once(&lp.profile.outer).chain(lp.profile.holes.iter());
-    Ok(all
-        .enumerate()
-        .map(|(i, l)| {
-            let labels = lp.labels[i].clone();
-            SketchLoop {
-                key: labels.iter().copied().min().unwrap_or(u32::MAX),
+/// Every region of the sketch. `entities[i]` is the entity with label `i`.
+pub fn sketch_regions(sk: &Sketch, entities: &[EntityId], plane: Frame3) -> SketchRegions {
+    let faces = sketch_faces(sk, entities, plane);
+    let regions = (0..faces.arr.faces.len())
+        .map(|i| {
+            let f = &faces.arr.faces[i];
+            let at = faces.arr.interior_point(f);
+            let labels = faces.face_labels(i);
+            let polys = faces.arr.face_polygons(f, 0.005);
+            let contour = |p: &Vec<AP2>| -> Vec<P2> { p.iter().map(|q| [q.0, q.1]).collect() };
+            Region {
+                pick: RegionPick::Face {
+                    labels: labels.clone(),
+                    at: [at.0, at.1],
+                },
                 labels,
-                profile: l.clone(),
-                polygon: sample(l, &plane),
+                interior: [at.0, at.1],
+                shapes: vec![polys.iter().map(contour).collect()],
+                area: f.area,
+                depth: f.depth,
+                face: i,
             }
         })
-        .collect())
-}
-
-fn contour_area(c: &[P2]) -> f64 {
-    let n = c.len();
-    0.5 * (0..n)
-        .map(|i| c[i][0] * c[(i + 1) % n][1] - c[(i + 1) % n][0] * c[i][1])
-        .sum::<f64>()
-}
-
-pub fn shapes_area(s: &Shapes) -> f64 {
-    s.iter()
-        .map(|sh| {
-            sh.iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let a = contour_area(c).abs();
-                    if i == 0 {
-                        a
-                    } else {
-                        -a
-                    }
-                })
-                .sum::<f64>()
-        })
-        .sum()
-}
-
-fn as_shapes(poly: &[P2]) -> Shapes {
-    vec![vec![poly.to_vec()]]
-}
-
-fn overlay(a: &Shapes, b: &Shapes, rule: OverlayRule) -> Shapes {
-    if a.is_empty() {
-        return Vec::new();
-    }
-    a.overlay(b, rule, FillRule::NonZero)
-}
-
-/// The region lying inside exactly the loops whose keys are in `signature`: `None` when there is no such
-/// region. The loops inside it come first in the second result, then the loops it must be cut away from
-/// because they overlap it.
-pub fn region_of(
-    loops: &[SketchLoop],
-    signature: &[u32],
-) -> Option<(Region, Vec<usize>, Vec<usize>)> {
-    let members: Vec<usize> = (0..loops.len())
-        .filter(|i| signature.contains(&loops[*i].key))
         .collect();
-    if members.is_empty() || members.len() != signature.len() {
-        return None;
-    }
-    let mut cur = as_shapes(&loops[members[0]].polygon);
-    for m in &members[1..] {
-        cur = overlay(&cur, &as_shapes(&loops[*m].polygon), OverlayRule::Intersect);
-    }
-    // overlap tolerance relative to the loop sizes
-    let scale: f64 = loops
-        .iter()
-        .map(|l| contour_area(&l.polygon).abs())
-        .fold(0.0, f64::max);
-    let eps = 1e-9 * scale.max(1.0);
-    let mut cut = Vec::new();
-    for j in 0..loops.len() {
-        if members.contains(&j) {
-            continue;
-        }
-        let p = as_shapes(&loops[j].polygon);
-        let common = overlay(&cur, &p, OverlayRule::Intersect);
-        if shapes_area(&common) > eps {
-            cur = overlay(&cur, &p, OverlayRule::Difference);
-            cut.push(j);
-        }
-    }
-    let area = shapes_area(&cur);
-    if area <= eps {
-        return None;
-    }
-    let mut sig: Vec<u32> = signature.to_vec();
-    sig.sort_unstable();
-    Some((
-        Region {
-            signature: sig,
-            shapes: cur,
-            area,
-        },
-        members,
-        cut,
-    ))
+    SketchRegions { faces, regions }
 }
 
-/// Every region of the sketch (up to ten loops; more is too many to list).
-pub fn regions(loops: &[SketchLoop]) -> Vec<Region> {
-    let n = loops.len();
-    if n == 0 || n > 10 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for mask in 1u32..(1 << n) {
-        let sig: Vec<u32> = (0..n)
-            .filter(|i| mask >> i & 1 == 1)
-            .map(|i| loops[i].key)
-            .collect();
-        if let Some((r, ..)) = region_of(loops, &sig) {
-            out.push(r);
-        }
-    }
-    out
+/// Is `p` inside the region (inside its outline and outside its holes)?
+pub fn region_contains(r: &Region, p: P2) -> bool {
+    r.shapes.iter().any(|shape| {
+        let to = |c: &Vec<P2>| -> Vec<AP2> { c.iter().map(|q| (q[0], q[1])).collect() };
+        let q = (p[0], p[1]);
+        shape.first().is_some_and(|o| point_in_polygon(&to(o), q))
+            && !shape.iter().skip(1).any(|h| point_in_polygon(&to(h), q))
+    })
 }
 
-/// Is `p` inside the polygon?
-pub fn inside(poly: &[P2], p: P2) -> bool {
-    let mut c = false;
-    let n = poly.len();
-    let mut j = n - 1;
-    for i in 0..n {
-        let (a, b) = (poly[i], poly[j]);
-        if (a[1] > p[1]) != (b[1] > p[1])
-            && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]
-        {
-            c = !c;
-        }
-        j = i;
+impl SketchRegions {
+    /// The innermost region containing `p`.
+    pub fn region_at(&self, p: P2) -> Option<usize> {
+        (0..self.regions.len())
+            .filter(|i| region_contains(&self.regions[*i], p))
+            .min_by(|a, b| self.regions[*a].area.total_cmp(&self.regions[*b].area))
     }
-    c
-}
 
-/// The signature of the region containing `p`: the keys of the loops it lies inside (empty = outside all).
-pub fn signature_at(loops: &[SketchLoop], p: P2) -> Vec<u32> {
-    let mut s: Vec<u32> = loops
-        .iter()
-        .filter(|l| inside(&l.polygon, p))
-        .map(|l| l.key)
-        .collect();
-    s.sort_unstable();
-    s
+    /// The indices of the regions that are extruded when none is chosen.
+    pub fn default_regions(&self) -> Vec<usize> {
+        (0..self.regions.len())
+            .filter(|i| self.regions[*i].depth.is_multiple_of(2))
+            .collect()
+    }
+
+    /// The region a pick names, if it still exists.
+    pub fn resolve(&self, pick: &RegionPick, sk: &Sketch, entities: &[EntityId]) -> Option<usize> {
+        match pick {
+            RegionPick::Face { labels, at } => {
+                let same: Vec<usize> = (0..self.regions.len())
+                    .filter(|i| self.regions[*i].labels == *labels)
+                    .collect();
+                match same.len() {
+                    0 => None,
+                    1 => Some(same[0]),
+                    _ => same
+                        .iter()
+                        .copied()
+                        .find(|i| region_contains(&self.regions[*i], *at))
+                        .or_else(|| {
+                            same.iter().copied().min_by(|a, b| {
+                                let d = |i: &usize| {
+                                    let p = self.regions[*i].interior;
+                                    (p[0] - at[0]).hypot(p[1] - at[1])
+                                };
+                                d(a).total_cmp(&d(b))
+                            })
+                        }),
+                }
+            }
+            RegionPick::Legacy(sig) => {
+                let p = crate::legacy_regions::legacy_point(sk, entities, self.faces.plane, sig)?;
+                self.region_at(p)
+            }
+        }
+    }
 }

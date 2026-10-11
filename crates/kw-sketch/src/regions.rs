@@ -14,19 +14,6 @@ pub struct FillRegion {
     pub holes: Vec<Vec<P2>>,
 }
 
-fn inside(poly: &[P2], p: P2) -> bool {
-    let mut inside = false;
-    let mut j = poly.len() - 1;
-    for i in 0..poly.len() {
-        let (a, b) = (poly[i], poly[j]);
-        if (a.1 > p.1) != (b.1 > p.1) && p.0 < (b.0 - a.0) * (p.1 - a.1) / (b.1 - a.1) + a.0 {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
 /// The closed outlines of the sketch (construction geometry and open curves are left out). `tol` is how
 /// finely curves are approximated.
 pub fn closed_loops(sk: &Sketch, tol: f64) -> Vec<Vec<P2>> {
@@ -59,31 +46,20 @@ pub fn closed_loops(sk: &Sketch, tol: f64) -> Vec<Vec<P2>> {
     loops
 }
 
-/// The shaded areas: every closed loop that is not inside an odd number of others, with the loops
-/// directly inside it as holes. Loops that overlap without containing one another are both shaded.
+/// The shaded areas: every region (face of the planar arrangement) of the sketch. Curves that cross cut each
+/// other, so overlapping shapes and lines across a shape give several regions; a shape inside another is a hole
+/// of it and a region of its own.
 pub fn fill_regions(sk: &Sketch, tol: f64) -> Vec<FillRegion> {
-    let loops = closed_loops(sk, tol);
-    let n = loops.len();
-    // loop i is inside loop j when a vertex of i is
-    let within = |i: usize, j: usize| {
-        i != j && inside(&loops[j], loops[i][0]) && inside(&loops[j], loops[i][loops[i].len() / 2])
-    };
-    let depth: Vec<usize> = (0..n)
-        .map(|i| (0..n).filter(|j| within(i, *j)).count())
-        .collect();
-    let mut out = Vec::new();
-    for i in 0..n {
-        if depth[i] % 2 == 1 {
-            continue;
-        }
-        let holes = (0..n)
-            .filter(|j| depth[*j] == depth[i] + 1 && within(*j, i))
-            .map(|j| loops[j].clone())
-            .collect();
-        out.push(FillRegion {
-            outer: loops[i].clone(),
-            holes,
-        });
-    }
-    out
+    let arr = crate::arrangement::Arrangement::build(sk);
+    arr.faces
+        .iter()
+        .map(|f| {
+            let mut polys = arr.face_polygons(f, tol);
+            let outer = polys.remove(0);
+            FillRegion {
+                outer,
+                holes: polys,
+            }
+        })
+        .collect()
 }

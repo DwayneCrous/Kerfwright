@@ -7,7 +7,7 @@ use crate::id::FeatureId;
 use crate::namer::Namer;
 use crate::naming::{NameOrigin, TopoName};
 use crate::profile::sketch_profile_labeled;
-use crate::spec::ThinSide;
+use crate::spec::{RegionPick, ThinSide};
 use kw_boolean::{boolean, BoolOptions, Op};
 use kw_brep::{make_cone, BRep, BodyId, EntityRef, FaceId, ShapeHistory};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
@@ -28,7 +28,7 @@ pub enum ToolShape {
         /// Taper angle (radians); positive narrows the profile along `vector`. Zero = straight.
         taper: f64,
         /// Regions to extrude (see `regions.rs`); empty = all loops.
-        regions: Vec<Vec<u32>>,
+        regions: Vec<RegionPick>,
         /// A wall of this thickness along the profile instead of a solid.
         thin: Option<(f64, ThinSide)>,
     },
@@ -399,29 +399,67 @@ fn extrude_steps(
     vector: Vector3<f64>,
     symmetric: bool,
     taper: f64,
-    regions: &[Vec<u32>],
+    regions: &[RegionPick],
     thin: Option<(f64, ThinSide)>,
     steps: &mut Vec<(kw_brep::BuildResult, Vec<Vec<u32>>)>,
 ) -> Result<(), EvalError> {
     let kernel = |what: &str, e: &dyn std::fmt::Display| EvalError::Kernel(format!("{what}: {e}"));
     let opts = ExtrudeOptions { symmetric };
     let pull = vector.normalize();
-    if regions.is_empty() {
-        let lp = sketch_profile_labeled(&sketch.sketch, &sketch.entities, plane)?;
+    if taper != 0.0 {
+        if symmetric {
+            return Err(EvalError::Kernel(
+                "a taper cannot be combined with a symmetric extent".into(),
+            ));
+        }
+        if thin.is_some() {
+            return Err(EvalError::Kernel(
+                "a taper cannot be combined with a thin wall".into(),
+            ));
+        }
+    }
+    // the faces of the sketch to extrude: the chosen regions, or by default everything enclosed
+    let sr = crate::regions::sketch_regions(&sketch.sketch, &sketch.entities, plane);
+    let chosen: Vec<usize> = if regions.is_empty() {
+        sr.default_regions()
+    } else {
+        let mut v = Vec::new();
+        for pick in regions {
+            let r = sr
+                .resolve(pick, &sketch.sketch, &sketch.entities)
+                .ok_or_else(|| {
+                    EvalError::Kernel(
+                    "a chosen region no longer exists: the sketch changed, choose the regions again"
+                        .into(),
+                )
+                })?;
+            if !v.contains(&r) {
+                v.push(r);
+            }
+        }
+        v
+    };
+    if chosen.is_empty() {
+        return Err(EvalError::Sketch("the sketch has no closed profile".into()));
+    }
+    // neighbouring faces become one profile (the wall between them is not a wall); separate pieces are
+    // extruded one by one and united
+    let faces: Vec<usize> = chosen.iter().map(|r| sr.regions[*r].face).collect();
+    let merged = sr.faces.arr.merge_faces(&faces);
+    if merged.is_empty() {
+        return Err(EvalError::Sketch(
+            "the chosen regions have no outline".into(),
+        ));
+    }
+    let bo = BoolOptions::default();
+    let mut total: Option<BodyId> = None;
+    for m in &merged {
+        let lp = sr.faces.profile_of(&m.outer, &m.holes);
         let straight =
             extrude(rep, &lp.profile, vector, &opts).map_err(|e| kernel("extrude", &e))?;
         steps.push((straight.clone(), lp.labels));
+        let mut body = straight.body;
         if taper != 0.0 {
-            if symmetric {
-                return Err(EvalError::Kernel(
-                    "a taper cannot be combined with a symmetric extent".into(),
-                ));
-            }
-            if thin.is_some() {
-                return Err(EvalError::Kernel(
-                    "a taper cannot be combined with a thin wall".into(),
-                ));
-            }
             // every side face leans; the two caps (perpendicular to the extrusion) stay put
             let sides: Vec<FaceId> = rep
                 .body_faces(straight.body)
@@ -435,95 +473,13 @@ fn extrude_steps(
                         &e,
                     )
                 })?;
+            body = drafted.body;
             steps.push((drafted, Vec::new()));
         }
-    } else {
-        if taper != 0.0 {
-            return Err(EvalError::Kernel(
-                "a taper cannot be combined with chosen regions".into(),
-            ));
-        }
-        regions_steps(rep, sketch, plane, vector, &opts, regions, steps)?;
-    }
-    if let Some((t, side)) = thin {
-        thin_steps(rep, plane, vector, &opts, t, side, steps)?;
-    }
-    Ok(())
-}
-
-/// The chosen regions of the sketch as solids: each region is the intersection of the extrusions of the
-/// loops it lies inside, minus those of the loops that cut into it; the regions are then united.
-fn regions_steps(
-    rep: &mut BRep,
-    sketch: &SketchProduct,
-    plane: Frame3,
-    vector: Vector3<f64>,
-    opts: &ExtrudeOptions,
-    wanted: &[Vec<u32>],
-    steps: &mut Vec<(kw_brep::BuildResult, Vec<Vec<u32>>)>,
-) -> Result<(), EvalError> {
-    use crate::regions::{region_of, sketch_loops};
-    let kernel = |what: &str, e: &dyn std::fmt::Display| EvalError::Kernel(format!("{what}: {e}"));
-    let loops = sketch_loops(&sketch.sketch, &sketch.entities, plane)?;
-    // one prism per loop that any wanted region uses
-    let mut needed: Vec<usize> = Vec::new();
-    let mut plan: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
-    for sig in wanted {
-        let (_, members, cut) = region_of(&loops, sig).ok_or_else(|| {
-            EvalError::Kernel(
-                "a chosen region no longer exists: the sketch changed, choose the regions again"
-                    .into(),
-            )
-        })?;
-        for i in members.iter().chain(cut.iter()) {
-            if !needed.contains(i) {
-                needed.push(*i);
-            }
-        }
-        plan.push((members, cut));
-    }
-    let mut prism: HashMap<usize, BodyId> = HashMap::new();
-    for i in &needed {
-        let l = as_outer(&loops[*i].profile, &plane);
-        let r = extrude(rep, &Profile::new(plane, l), vector, opts)
-            .map_err(|e| kernel("extrude", &e))?;
-        prism.insert(*i, r.body);
-        steps.push((r, vec![loops[*i].labels.clone()]));
-    }
-    let bo = BoolOptions::default();
-    let mut total: Option<BodyId> = None;
-    for (members, cut) in plan {
-        let mut acc = prism[&members[0]];
-        let single = members.len() == 1 && cut.is_empty();
-        for m in &members[1..] {
-            let r = boolean(rep, acc, prism[m], Op::Intersect, &bo)
-                .map_err(|e| kernel("region", &e))?;
-            acc = r.body;
-            steps.push((
-                kw_brep::BuildResult {
-                    body: r.body,
-                    history: r.history,
-                },
-                Vec::new(),
-            ));
-        }
-        for c in cut {
-            let r = boolean(rep, acc, prism[&c], Op::Subtract, &bo)
-                .map_err(|e| kernel("region", &e))?;
-            acc = r.body;
-            steps.push((
-                kw_brep::BuildResult {
-                    body: r.body,
-                    history: r.history,
-                },
-                Vec::new(),
-            ));
-        }
-        let _ = single;
         total = Some(match total {
-            None => acc,
+            None => body,
             Some(t) => {
-                let r = boolean(rep, t, acc, Op::Union, &bo).map_err(|e| kernel("regions", &e))?;
+                let r = boolean(rep, t, body, Op::Union, &bo).map_err(|e| kernel("regions", &e))?;
                 steps.push((
                     kw_brep::BuildResult {
                         body: r.body,
@@ -535,17 +491,8 @@ fn regions_steps(
             }
         });
     }
-    // the last step must be the tool: if no Boolean ran (one loop on its own), it is that loop's prism
-    if let Some(t) = total {
-        let last_is_total = steps.last().is_some_and(|(r, _)| r.body == t);
-        if !last_is_total {
-            let i = steps
-                .iter()
-                .position(|(r, _)| r.body == t)
-                .ok_or_else(|| EvalError::Kernel("region bookkeeping failed".into()))?;
-            let step = steps.remove(i);
-            steps.push(step);
-        }
+    if let Some((t, side)) = thin {
+        thin_steps(rep, plane, vector, &opts, t, side, steps)?;
     }
     Ok(())
 }

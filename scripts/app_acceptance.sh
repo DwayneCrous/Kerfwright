@@ -48,6 +48,8 @@ shot design_sheet_metal --design-demo sheet
 shot design_form --design-demo form
 shot design_tools_tab --design-demo tools
 shot design_sketch_text --design-demo text
+shot design_chord_sketch --design-demo chord-sketch
+shot design_chord_extrude --design-demo chord
 shot design_sketch_project --design-demo project
 shot cam --cam-demo
 shot fea --fea-demo

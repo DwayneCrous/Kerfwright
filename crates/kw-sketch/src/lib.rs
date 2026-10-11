@@ -11,6 +11,7 @@
 
 pub mod ad;
 pub mod analysis;
+pub mod arrangement;
 pub mod constraint;
 pub mod curves;
 pub mod editor;

@@ -3021,7 +3021,24 @@ fn regions_of_overlapping_shapes_are_chosen_in_the_view_and_extruded() {
     act(&mut h, Action::FinishSketch);
     h.frame();
     let rv = h.app.design.region_view.as_ref().expect("regions");
-    assert_eq!(rv.regions.len(), 3);
+    assert_eq!(rv.regions().len(), 3);
+    // the dialog starts with the default regions chosen (all three); start from none
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { more, .. } = &mut d.tool else {
+            panic!()
+        };
+        assert_eq!(more.regions.len(), 3, "the usual regions are pre-chosen");
+        more.regions.clear();
+    }
+    h.frame();
+    // OK is refused with nothing chosen
+    assert!(h
+        .app
+        .design
+        .preview
+        .as_ref()
+        .is_some_and(|p| p.error.is_some()));
     // the circle-only piece (x > 15) is where I click: world (17, 5, 0)
     let o = h.app.design.viewport.origin_in_scene();
     let pos = h
@@ -3077,7 +3094,16 @@ fn regions_of_overlapping_shapes_are_chosen_in_the_view_and_extruded() {
         Action::Open(Tool::extrude(Some(sk_id), kw_feature::BodyOp::New)),
     );
     h.frame();
-    // the overlap of the square and the circle (x < 15): where I click now
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { more, .. } = &mut d.tool else {
+            panic!()
+        };
+        more.regions.clear();
+    }
+    h.frame();
+    // the overlap of the square and the circle (x < 15): where I click now (the scene has moved)
+    let o = h.app.design.viewport.origin_in_scene();
     let pos = h
         .app
         .design
@@ -4384,5 +4410,71 @@ fn a_dimension_formula_follows_the_documents_parameters() {
     assert_eq!(
         ed.sketch.exprs.values().next().map(String::as_str),
         Some("Width / 2")
+    );
+}
+
+#[test]
+fn a_line_across_a_circle_gives_two_regions_and_the_chosen_one_extrudes() {
+    let (mut h, _d) = design_harness("chord_regions");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    let mut sk = kw_sketch::Sketch::new();
+    sk.add_circle_xy(10.0, 5.0, 5.0);
+    sk.add_line_xy(3.0, 7.0, 17.0, 7.0); // a chord 2 mm above the centre, longer than the circle
+    h.app.design.sketch.app.editor.replace_sketch(sk);
+    act(&mut h, Action::FinishSketch);
+    h.frame();
+    let rv = h.app.design.region_view.as_ref().expect("regions");
+    assert_eq!(rv.regions().len(), 2, "the chord cuts the circle in two");
+    // both are chosen to begin with; the dialog needs a choice, so start from none
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { more, .. } = &mut d.tool else {
+            panic!()
+        };
+        assert_eq!(more.regions.len(), 2);
+        more.regions.clear();
+    }
+    h.frame();
+    assert!(h
+        .app
+        .design
+        .preview
+        .as_ref()
+        .is_some_and(|p| p.error.is_some()));
+    // the small cap above the chord, at world (10, 9)
+    let o = h.app.design.viewport.origin_in_scene();
+    let pos = h
+        .app
+        .design
+        .viewport
+        .project([10.0 + o.x, 9.0 + o.y, o.z])
+        .expect("on screen");
+    click_at(&mut h, pos);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude {
+            more, depth, op, ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        assert_eq!(more.regions.len(), 1, "the cap is chosen");
+        *depth = "3 mm".into();
+        *op = kw_feature::BodyOp::New;
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let cap = 25.0 * (2.0f64 / 5.0).acos() - 2.0 * 21.0f64.sqrt();
+    assert!(
+        (vol(&mut h) - cap * 3.0).abs() < 1e-4,
+        "{} vs {}",
+        vol(&mut h),
+        cap * 3.0
     );
 }

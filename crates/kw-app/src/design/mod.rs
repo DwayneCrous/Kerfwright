@@ -46,8 +46,42 @@ pub struct RegionView {
     /// Identifies the sketch geometry the regions were computed for.
     pub key: u128,
     pub plane: kw_math::Frame3,
-    pub loops: Vec<kw_feature::regions::SketchLoop>,
-    pub regions: Vec<kw_feature::regions::Region>,
+    /// The regions of the sketch (faces of its planar arrangement).
+    pub sr: kw_feature::regions::SketchRegions,
+    /// The sketch they were made from (to find regions again from saved picks).
+    pub product: Arc<kw_feature::SketchProduct>,
+}
+
+impl RegionView {
+    pub fn regions(&self) -> &[kw_feature::regions::Region] {
+        &self.sr.regions
+    }
+
+    /// The region a pick names.
+    pub fn index_of(&self, pick: &kw_feature::RegionPick) -> Option<usize> {
+        self.sr
+            .resolve(pick, &self.product.sketch, &self.product.entities)
+    }
+
+    /// The picks that choose each region (several picks can name one region).
+    pub fn matching(&self, picks: &[kw_feature::RegionPick]) -> Vec<Vec<usize>> {
+        let mut out = vec![Vec::new(); self.sr.regions.len()];
+        for (k, p) in picks.iter().enumerate() {
+            if let Some(i) = self.index_of(p) {
+                out[i].push(k);
+            }
+        }
+        out
+    }
+
+    /// The picks of the regions that are extruded by default.
+    pub fn default_picks(&self) -> Vec<kw_feature::RegionPick> {
+        self.sr
+            .default_regions()
+            .into_iter()
+            .map(|i| self.sr.regions[i].pick.clone())
+            .collect()
+    }
 }
 
 /// The live preview of the open dialog.
@@ -410,6 +444,16 @@ impl DesignWorkspace {
     /// Build the dialog's feature spec against the current document. The picks decide which body it works
     /// on (all picks must lie on one body); without picks it is the active body, else the last one.
     fn build_spec(&self, project: &mut Project, dlg: &Dialog) -> Result<FeatureSpec, String> {
+        // a sketch with several regions needs some of them chosen (the dialog starts with the usual ones)
+        if let (Some(rv), Tool::Extrude { more, sketch, .. }) = (&self.region_view, &dlg.tool) {
+            if Some(rv.sketch) == *sketch
+                && rv.regions().len() > 1
+                && !more.to_face
+                && more.regions.iter().all(|p| rv.index_of(p).is_none())
+            {
+                return Err("click the regions of the sketch to extrude".into());
+            }
+        }
         let doc = project.document();
         let ev = project.evaluation();
         let fallback;
@@ -498,28 +542,35 @@ impl DesignWorkspace {
             self.region_view = None;
             return;
         };
-        let view = kw_feature::regions::sketch_loops(&sp.sketch, &sp.entities, sp.plane)
-            .ok()
-            .map(|loops| {
-                let regions = if loops.len() >= 2 {
-                    kw_feature::regions::regions(&loops)
-                } else {
-                    Vec::new()
-                };
-                RegionView {
-                    sketch: sk,
-                    key,
-                    plane: sp.plane,
-                    loops,
-                    regions,
+        let sr = kw_feature::regions::sketch_regions(&sp.sketch, &sp.entities, sp.plane);
+        let view = RegionView {
+            sketch: sk,
+            key,
+            plane: sp.plane,
+            sr,
+            product: sp.clone(),
+        };
+        // the pick is explicit: a dialog that has chosen nothing starts with the default regions chosen
+        if view.regions().len() > 1 {
+            if let Some(Dialog {
+                tool: Tool::Extrude { more, .. },
+                ..
+            }) = self.dialog.as_mut()
+            {
+                if more.regions.is_empty() {
+                    more.regions = view.default_picks();
                 }
-            });
-        self.region_view = view;
+            }
+        }
+        self.region_view = Some(view);
     }
 
-    /// The signature of the sketch region under a screen position, if the position is over one.
-    fn region_at(&self, pos: egui::Pos2) -> Option<Vec<u32>> {
-        let rv = self.region_view.as_ref().filter(|r| r.regions.len() > 1)?;
+    /// The index of the sketch region under a screen position, if the position is over one.
+    fn region_at(&self, pos: egui::Pos2) -> Option<usize> {
+        let rv = self
+            .region_view
+            .as_ref()
+            .filter(|r| r.regions().len() > 1)?;
         let c = self.viewport.model()?.scene.center;
         let (o, d) = self.viewport.ray(pos);
         let (o, d) = (
@@ -533,12 +584,7 @@ impl DesignWorkspace {
         }
         let t = (f.origin.coords - o).dot(&f.z) / denom;
         let hit = o + d * t - f.origin.coords;
-        let p = [hit.dot(&f.x), hit.dot(&f.y)];
-        let sig = kw_feature::regions::signature_at(&rv.loops, p);
-        rv.regions
-            .iter()
-            .find(|r| r.signature == sig)
-            .map(|r| r.signature.clone())
+        rv.sr.region_at([hit.dot(&f.x), hit.dot(&f.y)])
     }
 
     /// The features a dialog adds: one, except Split Body, which adds a feature per half.
@@ -562,11 +608,15 @@ impl DesignWorkspace {
         };
         let doc = project.document();
         let key = format!(
-            "{:?}|{}|{:?}|{:?}",
+            "{:?}|{}|{:?}|{:?}|{:?}",
             dlg.tool,
             doc.content_hash(),
             self.model.picks,
-            self.hole_plane
+            self.hole_plane,
+            // the regions of the sketch decide whether an Extrude may go ahead
+            self.region_view
+                .as_ref()
+                .map(|r| (r.sketch, r.key, r.regions().len()))
         );
         if self.preview.as_ref().is_some_and(|p| p.key == key) {
             return;
@@ -926,15 +976,23 @@ impl DesignWorkspace {
                 .as_ref()
                 .and_then(|p| p.error.clone())
                 .or_else(|| (!self.model.error.is_empty()).then(|| self.model.error.clone()));
+            let matching: Vec<Vec<usize>> = match (&self.region_view, &dlg.tool) {
+                (Some(rv), Tool::Extrude { more, .. }) => rv.matching(&more.regions),
+                _ => Vec::new(),
+            };
             let infos: Vec<tools::RegionInfo> = self
                 .region_view
                 .as_ref()
+                .filter(|_| !matching.is_empty())
                 .map(|r| {
-                    r.regions
+                    r.regions()
                         .iter()
-                        .map(|g| tools::RegionInfo {
-                            signature: g.signature.clone(),
+                        .enumerate()
+                        .map(|(i, g)| tools::RegionInfo {
+                            pick: g.pick.clone(),
                             area: g.area,
+                            matching: matching[i].clone(),
+                            default: g.depth.is_multiple_of(2),
                         })
                         .collect()
                 })
@@ -1107,18 +1165,28 @@ impl DesignWorkspace {
         if more.to_face {
             return false; // clicks choose the face to stop at
         }
-        let Some(sig) = self.region_at(pos) else {
+        let Some(hit) = self.region_at(pos) else {
             return false;
+        };
+        let Some(rv) = self.region_view.as_ref() else {
+            return false;
+        };
+        let new_pick = rv.regions()[hit].pick.clone();
+        let existing = match self.dialog.as_ref().map(|d| &d.tool) {
+            Some(Tool::Extrude { more, .. }) => rv.matching(&more.regions)[hit].clone(),
+            _ => return false,
         };
         if let Some(Dialog {
             tool: Tool::Extrude { more, .. },
             ..
         }) = self.dialog.as_mut()
         {
-            if let Some(i) = more.regions.iter().position(|r| *r == sig) {
-                more.regions.remove(i);
+            if existing.is_empty() {
+                more.regions.push(new_pick);
             } else {
-                more.regions.push(sig);
+                for k in existing.into_iter().rev() {
+                    more.regions.remove(k);
+                }
             }
         }
         true

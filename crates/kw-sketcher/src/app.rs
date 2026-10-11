@@ -226,6 +226,9 @@ pub struct SketcherApp {
     show_constraints: bool,
     show_dimensions: bool,
     show_profiles: bool,
+    /// The shaded regions of the sketch (recomputed only when the sketch or the zoom changes).
+    fill: Vec<regions::FillRegion>,
+    fill_key: u64,
     /// A rubber-band selection in progress: where it started and where it is now (screen).
     box_select: Option<(Pos2, Pos2)>,
     file_open: bool,
@@ -278,6 +281,8 @@ impl Default for SketcherApp {
             show_constraints: true,
             show_dimensions: true,
             show_profiles: true,
+            fill: Vec::new(),
+            fill_key: u64::MAX,
             box_select: None,
             file_open: false,
             file_path: "sketch.dxf".into(),
@@ -1011,6 +1016,7 @@ impl SketcherApp {
             self.editor.handle(Input::Finish);
         }
 
+        self.refresh_fill();
         self.paint(&painter, rect, response.hover_pos());
         self.tool_options(ui.ctx(), rect);
     }
@@ -1125,6 +1131,31 @@ impl SketcherApp {
                 }
             });
         ui.weak("Hold Alt to ignore snaps");
+    }
+
+    /// How many regions are shaded (for tests).
+    pub fn fill_region_count(&self) -> usize {
+        self.fill.len()
+    }
+
+    /// Recompute the shaded regions when the sketch (or the zoom, which sets the curve sampling) changed.
+    fn refresh_fill(&mut self) {
+        use std::hash::{Hash, Hasher};
+        if !self.show_profiles {
+            return;
+        }
+        let sk = &self.editor.sketch;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        sk.topology_version().hash(&mut h);
+        for v in &sk.vars.values {
+            v.to_bits().hash(&mut h);
+        }
+        ((self.view.scale.log2() * 2.0).round() as i64).hash(&mut h);
+        let key = h.finish();
+        if key != self.fill_key {
+            self.fill_key = key;
+            self.fill = regions::fill_regions(sk, 0.5 / self.view.scale);
+        }
     }
 
     /// Where the label of a dimension sits (sketch coordinates): the middle of what it measures.
@@ -1302,10 +1333,10 @@ impl SketcherApp {
         let selected: Vec<EntityId> = self.editor.selection.clone();
         // closed regions: the profiles that can be extruded
         if self.show_profiles {
-            let regions = regions::fill_regions(sk, tol.max(0.5 / v.scale));
+            let regions = &self.fill;
             let total: usize = regions.iter().map(|r| r.outer.len()).sum();
             if total < 20_000 {
-                for r in &regions {
+                for r in regions {
                     let to = |poly: &Vec<P2>| -> Vec<Pos2> {
                         poly.iter().map(|p| v.to_screen(rect, *p)).collect()
                     };

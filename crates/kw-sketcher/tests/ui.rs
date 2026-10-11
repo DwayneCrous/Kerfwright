@@ -521,3 +521,24 @@ fn dragging_in_empty_space_draws_a_selection_box_window_and_crossing() {
     // the shaded profile and the glyphs draw (no panic) with the display options off and on
     h.frame(vec![]);
 }
+
+#[test]
+fn crossing_shapes_are_shaded_region_by_region() {
+    let mut app = SketcherApp::default();
+    let mut sk = kw_sketch::Sketch::new();
+    sk.add_circle_xy(0.0, 0.0, 5.0);
+    sk.add_line_xy(-6.0, 2.0, 6.0, 2.0);
+    let a = sk.add_point(10.0, 0.0);
+    let b = sk.add_point(20.0, 0.0);
+    let c = sk.add_point(20.0, 10.0);
+    let d = sk.add_point(10.0, 10.0);
+    for (p, q) in [(a, b), (b, c), (c, d), (d, a)] {
+        sk.add_line(p, q);
+    }
+    app.editor.replace_sketch(sk);
+    let mut h = Harness::new(app);
+    h.frame(vec![]);
+    h.frame(vec![]);
+    // the circle is cut by the line: two regions; the square is one
+    assert_eq!(h.app.fill_region_count(), 3);
+}

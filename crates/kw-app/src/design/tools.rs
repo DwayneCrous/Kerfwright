@@ -177,7 +177,7 @@ pub struct ExtrudeMore {
     /// Distance from the sketch plane to where the extrusion starts; empty = at the plane.
     pub start: String,
     /// Chosen regions of the sketch (empty = everything).
-    pub regions: Vec<Vec<u32>>,
+    pub regions: Vec<kw_feature::RegionPick>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -379,8 +379,12 @@ pub enum Tool {
 /// A region of the sketch the dialog's profile can be cut into (for the Extrude region list).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegionInfo {
-    pub signature: Vec<u32>,
+    pub pick: kw_feature::RegionPick,
     pub area: f64,
+    /// The indices (in the dialog's picks) of the picks that name this region; empty = not chosen.
+    pub matching: Vec<usize>,
+    /// Is it one of the regions extruded by default?
+    pub default: bool,
 }
 
 /// A tool dialog: the tool, and the feature it edits (if any) with that feature's original spec.
@@ -1703,20 +1707,27 @@ impl Tool {
             } => {
                 feature_combo(ui, "ex_sk", "Profile", doc, sketch, is_sketch);
                 if regions.len() > 1 {
-                    // the pieces the sketch's loops cut the plane into: click them in the view or tick them here
+                    // the pieces the sketch's curves cut the plane into: click them in the view or tick them here
                     ui.add_space(2.0);
                     row(ui, "Regions", |ui| {
-                        ui.label(if more.regions.is_empty() {
-                            "all".to_string()
-                        } else {
-                            format!("{} chosen", more.regions.len())
-                        });
+                        let chosen = regions.iter().filter(|r| !r.matching.is_empty()).count();
+                        ui.label(format!("{chosen} of {} chosen", regions.len()));
+                        if ui.small_button("Default").clicked() {
+                            more.regions = regions
+                                .iter()
+                                .filter(|r| r.default)
+                                .map(|r| r.pick.clone())
+                                .collect();
+                        }
                         if ui.small_button("All").clicked() {
+                            more.regions = regions.iter().map(|r| r.pick.clone()).collect();
+                        }
+                        if ui.small_button("None").clicked() {
                             more.regions.clear();
                         }
                     });
                     for (i, r) in regions.iter().enumerate() {
-                        let mut on = more.regions.contains(&r.signature);
+                        let mut on = !r.matching.is_empty();
                         let before_on = on;
                         ui.horizontal(|ui| {
                             ui.add_space(92.0);
@@ -1724,11 +1735,22 @@ impl Tool {
                         });
                         if on != before_on {
                             if on {
-                                more.regions.push(r.signature.clone());
+                                more.regions.push(r.pick.clone());
                             } else {
-                                more.regions.retain(|s| s != &r.signature);
+                                for k in r.matching.iter().rev() {
+                                    if *k < more.regions.len() {
+                                        more.regions.remove(*k);
+                                    }
+                                }
                             }
                         }
+                    }
+                    if regions.iter().all(|r| r.matching.is_empty()) {
+                        ui.label(
+                            egui::RichText::new("Click the regions to extrude.")
+                                .color(BAD)
+                                .size(10.5),
+                        );
                     }
                     ui.add_space(2.0);
                 }

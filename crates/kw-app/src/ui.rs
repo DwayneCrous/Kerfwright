@@ -313,6 +313,36 @@ impl KerfwrightApp {
                     more.thin = String::new();
                 }
             }
+            "chord" | "chord-sketch" => {
+                // a line across a circle, and two bars crossing: every enclosed area is a region
+                self.design
+                    .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
+                let mut sk = kw_sketch::Sketch::new();
+                sk.add_circle_xy(10.0, 12.0, 8.0);
+                sk.add_line_xy(0.0, 15.0, 20.0, 15.0);
+                for (x0, y0, x1, y1) in [(30.0, 8.0, 50.0, 14.0), (36.0, 2.0, 44.0, 20.0)] {
+                    let p: Vec<_> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                        .iter()
+                        .map(|q| sk.add_point(q.0, q.1))
+                        .collect();
+                    for i in 0..4 {
+                        sk.add_line(p[i], p[(i + 1) % 4]);
+                    }
+                }
+                self.design.sketch.app.editor.replace_sketch(sk);
+                self.design.sketch.app.zoom_to_fit();
+                if what == "chord" {
+                    self.design.finish_sketch(project);
+                    if let Some(crate::design::tools::Dialog {
+                        tool: Tool::Extrude { depth, op, .. },
+                        ..
+                    }) = self.design.dialog.as_mut()
+                    {
+                        *depth = "6 mm".into();
+                        *op = kw_feature::BodyOp::New;
+                    }
+                }
+            }
             "bodies" => {
                 // the demo block, a moved copy of it, a third body made by splitting a second copy
                 let _ = project.history.edit(|d| {

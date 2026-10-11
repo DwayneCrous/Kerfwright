@@ -55,7 +55,7 @@ impl DesignWorkspace {
     /// The regions of the open Extrude dialog's sketch drawn on the sketch plane: chosen ones strongly, the
     /// others faintly, the one under the pointer highlighted. Clicking one chooses it.
     fn draw_regions(&self, ui: &Ui, painter: &egui::Painter, rect: egui::Rect, o3: [f64; 3]) {
-        let Some(rv) = self.region_view.as_ref().filter(|r| r.regions.len() > 1) else {
+        let Some(rv) = self.region_view.as_ref().filter(|r| r.regions().len() > 1) else {
             return;
         };
         let Some(Tool::Extrude { more, .. }) = self.dialog.as_ref().map(|d| &d.tool) else {
@@ -67,7 +67,8 @@ impl DesignWorkspace {
             .filter(|p| rect.contains(*p))
             .and_then(|p| self.region_at(p));
         let f = &rv.plane;
-        for r in &rv.regions {
+        let chosen_of = rv.matching(&more.regions);
+        for (ri, r) in rv.regions().iter().enumerate() {
             let polys: Vec<Vec<egui::Pos2>> = r
                 .shapes
                 .iter()
@@ -84,8 +85,8 @@ impl DesignWorkspace {
                 })
                 .filter(|v| v.len() >= 3)
                 .collect();
-            let chosen = more.regions.is_empty() || more.regions.contains(&r.signature);
-            let hot = hover.as_ref() == Some(&r.signature);
+            let chosen = !chosen_of[ri].is_empty();
+            let hot = hover == Some(ri);
             let colour = match (chosen, hot) {
                 (true, true) => Color32::from_rgba_unmultiplied(6, 150, 215, 150),
                 (true, false) => Color32::from_rgba_unmultiplied(6, 150, 215, 85),

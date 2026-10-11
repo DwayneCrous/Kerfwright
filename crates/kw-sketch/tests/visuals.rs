@@ -81,14 +81,14 @@ fn closed_outlines_are_shaded_and_open_ones_are_not() {
 }
 
 #[test]
-fn a_shape_inside_another_is_a_hole_and_the_shape_in_the_hole_is_shaded_again() {
+fn a_shape_inside_another_is_a_hole_and_a_region_of_its_own() {
     let mut sk = Sketch::new();
     rect(&mut sk, 0.0, 0.0, 30.0, 30.0);
     sk.add_circle_xy(15.0, 15.0, 10.0);
     sk.add_circle_xy(15.0, 15.0, 4.0);
     let regions = fill_regions(&sk, 0.01);
-    // the square with the big circle as a hole, and the small circle inside that hole
-    assert_eq!(regions.len(), 3 - 1);
+    // the square with the big circle as a hole, the ring between the circles, and the small circle
+    assert_eq!(regions.len(), 3);
     let outer = regions.iter().find(|r| r.outer.len() == 4).unwrap();
     assert_eq!(outer.holes.len(), 1);
     assert_eq!(closed_loops(&sk, 0.01).len(), 3);

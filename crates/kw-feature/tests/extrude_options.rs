@@ -1,7 +1,7 @@
 //! Regions, thin walls, ribs, extrude to a face, start offset, revolve about an edge, straight sweep, pipe.
 
 use kw_expr::Param;
-use kw_feature::regions::{regions, sketch_loops};
+use kw_feature::regions::sketch_regions;
 use kw_feature::*;
 use std::f64::consts::PI;
 
@@ -67,6 +67,14 @@ fn xy() -> PlaneSpec {
     PlaneSpec::Xy(mm(0.0))
 }
 
+/// The sketch product of an evaluated sketch feature.
+fn sketch_product(ev: &Evaluation, s: FeatureId) -> std::sync::Arc<SketchProduct> {
+    match ev.output(s).map(|o| &o.product) {
+        Some(Product::Sketch(sp)) => sp.clone(),
+        _ => panic!("not a sketch"),
+    }
+}
+
 #[test]
 fn chosen_regions_of_overlapping_loops_extrude_to_exactly_their_shape() {
     // a 20 x 10 rectangle and a circle of radius 5 centred on its right edge
@@ -75,33 +83,20 @@ fn chosen_regions_of_overlapping_loops_extrude_to_exactly_their_shape() {
     let mut doc = Document::new();
     let s = sketch_of(&mut doc, "S", xy(), sk);
     let ev = eval(&doc);
-    let Some(Product::Sketch(sp)) = ev.output(s).map(|o| &o.product) else {
-        panic!()
-    };
-    let loops = sketch_loops(&sp.sketch, &sp.entities, sp.plane).unwrap();
-    assert_eq!(loops.len(), 2);
-    let regs = regions(&loops);
+    let sp = sketch_product(&ev, s);
+    let sr = sketch_regions(&sp.sketch, &sp.entities, sp.plane);
+    let regs = &sr.regions;
     assert_eq!(regs.len(), 3, "rectangle only, circle only, both");
     let half_disc = 0.5 * PI * 25.0;
-    let by_size = |sig_len: usize, area: f64| {
-        regs.iter()
-            .find(|r| r.signature.len() == sig_len && (r.area - area).abs() < 0.2)
-            .unwrap_or_else(|| {
-                panic!(
-                    "a region of area {area}: {:?}",
-                    regs.iter()
-                        .map(|r| (r.signature.clone(), r.area))
-                        .collect::<Vec<_>>()
-                )
-            })
-            .signature
-            .clone()
-    };
-    let both = by_size(2, half_disc);
-    let rect_only = by_size(1, 200.0 - half_disc);
-    let circle_only = by_size(1, PI * 25.0 - half_disc);
+    // the three regions, found by where they are (two of them have the same area)
+    let at = |p: [f64; 2]| regs[sr.region_at(p).expect("a region there")].pick.clone();
+    let both = at([17.0, 5.0]);
+    let rect_only = at([5.0, 5.0]);
+    let circle_only = at([23.0, 5.0]);
+    assert!((regs[sr.region_at([17.0, 5.0]).unwrap()].area - half_disc).abs() < 1e-6);
+    assert!((regs[sr.region_at([5.0, 5.0]).unwrap()].area - (200.0 - half_disc)).abs() < 1e-6);
     let depth = 4.0;
-    let one = |doc: &Document, sigs: Vec<Vec<u32>>| -> f64 {
+    let one = |doc: &Document, picks: Vec<RegionPick>| -> f64 {
         let mut d = doc.clone();
         let e = extrude_with(
             &mut d,
@@ -110,35 +105,41 @@ fn chosen_regions_of_overlapping_loops_extrude_to_exactly_their_shape() {
             depth,
             BodyOp::New,
             ExtrudeExtent {
-                regions: sigs,
+                regions: picks,
                 ..Default::default()
             },
         );
         vol(&eval(&d), e)
     };
+    let tol = 1e-6;
     assert!(
-        (one(&doc, vec![both.clone()]) - half_disc * depth).abs() < 0.5,
+        (one(&doc, vec![both.clone()]) - half_disc * depth).abs() < tol,
         "overlap"
     );
     assert!(
-        (one(&doc, vec![rect_only.clone()]) - (200.0 - half_disc) * depth).abs() < 0.8,
+        (one(&doc, vec![rect_only.clone()]) - (200.0 - half_disc) * depth).abs() < tol,
         "rectangle only"
     );
     assert!(
-        (one(&doc, vec![circle_only.clone()]) - (PI * 25.0 - half_disc) * depth).abs() < 0.8,
+        (one(&doc, vec![circle_only.clone()]) - (PI * 25.0 - half_disc) * depth).abs() < tol,
         "circle only"
     );
     // two regions united: the rectangle and its overlap with the circle are the whole rectangle
     assert!(
-        (one(&doc, vec![rect_only.clone(), both.clone()]) - 200.0 * depth).abs() < 0.8,
+        (one(&doc, vec![rect_only.clone(), both.clone()]) - 200.0 * depth).abs() < tol,
         "rectangle"
     );
     // all three: the union of both shapes
     assert!(
         (one(&doc, vec![rect_only, both, circle_only]) - (200.0 + PI * 25.0 - half_disc) * depth)
             .abs()
-            < 1.0,
+            < tol,
         "union"
+    );
+    // nothing chosen: everything the shapes enclose
+    assert!(
+        (one(&doc, vec![]) - (200.0 + PI * 25.0 - half_disc) * depth).abs() < tol,
+        "default"
     );
     // a region that does not exist is refused with a message
     let mut d = doc.clone();
@@ -149,7 +150,7 @@ fn chosen_regions_of_overlapping_loops_extrude_to_exactly_their_shape() {
         depth,
         BodyOp::New,
         ExtrudeExtent {
-            regions: vec![vec![999]],
+            regions: vec![RegionPick::Legacy(vec![999])],
             ..Default::default()
         },
     );
@@ -159,10 +160,8 @@ fn chosen_regions_of_overlapping_loops_extrude_to_exactly_their_shape() {
 
 #[test]
 fn a_hole_inside_a_loop_is_a_region_too() {
-    // a 20 x 20 square with a 6 x 6 square inside: regions {outer} (no: the ring) and {outer, inner}
+    // a 20 x 20 square with a 6 x 6 square inside: the ring and the core
     let mut sk = rect_sketch(0.0, 0.0, 20.0, 20.0);
-    let inner = rect_sketch(7.0, 7.0, 6.0, 6.0);
-    // merge: draw the inner square into the same sketch
     let pts: Vec<_> = [(7.0, 7.0), (13.0, 7.0), (13.0, 13.0), (7.0, 13.0)]
         .iter()
         .map(|q| sk.add_point(q.0, q.1))
@@ -170,53 +169,143 @@ fn a_hole_inside_a_loop_is_a_region_too() {
     for i in 0..4 {
         sk.add_line(pts[i], pts[(i + 1) % 4]);
     }
-    let _ = inner;
     let mut doc = Document::new();
     let s = sketch_of(&mut doc, "S", xy(), sk);
     let ev = eval(&doc);
-    let Some(Product::Sketch(sp)) = ev.output(s).map(|o| &o.product) else {
-        panic!()
-    };
-    let loops = sketch_loops(&sp.sketch, &sp.entities, sp.plane).unwrap();
-    let regs = regions(&loops);
-    let ring = regs
+    let sp = sketch_product(&ev, s);
+    let sr = sketch_regions(&sp.sketch, &sp.entities, sp.plane);
+    let ring = sr
+        .regions
         .iter()
         .find(|r| (r.area - (400.0 - 36.0)).abs() < 1e-6)
         .expect("the ring")
-        .signature
+        .pick
         .clone();
-    let core = regs
+    let core = sr
+        .regions
         .iter()
         .find(|r| (r.area - 36.0).abs() < 1e-6)
         .expect("the inner square")
+        .pick
+        .clone();
+    let run = |picks: Vec<RegionPick>| {
+        let mut d = doc.clone();
+        let e = extrude_with(
+            &mut d,
+            "E",
+            s,
+            3.0,
+            BodyOp::New,
+            ExtrudeExtent {
+                regions: picks,
+                ..Default::default()
+            },
+        );
+        vol(&eval(&d), e)
+    };
+    assert!((run(vec![ring.clone()]) - 364.0 * 3.0).abs() < 1e-6);
+    assert!((run(vec![core.clone()]) - 36.0 * 3.0).abs() < 1e-6);
+    // both: the whole square, with no wall between ring and core
+    assert!((run(vec![ring, core]) - 400.0 * 3.0).abs() < 1e-6);
+    // nothing chosen: a plate with a hole
+    assert!((run(vec![]) - 364.0 * 3.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_line_across_a_circle_gives_two_regions_that_extrude_alone_or_together() {
+    let mut sk = kw_sketch::Sketch::new();
+    sk.add_circle_xy(0.0, 0.0, 5.0);
+    sk.add_line_xy(-6.0, 2.0, 6.0, 2.0);
+    let mut doc = Document::new();
+    let s = sketch_of(&mut doc, "S", xy(), sk);
+    let ev = eval(&doc);
+    let sp = sketch_product(&ev, s);
+    let sr = sketch_regions(&sp.sketch, &sp.entities, sp.plane);
+    assert_eq!(sr.regions.len(), 2);
+    // the two halves have the same boundary entities: they are told apart by position
+    assert_eq!(sr.regions[0].labels, sr.regions[1].labels);
+    let small = 25.0 * (2.0f64 / 5.0).acos() - 2.0 * 21.0f64.sqrt();
+    let run = |picks: Vec<RegionPick>| -> (f64, usize) {
+        let mut d = doc.clone();
+        let e = extrude_with(
+            &mut d,
+            "E",
+            s,
+            3.0,
+            BodyOp::New,
+            ExtrudeExtent {
+                regions: picks,
+                ..Default::default()
+            },
+        );
+        let ev = eval(&d);
+        let faces = {
+            let o = ev.output(e).unwrap();
+            o.brep().unwrap().body_faces(o.body().unwrap()).len()
+        };
+        (vol(&ev, e), faces)
+    };
+    let (small_pick, big_pick) = {
+        let mut v: Vec<_> = sr
+            .regions
+            .iter()
+            .map(|r| (r.area, r.pick.clone()))
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        (v[0].1.clone(), v[1].1.clone())
+    };
+    assert!((run(vec![small_pick.clone()]).0 - small * 3.0).abs() < 1e-6);
+    assert!((run(vec![big_pick.clone()]).0 - (25.0 * PI - small) * 3.0).abs() < 1e-6);
+    // both together: the whole disc, and no wall where the line was
+    let (v, faces) = run(vec![small_pick, big_pick]);
+    assert!((v - 25.0 * PI * 3.0).abs() < 1e-6);
+    assert_eq!(faces, 4, "two caps and the two arcs of the wall");
+    // nothing chosen: the whole disc as well
+    assert!((run(vec![]).0 - 25.0 * PI * 3.0).abs() < 1e-6);
+}
+
+#[test]
+fn region_choices_saved_in_the_old_form_still_find_their_region() {
+    use kw_feature::legacy_regions::{regions, sketch_loops};
+    let mut sk = rect_sketch(0.0, 0.0, 20.0, 10.0);
+    sk.add_circle_xy(20.0, 5.0, 5.0);
+    let mut doc = Document::new();
+    let s = sketch_of(&mut doc, "S", xy(), sk);
+    let ev = eval(&doc);
+    let sp = sketch_product(&ev, s);
+    // what an older version saved for the circle-only region: the keys of the loops it lies inside
+    let loops = sketch_loops(&sp.sketch, &sp.entities, sp.plane).unwrap();
+    let regs = regions(&loops);
+    let half_disc = 0.5 * PI * 25.0;
+    let old = regs
+        .iter()
+        .find(|r| (r.area - (PI * 25.0 - half_disc)).abs() < 0.2)
+        .unwrap()
         .signature
         .clone();
     let mut d = doc.clone();
     let e = extrude_with(
         &mut d,
-        "ring",
+        "E",
         s,
-        3.0,
+        4.0,
         BodyOp::New,
         ExtrudeExtent {
-            regions: vec![ring],
+            regions: vec![RegionPick::Legacy(old.clone())],
             ..Default::default()
         },
     );
-    assert!((vol(&eval(&d), e) - 364.0 * 3.0).abs() < 1e-6);
-    let mut d = doc.clone();
-    let e = extrude_with(
-        &mut d,
-        "core",
-        s,
-        3.0,
-        BodyOp::New,
-        ExtrudeExtent {
-            regions: vec![core],
-            ..Default::default()
-        },
-    );
-    assert!((vol(&eval(&d), e) - 36.0 * 3.0).abs() < 1e-6);
+    assert!((vol(&eval(&d), e) - (PI * 25.0 - half_disc) * 4.0).abs() < 1e-6);
+    // the old file form reads as a legacy pick, the new one as a face
+    let legacy: ExtrudeExtent =
+        serde_json::from_str(&format!("{{\"regions\":[{:?}]}}", old)).unwrap();
+    assert_eq!(legacy.regions, vec![RegionPick::Legacy(old)]);
+    let new = RegionPick::Face {
+        labels: vec![1, 4],
+        at: [3.5, -2.0],
+    };
+    let text = serde_json::to_string(&new).unwrap();
+    assert_eq!(serde_json::from_str::<RegionPick>(&text).unwrap(), new);
 }
 
 #[test]

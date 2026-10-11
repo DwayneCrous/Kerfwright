@@ -75,10 +75,23 @@ pub struct ExtrudeExtent {
     /// Start the extrusion this far from the sketch plane (along the extrusion direction).
     #[serde(default)]
     pub start_offset: Option<Param>,
-    /// Extrude only these regions of the sketch: each is the set of closed loops (by the smallest label of
-    /// the loop's entities) the region lies inside. Empty = everything the loops enclose.
+    /// Extrude only these regions of the sketch (faces of its planar arrangement). Empty = the default
+    /// regions: everything the shapes enclose, with the shapes inside them as holes.
     #[serde(default)]
-    pub regions: Vec<Vec<u32>>,
+    pub regions: Vec<RegionPick>,
+}
+
+/// A region of a sketch, named so that it can be found again after the sketch changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RegionPick {
+    /// The region whose boundary is made of the entities with these labels (sorted, without repeats) and
+    /// which contains the point `at` (several regions can share the same boundary entities: the halves of a
+    /// circle cut by a line).
+    Face { labels: Vec<u32>, at: [f64; 2] },
+    /// A choice saved before sketches were split at their intersections: the set of closed loops (by the
+    /// smallest label of each loop's entities) the region lay inside. It is turned into a position when used.
+    Legacy(Vec<u32>),
 }
 
 /// Which side of the profile curve a thin extrusion's wall lies on.

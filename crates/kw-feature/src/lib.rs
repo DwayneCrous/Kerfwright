@@ -16,6 +16,8 @@ pub mod eval;
 pub mod geomhash;
 pub mod id;
 pub mod kwf;
+pub mod legacy_profile;
+pub mod legacy_regions;
 pub mod namer;
 pub mod naming;
 pub mod ops;
