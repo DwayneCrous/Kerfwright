@@ -52,6 +52,7 @@ fn long_model(groups: usize) -> (Document, FeatureId, FeatureId) {
                         flip: true,
                         op: BodyOp::Cut,
                         base: None,
+                        extent: Default::default(),
                     }),
                 )
                 .unwrap();
@@ -132,6 +133,7 @@ fn parts_model(parts: usize, per_part: usize) -> (Document, FeatureId, FeatureId
                             flip: true,
                             op: BodyOp::Cut,
                             base: None,
+                            extent: Default::default(),
                         }),
                     )
                     .unwrap();

@@ -63,6 +63,7 @@ pub fn sample_document() -> Document {
             flip: true,
             op: BodyOp::Cut,
             base: None,
+            extent: Default::default(),
         }),
     )
     .unwrap();
@@ -156,6 +157,7 @@ pub fn parallel_document(chains: usize) -> Document {
                 flip: true,
                 op: BodyOp::Cut,
                 base: None,
+                extent: Default::default(),
             }),
         )
         .unwrap();

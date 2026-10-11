@@ -5,6 +5,7 @@
 
 pub mod browser;
 pub mod geom;
+pub mod measure;
 pub mod overlay;
 pub mod ribbon;
 pub mod timeline;
@@ -74,6 +75,10 @@ pub struct DesignWorkspace {
     pub hole_plane: Option<PlaneSpec>,
     pub timeline: timeline::State,
     pub params_open: bool,
+    /// The Measure window is open (picks are compared instead of used by a tool).
+    pub measure_open: bool,
+    /// Index into `measure::MATERIALS`.
+    pub material: usize,
     pub actions: Vec<Action>,
     /// Timeline position of the viewport's last click (used for double-click handling).
     pub shaded: bool,
@@ -96,6 +101,8 @@ impl Default for DesignWorkspace {
             hole_plane: None,
             timeline: timeline::State::default(),
             params_open: false,
+            measure_open: false,
+            material: 2,
             actions: Vec::new(),
             shaded: true,
         }
@@ -237,6 +244,31 @@ impl DesignWorkspace {
             } => {
                 *target = last_tool_feature;
                 *t = None;
+            }
+            Tool::Loft { sketches, .. } => {
+                let ids: Vec<FeatureId> = doc
+                    .features
+                    .iter()
+                    .filter(|f| matches!(f.spec, FeatureSpec::Sketch(_)))
+                    .map(|f| f.id)
+                    .collect();
+                let from = ids.len().saturating_sub(2);
+                *sketches = ids[from..].iter().map(|i| Some(*i)).collect();
+                while sketches.len() < 2 {
+                    sketches.push(None);
+                }
+            }
+            Tool::Sweep { profile, path, .. } => {
+                let ids: Vec<FeatureId> = doc
+                    .features
+                    .iter()
+                    .filter(|f| matches!(f.spec, FeatureSpec::Sketch(_)))
+                    .map(|f| f.id)
+                    .collect();
+                if ids.len() >= 2 {
+                    *profile = Some(ids[ids.len() - 2]);
+                    *path = Some(ids[ids.len() - 1]);
+                }
             }
             Tool::Extrude { sketch, .. } | Tool::Revolve { sketch, .. } if sketch.is_none() => {
                 let sel = self.model.selected.filter(|s| {
@@ -530,6 +562,7 @@ impl DesignWorkspace {
             (_, Mode::PickPlane) => 0,
             (Some(d), _) if d.tool.picks_edges() => 8,
             (Some(_), _) => 0,
+            (None, _) if self.measure_open => 8,
             (None, _) => 4,
         };
         let opts = ViewOpts {
@@ -672,7 +705,7 @@ impl DesignWorkspace {
                             if accept {
                                 if hole {
                                     self.pick_hole_face(ev, *p, out);
-                                } else if shift || edges || (faces && !hole) {
+                                } else if shift || edges || (faces && !hole) || self.measure_open {
                                     if let Some(i) = self.model.picks.iter().position(|q| q == p) {
                                         self.model.picks.remove(i);
                                     } else {

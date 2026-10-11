@@ -266,6 +266,7 @@ fn holes_of_three_kinds_and_patterns_and_mirror() {
                 kind: HoleKind::Simple { diameter: mm(4.0) },
                 depth: mm(10.0),
                 base: None,
+                through_all: false,
             }),
         )
         .unwrap();
@@ -282,6 +283,7 @@ fn holes_of_three_kinds_and_patterns_and_mirror() {
                 },
                 depth: mm(10.0),
                 base: None,
+                through_all: false,
             }),
         )
         .unwrap();
@@ -298,6 +300,7 @@ fn holes_of_three_kinds_and_patterns_and_mirror() {
                 },
                 depth: mm(10.0),
                 base: None,
+                through_all: false,
             }),
         )
         .unwrap();
@@ -366,6 +369,7 @@ fn holes_of_three_kinds_and_patterns_and_mirror() {
                 kind: HoleKind::Simple { diameter: mm(4.0) },
                 depth: mm(10.0),
                 base: None,
+                through_all: false,
             }),
         )
         .unwrap();
@@ -626,4 +630,268 @@ fn a_sketch_with_reused_slots_records_and_rebuilds() {
     assert!(old.to_sketch().is_err());
     old.entities[1].kind = EntityKindRec::Line { p1: 9, p2: 2 };
     assert!(old.to_sketch().is_err());
+}
+
+#[test]
+fn a_step_file_becomes_an_import_feature_that_keeps_its_data_and_can_be_modified() {
+    // a 30 x 20 x 5 block with a fillet, exported as STEP
+    let mut doc = Document::new();
+    let (_, ext) = block(&mut doc, 30.0, 20.0, 5.0);
+    let ev = eval(&doc);
+    let want = vol(&ev, ext);
+    let o = ev.output(ext).unwrap();
+    let step = kw_step::export(
+        o.brep().unwrap(),
+        &[o.body().unwrap()],
+        &kw_step::ExportOptions::default(),
+    );
+
+    let mut d2 = Document::new();
+    let imp = d2
+        .add(
+            "Imported part",
+            FeatureSpec::Import(ImportSpec {
+                source: "block.step".into(),
+                format: ImportFormat::Step,
+                data: step.clone(),
+            }),
+        )
+        .unwrap();
+    let ev2 = eval(&d2);
+    assert!(
+        (vol(&ev2, imp) - want).abs() < 1e-6,
+        "{} vs {want}",
+        vol(&ev2, imp)
+    );
+    // later features work on the imported body: a through hole
+    let top = {
+        let o = ev2.output(imp).unwrap();
+        let b = o.brep().unwrap();
+        let f = b
+            .faces
+            .keys()
+            .find(|f| {
+                b.face_bbox(*f).is_some_and(|bb| {
+                    (bb.min.z - 5.0).abs() < 1e-6 && (bb.max.z - 5.0).abs() < 1e-6
+                })
+            })
+            .expect("the top face");
+        o.names.reference_to(b, f).expect("a name for the face")
+    };
+    let hole = d2
+        .add(
+            "Hole",
+            FeatureSpec::Hole(HoleSpec {
+                plane: PlaneSpec::Face(top),
+                points: vec![[mm(15.0), mm(10.0)]],
+                kind: HoleKind::Simple { diameter: mm(4.0) },
+                depth: mm(5.0),
+                base: None,
+                through_all: false,
+            }),
+        )
+        .unwrap();
+    let ev3 = eval(&d2);
+    let drilled = vol(&ev3, hole);
+    assert!(
+        (drilled - (want - PI * 4.0 * 5.0)).abs() < 1e-3,
+        "{drilled}"
+    );
+
+    // the file text survives a save and load of the document
+    let bytes = kw_feature::kwf::KwfFile::new(d2.clone())
+        .to_bytes()
+        .unwrap();
+    let back = kw_feature::kwf::KwfFile::from_bytes(&bytes).unwrap();
+    assert_eq!(back.document, d2);
+
+    // garbage is reported, not panicked on
+    let mut d3 = Document::new();
+    let bad = d3
+        .add(
+            "Broken",
+            FeatureSpec::Import(ImportSpec {
+                source: "nothing.step".into(),
+                format: ImportFormat::Step,
+                data: "this is not a STEP file".into(),
+            }),
+        )
+        .unwrap();
+    let ev4 = eval(&d3);
+    assert!(ev4.output(bad).is_none() && !ev4.failures().is_empty());
+}
+
+fn extrude_sketch(sk: kw_sketch::Sketch, depth: f64) -> (Document, FeatureId, FeatureId) {
+    let mut doc = Document::new();
+    let s = doc
+        .add(
+            "S",
+            FeatureSpec::Sketch(SketchSpec {
+                plane: PlaneSpec::Xy(mm(0.0)),
+                recipe: SketchRecipe::from_sketch(&sk),
+            }),
+        )
+        .unwrap();
+    let e = doc.add_extrude("E", s, mm(depth), BodyOp::New).unwrap();
+    (doc, s, e)
+}
+
+#[test]
+fn ellipse_and_spline_sketches_extrude() {
+    // an ellipse, major axis tilted 30 degrees: volume pi a b h whatever the tilt
+    let mut sk = kw_sketch::Sketch::new();
+    let c = sk.add_point(2.0, 1.0);
+    let (a, b) = (12.0, 5.0);
+    let t = 30f64.to_radians();
+    let m = sk.add_point(2.0 + a * t.cos(), 1.0 + a * t.sin());
+    sk.add_ellipse(c, m, b);
+    let (doc, _, e) = extrude_sketch(sk, 4.0);
+    let ev = eval(&doc);
+    let v = vol(&ev, e);
+    assert!(
+        close(v, PI * a * b * 4.0, 1e-6),
+        "ellipse {v} vs {}",
+        PI * a * b * 4.0
+    );
+
+    // a region bounded by a line and a fit spline through three points
+    let mut sk = kw_sketch::Sketch::new();
+    let p0 = sk.add_point(0.0, 0.0);
+    let p1 = sk.add_point(10.0, 8.0);
+    let p2 = sk.add_point(20.0, 0.0);
+    sk.add_fit_spline(vec![p0, p1, p2]);
+    sk.add_line(p2, p0);
+    // three points make a parabola: the area between it and its chord is 2/3 of base x height
+    let area = 2.0 / 3.0 * 20.0 * 8.0;
+    let (doc, _, e) = extrude_sketch(sk, 3.0);
+    let ev = eval(&doc);
+    let v = vol(&ev, e);
+    assert!(close(v, area * 3.0, 1e-6), "spline {v} vs {}", area * 3.0);
+
+    // a closed spline loop (first = last control point) with a round hole inside: holes still work
+    let mut sk = kw_sketch::Sketch::new();
+    let pts: Vec<_> = [
+        (0.0, 0.0),
+        (15.0, -4.0),
+        (25.0, 8.0),
+        (10.0, 18.0),
+        (-5.0, 9.0),
+        (0.0, 0.0),
+    ]
+    .iter()
+    .map(|p| sk.add_point(p.0, p.1))
+    .collect();
+    sk.add_fit_spline(pts);
+    sk.add_circle_xy(10.0, 8.0, 3.0);
+    let (doc, _, e) = extrude_sketch(sk, 2.0);
+    let ev = eval(&doc);
+    let v = vol(&ev, e);
+    assert!(v > 0.0 && v < 800.0 * 2.0, "{v}");
+    // the hole is real: the volume is the loop's area minus the disc
+    let o = ev.output(e).unwrap();
+    let b = o.brep().unwrap();
+    assert!(
+        b.faces.len() >= 4,
+        "top, bottom, spline wall and the hole wall: {}",
+        b.faces.len()
+    );
+}
+
+fn block_with_extent(depth: f64, extent: ExtrudeExtent) -> (Document, FeatureId) {
+    let mut doc = Document::new();
+    let (s0, _) = block(&mut doc, 40.0, 30.0, 10.0);
+    // a second sketch on the top face's plane, cut with the given extent
+    let s = doc
+        .add_rect_sketch(
+            "Pocket sketch",
+            PlaneSpec::Xy(mm(10.0)),
+            mm(10.0),
+            mm(10.0),
+            mm(10.0),
+            mm(10.0),
+        )
+        .unwrap();
+    let _ = s0;
+    let e = doc
+        .add(
+            "Cut",
+            FeatureSpec::Extrude(ExtrudeSpec {
+                sketch: s,
+                depth: mm(depth),
+                symmetric: false,
+                flip: true,
+                op: BodyOp::Cut,
+                base: None,
+                extent,
+            }),
+        )
+        .unwrap();
+    (doc, e)
+}
+
+#[test]
+fn extrude_through_all_two_sided_and_taper() {
+    let base = 40.0 * 30.0 * 10.0;
+    // through all: a 10 x 10 pocket goes right through the 10 mm plate, whatever the stated depth
+    let (doc, e) = block_with_extent(
+        1.0,
+        ExtrudeExtent {
+            through_all: true,
+            ..Default::default()
+        },
+    );
+    let ev = eval(&doc);
+    assert!(
+        close(vol(&ev, e), base - 100.0 * 10.0, 1e-9),
+        "{}",
+        vol(&ev, e)
+    );
+
+    // two sided: 2 mm below the sketch plane (flip makes "first side" go down) and 3 mm the other way
+    // from a sketch plane at z = 10: first side 4 mm down, second side 3 mm up (out of the body)
+    let (doc, e) = block_with_extent(
+        4.0,
+        ExtrudeExtent {
+            second_side: Some(mm(3.0)),
+            ..Default::default()
+        },
+    );
+    let ev = eval(&doc);
+    assert!(
+        close(vol(&ev, e), base - 100.0 * 4.0, 1e-9),
+        "{}",
+        vol(&ev, e)
+    );
+
+    // taper 10 degrees on a square pocket 8 mm deep: a frustum, volume h/3 (A0 + A1 + sqrt(A0 A1))
+    let t = 10f64.to_radians();
+    let (doc, e) = block_with_extent(
+        8.0,
+        ExtrudeExtent {
+            taper: Some(Param::angle_deg(10.0)),
+            ..Default::default()
+        },
+    );
+    let ev = eval(&doc);
+    let a0 = 100.0;
+    let side1 = 10.0 - 2.0 * 8.0 * t.tan();
+    let a1 = side1 * side1;
+    let frustum = 8.0 / 3.0 * (a0 + a1 + (a0 * a1).sqrt());
+    assert!(
+        close(vol(&ev, e), base - frustum, 1e-6),
+        "{} vs {}",
+        vol(&ev, e),
+        base - frustum
+    );
+
+    // a taper with a symmetric extent is refused with a message
+    let mut d = doc.clone();
+    let id = d.features.last().unwrap().id;
+    let mut spec = d.get(id).unwrap().spec.clone();
+    if let FeatureSpec::Extrude(x) = &mut spec {
+        x.symmetric = true;
+    }
+    d.replace_spec(id, spec).unwrap();
+    let ev = eval(&d);
+    assert!(ev.output(id).is_none() && !ev.failures().is_empty());
 }

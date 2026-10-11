@@ -25,6 +25,8 @@ kw-blend.workspace = true
 kw-sheet.workspace = true
 kw-subd.workspace = true
 kw-dxf.workspace = true
+kw-step.workspace = true
+kw-iges.workspace = true
 
 [dev-dependencies]
 kw-tess.workspace = true

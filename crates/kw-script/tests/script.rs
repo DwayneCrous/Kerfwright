@@ -53,6 +53,7 @@ fn rust_bracket() -> Document {
             flip: true,
             op: BodyOp::Cut,
             base: None,
+            extent: Default::default(),
         }),
     )
     .unwrap();

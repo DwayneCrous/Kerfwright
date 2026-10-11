@@ -3,7 +3,8 @@
 use crate::eval::EvalError;
 use kw_math::Frame3;
 use kw_model::{Profile, ProfileEdge, ProfileLoop};
-use kw_nurbs::CurveGeom;
+use kw_nurbs::geom::Ellipse;
+use kw_nurbs::{CurveGeom, NurbsCurve};
 use kw_sketch::{EntityId, EntityKind, Sketch};
 use std::collections::HashMap;
 
@@ -19,8 +20,8 @@ fn sk_err<E: std::fmt::Display>(e: E) -> EvalError {
     EvalError::Sketch(e.to_string())
 }
 
-/// Turn the closed curves of a sketch into a planar profile: lines, arcs and circles that are not
-/// construction geometry are chained into loops; the loop with the largest area is the outer one.
+/// Turn the closed curves of a sketch into a planar profile: lines, arcs, circles, ellipses and splines
+/// that are not construction geometry are chained into loops; the loop with the largest area is the outer one.
 /// `entities[i]` is the entity with label `i`.
 pub fn sketch_profile_labeled(
     sk: &Sketch,
@@ -90,13 +91,60 @@ pub fn sketch_profile_labeled(
                     label,
                 ));
             }
+            EntityKind::Ellipse {
+                center,
+                major_end,
+                minor_radius,
+            } => {
+                let (c, m) = (
+                    sk.point(*center).map_err(sk_err)?,
+                    sk.point(*major_end).map_err(sk_err)?,
+                );
+                let (ux, uy) = (m.0 - c.0, m.1 - c.1);
+                let major = ux.hypot(uy);
+                let minor = sk.value(*minor_radius).abs();
+                if major < 1e-12 || minor < 1e-12 {
+                    return Err(EvalError::Sketch("an ellipse has no size".into()));
+                }
+                let x = plane.x * (ux / major) + plane.y * (uy / major);
+                let frame = Frame3 {
+                    origin: map(c),
+                    x,
+                    y: plane.z.cross(&x),
+                    z: plane.z,
+                };
+                circles.push((
+                    ProfileLoop::new(vec![ProfileEdge::new(
+                        CurveGeom::Ellipse(Ellipse {
+                            frame,
+                            major,
+                            minor,
+                        }),
+                        (0.0, std::f64::consts::TAU),
+                    )]),
+                    label,
+                ));
+            }
+            EntityKind::Spline { .. } | EntityKind::FitSpline { .. } => {
+                let flat = kw_sketch::geom::spline_curve(sk, id).map_err(sk_err)?;
+                let pts: Vec<_> = flat.points().iter().map(|p| map((p.x, p.y))).collect();
+                let curve = NurbsCurve::new(flat.knots().clone(), pts, flat.weights().to_vec())
+                    .map_err(|e| EvalError::Sketch(format!("bad spline: {e:?}")))?;
+                let (t0, t1) = curve.domain();
+                let (pa, pb) = (curve.point_at(t0), curve.point_at(t1));
+                let to2 = |q: kw_math::Point3<f64>| {
+                    let d = q - plane.origin;
+                    (d.dot(&plane.x), d.dot(&plane.y))
+                };
+                segs.push(Seg {
+                    a: to2(pa),
+                    b: to2(pb),
+                    edge: ProfileEdge::new(CurveGeom::Nurbs(curve), (t0, t1)),
+                    label,
+                });
+            }
             // points are the end points of curves (or free points, which carry no area)
             EntityKind::Point(_) => {}
-            _ => {
-                return Err(EvalError::Sketch(
-                    "only lines, arcs and circles can form a profile".into(),
-                ))
-            }
         }
     }
     let tol = 1e-7;
@@ -170,6 +218,24 @@ pub fn sketch_profile_labeled(
                     z: -c.frame.z,
                 };
                 ordered.push((ProfileLoop::circle(&f, c.radius), labels.clone()));
+            } else if let CurveGeom::Ellipse(e) = &l.edges[0].curve {
+                let f = Frame3 {
+                    origin: e.frame.origin,
+                    x: e.frame.x,
+                    y: -e.frame.y,
+                    z: -e.frame.z,
+                };
+                ordered.push((
+                    ProfileLoop::new(vec![ProfileEdge::new(
+                        CurveGeom::Ellipse(Ellipse {
+                            frame: f,
+                            major: e.major,
+                            minor: e.minor,
+                        }),
+                        (0.0, std::f64::consts::TAU),
+                    )]),
+                    labels.clone(),
+                ));
             } else {
                 ordered.push(reverse(l, labels));
             }

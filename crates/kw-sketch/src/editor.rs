@@ -37,11 +37,26 @@ pub enum Tool {
     Circle,
     Arc,
     Spline,
+    /// Spline through its points (as opposed to `Spline`, whose points are control points).
+    FitSpline,
+    Polygon,
+    Slot,
+    Ellipse,
+    /// Arc through three points: start, end, a point on it.
+    Arc3,
+    /// Circle through three points.
+    Circle3,
     Dimension,
     Constrain(ConstraintTool),
     Trim,
     Extend,
     Offset,
+    /// Round the corner of two lines (click the shared point).
+    Fillet,
+    /// Bevel the corner of two lines (click the shared point).
+    Chamfer,
+    /// Mirror the picked entities across a line (pick entities, Enter, then the line).
+    Mirror,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -240,8 +255,17 @@ enum Pending {
     ArcCentre(EntityId),
     ArcStart(EntityId, EntityId),
     Spline(Vec<EntityId>),
+    FitSpline(Vec<EntityId>),
+    Polygon(EntityId),
+    Slot1(EntityId),
+    Slot2(EntityId, EntityId),
+    Ellipse1(EntityId),
+    Ellipse2(EntityId, EntityId),
+    /// Points picked so far for a three-point arc or circle.
+    Three(Vec<Snap>),
     Collect(Vec<EntityId>),
     OffsetSide(Vec<EntityId>),
+    MirrorAxis(Vec<EntityId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +288,10 @@ pub struct Editor {
     pub tolerance: f64,
     /// Distance used by the offset tool.
     pub offset_distance: f64,
+    /// Number of sides made by the polygon tool.
+    pub polygon_sides: usize,
+    /// Radius of the sketch fillet tool, and distance of the chamfer tool.
+    pub corner_size: f64,
     /// Add to the selection instead of replacing it (Ctrl held).
     pub multi_select: bool,
     pub status: String,
@@ -307,6 +335,8 @@ impl Editor {
             selection: Vec::new(),
             tolerance: 0.3,
             offset_distance: 1.0,
+            polygon_sides: 6,
+            corner_size: 2.0,
             multi_select: false,
             status: String::new(),
             report: None,
@@ -860,8 +890,18 @@ impl Editor {
             }
             Pending::Rect(s) => vec![s.position()],
             Pending::ArcStart(c, s) => pt(c).into_iter().chain(pt(s)).collect(),
-            Pending::Spline(v) => v.iter().filter_map(pt).collect(),
-            Pending::None | Pending::Collect(_) | Pending::OffsetSide(_) => Vec::new(),
+            Pending::Spline(v) | Pending::FitSpline(v) => v.iter().filter_map(pt).collect(),
+            Pending::Polygon(c) | Pending::Slot1(c) | Pending::Ellipse1(c) => {
+                pt(c).into_iter().collect()
+            }
+            Pending::Slot2(a, b) | Pending::Ellipse2(a, b) => {
+                pt(a).into_iter().chain(pt(b)).collect()
+            }
+            Pending::Three(v) => v.iter().map(|s| s.position()).collect(),
+            Pending::None
+            | Pending::Collect(_)
+            | Pending::OffsetSide(_)
+            | Pending::MirrorAxis(_) => Vec::new(),
         }
     }
 
@@ -888,6 +928,15 @@ impl Editor {
                     self.status = format!("{e}");
                 }
                 self.refresh();
+            }
+            Pending::FitSpline(pts) if pts.len() >= 2 => {
+                self.checkpoint();
+                self.sketch.add_fit_spline(pts);
+                self.refresh();
+            }
+            Pending::Collect(es) if self.tool == Tool::Mirror && !es.is_empty() => {
+                self.pending = Pending::MirrorAxis(es);
+                self.status = "click the line to mirror across".into();
             }
             Pending::Collect(es) if self.tool == Tool::Offset && !es.is_empty() => {
                 self.pending = Pending::OffsetSide(es);
@@ -941,6 +990,21 @@ impl Editor {
                 }
                 Ok(())
             }
+            Tool::FitSpline => {
+                self.checkpoint();
+                let s = self.snap(p);
+                let pt = self.point_for(s)?;
+                match &mut self.pending {
+                    Pending::FitSpline(v) => v.push(pt),
+                    other => *other = Pending::FitSpline(vec![pt]),
+                }
+                Ok(())
+            }
+            Tool::Polygon => self.click_polygon(p),
+            Tool::Slot => self.click_slot(p),
+            Tool::Ellipse => self.click_ellipse(p),
+            Tool::Arc3 => self.click_three(p, true),
+            Tool::Circle3 => self.click_three(p, false),
             Tool::Dimension => self.click_dimension(p),
             Tool::Constrain(kind) => self.click_constraint(kind, p),
             Tool::Trim => {
@@ -962,6 +1026,9 @@ impl Editor {
                 Ok(())
             }
             Tool::Offset => self.click_offset(p),
+            Tool::Fillet => self.click_corner(p, true),
+            Tool::Chamfer => self.click_corner(p, false),
+            Tool::Mirror => self.click_mirror(p),
         }
     }
 
@@ -1092,6 +1159,581 @@ impl Editor {
                 Ok(())
             }
         }
+    }
+
+    // ------------------------------------------------------------ more drawing tools
+
+    /// Vertices of a regular `n`-gon around `c` with its first vertex at `v`.
+    pub fn polygon_vertices(c: P2, v: P2, n: usize) -> Vec<P2> {
+        let (r, a0) = (dist(c, v), (v.1 - c.1).atan2(v.0 - c.0));
+        (0..n)
+            .map(|i| {
+                let a = a0 + std::f64::consts::TAU * i as f64 / n as f64;
+                (c.0 + r * a.cos(), c.1 + r * a.sin())
+            })
+            .collect()
+    }
+
+    /// Centre and radius of the circle through three points (`None` when they are collinear).
+    pub fn circumcircle(a: P2, b: P2, c: P2) -> Option<(P2, f64)> {
+        let d = 2.0 * (a.0 * (b.1 - c.1) + b.0 * (c.1 - a.1) + c.0 * (a.1 - b.1));
+        if d.abs() < 1e-12 {
+            return None;
+        }
+        let (a2, b2, c2) = (
+            a.0 * a.0 + a.1 * a.1,
+            b.0 * b.0 + b.1 * b.1,
+            c.0 * c.0 + c.1 * c.1,
+        );
+        let ux = (a2 * (b.1 - c.1) + b2 * (c.1 - a.1) + c2 * (a.1 - b.1)) / d;
+        let uy = (a2 * (c.0 - b.0) + b2 * (a.0 - c.0) + c2 * (b.0 - a.0)) / d;
+        Some(((ux, uy), dist((ux, uy), a)))
+    }
+
+    /// Corner points of the slot between centres `c1` and `c2` with half-width `r`:
+    /// `(a1, a2, b1, b2)` where `a` is the left side of `c1 → c2`.
+    pub fn slot_corners(c1: P2, c2: P2, r: f64) -> Option<(P2, P2, P2, P2)> {
+        let (dx, dy) = (c2.0 - c1.0, c2.1 - c1.1);
+        let l = dx.hypot(dy);
+        if l < 1e-12 || r < 1e-12 {
+            return None;
+        }
+        let n = (-dy / l * r, dx / l * r);
+        Some((
+            (c1.0 + n.0, c1.1 + n.1),
+            (c2.0 + n.0, c2.1 + n.1),
+            (c1.0 - n.0, c1.1 - n.1),
+            (c2.0 - n.0, c2.1 - n.1),
+        ))
+    }
+
+    fn click_polygon(&mut self, p: P2) -> Result<(), SketchError> {
+        let s = self.snap(p);
+        match self.pending.clone() {
+            Pending::Polygon(centre) => {
+                let c = self.sketch.point(centre)?;
+                let v = s.position();
+                let n = self.polygon_sides.clamp(3, 64);
+                if dist(c, v) < 1e-9 {
+                    return Ok(());
+                }
+                self.checkpoint();
+                let verts = Self::polygon_vertices(c, v, n);
+                let pts: Vec<EntityId> = verts
+                    .iter()
+                    .map(|q| self.sketch.add_point(q.0, q.1))
+                    .collect();
+                let lines: Vec<EntityId> = (0..n)
+                    .map(|i| self.sketch.add_line(pts[i], pts[(i + 1) % n]))
+                    .collect();
+                // the circumscribed construction circle plus equal sides keep it a regular polygon
+                let circle = self.sketch.add_circle(centre, dist(c, v));
+                self.sketch.set_construction(circle, true);
+                for q in &pts {
+                    self.sketch.point_on(*q, circle)?;
+                }
+                for l in &lines[1..] {
+                    self.sketch.equal_length(lines[0], *l)?;
+                }
+                self.pending = Pending::None;
+                self.refresh_or_rollback();
+                Ok(())
+            }
+            _ => {
+                self.checkpoint();
+                let c = self.point_for(s)?;
+                self.pending = Pending::Polygon(c);
+                Ok(())
+            }
+        }
+    }
+
+    fn click_slot(&mut self, p: P2) -> Result<(), SketchError> {
+        let s = self.snap(p);
+        match self.pending.clone() {
+            Pending::Slot2(c1, c2) => {
+                let (a, b) = (self.sketch.point(c1)?, self.sketch.point(c2)?);
+                // half-width: distance of the click from the line through the centres
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let l = dx.hypot(dy);
+                let q = s.position();
+                let r = ((q.0 - a.0) * dy - (q.1 - a.1) * dx).abs() / l;
+                let Some((a1, a2, b1, b2)) = Self::slot_corners(a, b, r) else {
+                    return Ok(());
+                };
+                self.checkpoint();
+                let (pa1, pa2, pb1, pb2) = (
+                    self.sketch.add_point(a1.0, a1.1),
+                    self.sketch.add_point(a2.0, a2.1),
+                    self.sketch.add_point(b1.0, b1.1),
+                    self.sketch.add_point(b2.0, b2.1),
+                );
+                let side_a = self.sketch.add_line(pa1, pa2);
+                let side_b = self.sketch.add_line(pb1, pb2);
+                // counter-clockwise: the end at c1 runs a1 → b1 through the far side, the end at c2 b2 → a2
+                let end1 = self.sketch.add_arc(c1, pa1, pb1);
+                let end2 = self.sketch.add_arc(c2, pb2, pa2);
+                // tangent continuity at the four junctions (the end points are shared, so these add no
+                // redundancy: the slot has exactly its five degrees of freedom) and one radius
+                use crate::constraint::{Continuity::G1, CurveEnd::*};
+                self.sketch.joint(side_a, Start, end1, Start, G1)?;
+                self.sketch.joint(side_a, End, end2, End, G1)?;
+                self.sketch.joint(side_b, Start, end1, End, G1)?;
+                self.sketch.joint(side_b, End, end2, Start, G1)?;
+                self.sketch.equal_radius(end1, end2)?;
+                self.pending = Pending::None;
+                self.refresh_or_rollback();
+                Ok(())
+            }
+            Pending::Slot1(c1) => {
+                if dist(self.sketch.point(c1)?, s.position()) < 1e-9 {
+                    return Ok(());
+                }
+                let c2 = self.point_for(s)?;
+                self.pending = Pending::Slot2(c1, c2);
+                Ok(())
+            }
+            _ => {
+                self.checkpoint();
+                let c1 = self.point_for(s)?;
+                self.pending = Pending::Slot1(c1);
+                Ok(())
+            }
+        }
+    }
+
+    fn click_ellipse(&mut self, p: P2) -> Result<(), SketchError> {
+        let s = self.snap(p);
+        match self.pending.clone() {
+            Pending::Ellipse2(c, m) => {
+                let (a, b) = (self.sketch.point(c)?, self.sketch.point(m)?);
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let q = s.position();
+                let minor = ((q.0 - a.0) * dy - (q.1 - a.1) * dx).abs() / dx.hypot(dy);
+                if minor < 1e-9 {
+                    return Ok(());
+                }
+                self.checkpoint();
+                self.sketch.add_ellipse(c, m, minor);
+                self.pending = Pending::None;
+                self.refresh_or_rollback();
+                Ok(())
+            }
+            Pending::Ellipse1(c) => {
+                if dist(self.sketch.point(c)?, s.position()) < 1e-9 {
+                    return Ok(());
+                }
+                let m = self.point_for(s)?;
+                self.pending = Pending::Ellipse2(c, m);
+                Ok(())
+            }
+            _ => {
+                self.checkpoint();
+                let c = self.point_for(s)?;
+                self.pending = Pending::Ellipse1(c);
+                Ok(())
+            }
+        }
+    }
+
+    /// Three-point arc (`arc`) or circle: the first two clicks only remember where, the third makes the shape.
+    fn click_three(&mut self, p: P2, arc: bool) -> Result<(), SketchError> {
+        let s = self.snap(p);
+        let mut got = match std::mem::take(&mut self.pending) {
+            Pending::Three(v) => v,
+            _ => Vec::new(),
+        };
+        got.push(s);
+        if got.len() < 3 {
+            self.pending = Pending::Three(got);
+            return Ok(());
+        }
+        let (a, b, c) = (got[0].position(), got[1].position(), got[2].position());
+        let Some((centre, r)) = Self::circumcircle(a, b, c) else {
+            self.status = "the three points lie on one line".into();
+            return Ok(());
+        };
+        self.checkpoint();
+        let cp = self.sketch.add_point(centre.0, centre.1);
+        if arc {
+            // clicks: start, end, a point on the arc; the arc runs counter-clockwise start → end
+            let ccw = (c.0 - a.0) * (b.1 - c.1) - (c.1 - a.1) * (b.0 - c.0) > 0.0;
+            let (first, second) = if ccw { (0, 1) } else { (1, 0) };
+            let sp = self.point_for(got[first])?;
+            let ep = self.point_for(got[second])?;
+            self.sketch.add_arc(cp, sp, ep);
+        } else {
+            self.sketch.add_circle(cp, r);
+        }
+        self.refresh_or_rollback();
+        Ok(())
+    }
+
+    /// Outline of the shape the next click would complete, for a live preview: closed or open polylines.
+    pub fn preview(&self, p: P2) -> Vec<Vec<P2>> {
+        let q = self.snap(p).position();
+        let pt = |e: &EntityId| self.sketch.point(*e).ok();
+        let circle = |c: P2, r: f64| -> Vec<P2> {
+            (0..=64)
+                .map(|i| {
+                    let a = std::f64::consts::TAU * i as f64 / 64.0;
+                    (c.0 + r * a.cos(), c.1 + r * a.sin())
+                })
+                .collect()
+        };
+        match (&self.tool, &self.pending) {
+            (Tool::Rectangle, Pending::Rect(first)) => {
+                let a = first.position();
+                vec![vec![a, (q.0, a.1), q, (a.0, q.1), a]]
+            }
+            (Tool::Circle, Pending::Circle(c)) => pt(c)
+                .map(|c| vec![circle(c, dist(c, q))])
+                .unwrap_or_default(),
+            (Tool::Polygon, Pending::Polygon(c)) => pt(c)
+                .map(|c| {
+                    let mut v = Self::polygon_vertices(c, q, self.polygon_sides.clamp(3, 64));
+                    v.push(v[0]);
+                    vec![v]
+                })
+                .unwrap_or_default(),
+            (Tool::Slot, Pending::Slot2(c1, c2)) => {
+                let (Some(a), Some(b)) = (pt(c1), pt(c2)) else {
+                    return Vec::new();
+                };
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let l = dx.hypot(dy);
+                let r = ((q.0 - a.0) * dy - (q.1 - a.1) * dx).abs() / l.max(1e-12);
+                let Some((a1, a2, b1, b2)) = Self::slot_corners(a, b, r) else {
+                    return Vec::new();
+                };
+                let phi = dy.atan2(dx);
+                let half = |c: P2, from: f64| -> Vec<P2> {
+                    (0..=24)
+                        .map(|i| {
+                            let t = from + std::f64::consts::PI * i as f64 / 24.0;
+                            (c.0 + r * t.cos(), c.1 + r * t.sin())
+                        })
+                        .collect()
+                };
+                let mut outline = vec![a1, a2];
+                outline.extend(half(b, phi - std::f64::consts::FRAC_PI_2).into_iter().rev());
+                outline.extend([b2, b1]);
+                outline.extend(half(a, phi + std::f64::consts::FRAC_PI_2));
+                vec![outline]
+            }
+            (Tool::Ellipse, Pending::Ellipse2(c, m)) => {
+                let (Some(a), Some(b)) = (pt(c), pt(m)) else {
+                    return Vec::new();
+                };
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let major = dx.hypot(dy);
+                let minor = ((q.0 - a.0) * dy - (q.1 - a.1) * dx).abs() / major.max(1e-12);
+                let (cx, cy) = (dx / major.max(1e-12), dy / major.max(1e-12));
+                vec![(0..=64)
+                    .map(|i| {
+                        let t = std::f64::consts::TAU * i as f64 / 64.0;
+                        let (px, py) = (major * t.cos(), minor * t.sin());
+                        (a.0 + px * cx - py * cy, a.1 + px * cy + py * cx)
+                    })
+                    .collect()]
+            }
+            (Tool::Circle3, Pending::Three(v)) if v.len() == 2 => {
+                match Self::circumcircle(v[0].position(), v[1].position(), q) {
+                    Some((c, r)) => vec![circle(c, r)],
+                    None => Vec::new(),
+                }
+            }
+            (Tool::Arc3, Pending::Three(v)) if v.len() == 2 => {
+                let (a, b) = (v[0].position(), v[1].position());
+                let Some((c, r)) = Self::circumcircle(a, b, q) else {
+                    return Vec::new();
+                };
+                let ccw = (q.0 - a.0) * (b.1 - q.1) - (q.1 - a.1) * (b.0 - q.0) > 0.0;
+                let (s, e) = if ccw { (a, b) } else { (b, a) };
+                let a0 = (s.1 - c.1).atan2(s.0 - c.0);
+                let mut a1 = (e.1 - c.1).atan2(e.0 - c.0);
+                while a1 <= a0 {
+                    a1 += std::f64::consts::TAU;
+                }
+                vec![(0..=48)
+                    .map(|i| {
+                        let t = a0 + (a1 - a0) * i as f64 / 48.0;
+                        (c.0 + r * t.cos(), c.1 + r * t.sin())
+                    })
+                    .collect()]
+            }
+            (Tool::Arc3, Pending::Three(v)) if v.len() == 1 => vec![vec![v[0].position(), q]],
+            _ => Vec::new(),
+        }
+    }
+
+    // ------------------------------------------------------ fillet, chamfer and mirror
+
+    /// Round (`round`) or bevel the corner at the clicked point, where exactly two lines meet.
+    fn click_corner(&mut self, p: P2, round: bool) -> Result<(), SketchError> {
+        let Some(corner) = geom::pick(&self.sketch, p, self.tolerance)
+            .filter(|e| matches!(self.sketch.kind(*e), Ok(EntityKind::Point(_))))
+        else {
+            self.status = "click the point where two lines meet".into();
+            return Ok(());
+        };
+        let lines: Vec<(EntityId, bool)> = self
+            .sketch
+            .entities
+            .iter()
+            .filter_map(|(id, e)| match e.kind {
+                EntityKind::Line { p1, .. } if p1 == corner => Some((id, true)),
+                EntityKind::Line { p1: _, p2 } if p2 == corner => Some((id, false)),
+                _ => None,
+            })
+            .collect();
+        let uses = self
+            .sketch
+            .entities
+            .values()
+            .filter(|e| match &e.kind {
+                EntityKind::Line { .. } => false,
+                EntityKind::Circle { center, .. } => *center == corner,
+                EntityKind::Arc { center, start, end } => [*center, *start, *end].contains(&corner),
+                EntityKind::Ellipse {
+                    center, major_end, ..
+                } => *center == corner || *major_end == corner,
+                EntityKind::Spline { control, .. } => control.contains(&corner),
+                EntityKind::FitSpline { points } => {
+                    points.contains(
+                        &points
+                            .iter()
+                            .copied()
+                            .find(|q| *q == corner)
+                            .unwrap_or(corner),
+                    ) && points.contains(&corner)
+                }
+                EntityKind::Point(_) => false,
+            })
+            .count();
+        if lines.len() != 2 || uses != 0 {
+            self.status = "a corner needs exactly two lines meeting at the point".into();
+            return Ok(());
+        }
+        let c = self.sketch.point(corner)?;
+        // the far end of each line, and the unit vector from the corner along it
+        let far = |l: EntityId, corner_is_p1: bool| -> Result<P2, SketchError> {
+            let (a, b) = self.sketch.line_points(l)?;
+            self.sketch.point(if corner_is_p1 { b } else { a })
+        };
+        let (a, b) = (far(lines[0].0, lines[0].1)?, far(lines[1].0, lines[1].1)?);
+        let (la, lb) = (dist(c, a), dist(c, b));
+        let (u1, u2) = (
+            ((a.0 - c.0) / la, (a.1 - c.1) / la),
+            ((b.0 - c.0) / lb, (b.1 - c.1) / lb),
+        );
+        let cos = (u1.0 * u2.0 + u1.1 * u2.1).clamp(-1.0, 1.0);
+        let theta = cos.acos();
+        if theta < 1e-6 || theta > std::f64::consts::PI - 1e-6 {
+            self.status = "the two lines are parallel, there is no corner".into();
+            return Ok(());
+        }
+        let size = self.corner_size;
+        // distance from the corner to the points where the new curve meets the lines
+        let t = if round {
+            size / (theta / 2.0).tan()
+        } else {
+            size
+        };
+        if size <= 1e-9 || t >= la.min(lb) - 1e-9 {
+            self.status = "the corner size is too big for these lines".into();
+            return Ok(());
+        }
+        let t1 = (c.0 + u1.0 * t, c.1 + u1.1 * t);
+        let t2 = (c.0 + u2.0 * t, c.1 + u2.1 * t);
+        self.checkpoint();
+        let (pt1, pt2) = (
+            self.sketch.add_point(t1.0, t1.1),
+            self.sketch.add_point(t2.0, t2.1),
+        );
+        // the lines now end at the new points; the corner point (and constraints on it) goes
+        for ((l, corner_is_p1), np) in lines.iter().zip([pt1, pt2]) {
+            if let Some(e) = self.sketch.entities.get_mut(*l) {
+                if let EntityKind::Line { p1, p2 } = &mut e.kind {
+                    if *corner_is_p1 {
+                        *p1 = np;
+                    } else {
+                        *p2 = np;
+                    }
+                }
+            }
+        }
+        self.sketch.touch();
+        self.sketch.remove_entity(corner);
+        let end_of = |sk: &Sketch, l: EntityId, np: EntityId| -> crate::constraint::CurveEnd {
+            match sk.line_points(l) {
+                Ok((a, _)) if a == np => crate::constraint::CurveEnd::Start,
+                _ => crate::constraint::CurveEnd::End,
+            }
+        };
+        if round {
+            let bis = (u1.0 + u2.0, u1.1 + u2.1);
+            let bl = bis.0.hypot(bis.1);
+            let d = size / (theta / 2.0).sin();
+            let centre = (c.0 + bis.0 / bl * d, c.1 + bis.1 / bl * d);
+            let cp = self.sketch.add_point(centre.0, centre.1);
+            let ccw =
+                (t1.0 - centre.0) * (t2.1 - centre.1) - (t1.1 - centre.1) * (t2.0 - centre.0) > 0.0;
+            let (s, e) = if ccw { (pt1, pt2) } else { (pt2, pt1) };
+            let arc = self.sketch.add_arc(cp, s, e);
+            use crate::constraint::{Continuity::G1, CurveEnd};
+            for ((l, _), np) in lines.iter().zip([pt1, pt2]) {
+                let arc_end = if np == s {
+                    CurveEnd::Start
+                } else {
+                    CurveEnd::End
+                };
+                self.sketch
+                    .joint(*l, end_of(&self.sketch, *l, np), arc, arc_end, G1)?;
+            }
+        } else {
+            self.sketch.add_line(pt1, pt2);
+        }
+        self.refresh_or_rollback();
+        Ok(())
+    }
+
+    /// Reflection of `p` in the line through `a` and `b`.
+    pub fn reflect(p: P2, a: P2, b: P2) -> P2 {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let l2 = dx * dx + dy * dy;
+        let t = ((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2;
+        let foot = (a.0 + t * dx, a.1 + t * dy);
+        (2.0 * foot.0 - p.0, 2.0 * foot.1 - p.1)
+    }
+
+    fn click_mirror(&mut self, p: P2) -> Result<(), SketchError> {
+        let Pending::MirrorAxis(es) = self.pending.clone() else {
+            // collecting the entities to mirror
+            let Some(e) = geom::pick(&self.sketch, p, self.tolerance) else {
+                return Ok(());
+            };
+            let mut v = match std::mem::take(&mut self.pending) {
+                Pending::Collect(v) => v,
+                _ => Vec::new(),
+            };
+            if let Some(i) = v.iter().position(|x| *x == e) {
+                v.remove(i);
+            } else {
+                v.push(e);
+            }
+            self.selection = v.clone();
+            self.pending = Pending::Collect(v);
+            self.status = "pick more, then press Enter and click the mirror line".into();
+            return Ok(());
+        };
+        let Some(axis) = geom::pick(&self.sketch, p, self.tolerance)
+            .filter(|e| matches!(self.sketch.kind(*e), Ok(EntityKind::Line { .. })))
+        else {
+            self.status = "click a line to mirror across".into();
+            return Ok(());
+        };
+        let (ap, bp) = self.sketch.line_points(axis)?;
+        let (a, b) = (self.sketch.point(ap)?, self.sketch.point(bp)?);
+        if dist(a, b) < 1e-9 {
+            return Ok(());
+        }
+        let es: Vec<EntityId> = es.into_iter().filter(|e| *e != axis).collect();
+        self.checkpoint();
+        let mut map: std::collections::HashMap<EntityId, EntityId> = Default::default();
+        let mut pairs: Vec<(EntityId, EntityId)> = Vec::new();
+        for e in &es {
+            self.mirror_entity(*e, a, b, &mut map, &mut pairs)?;
+        }
+        // every mirrored point is symmetric to its original about the axis line
+        for (orig, copy) in pairs {
+            if orig != copy {
+                self.sketch.symmetric(orig, copy, axis)?;
+            }
+        }
+        self.pending = Pending::None;
+        self.selection.clear();
+        self.refresh_or_rollback();
+        Ok(())
+    }
+
+    fn mirror_point(
+        &mut self,
+        pt: EntityId,
+        a: P2,
+        b: P2,
+        map: &mut std::collections::HashMap<EntityId, EntityId>,
+        pairs: &mut Vec<(EntityId, EntityId)>,
+    ) -> Result<EntityId, SketchError> {
+        if let Some(m) = map.get(&pt) {
+            return Ok(*m);
+        }
+        let q = Self::reflect(self.sketch.point(pt)?, a, b);
+        let n = self.sketch.add_point(q.0, q.1);
+        map.insert(pt, n);
+        pairs.push((pt, n));
+        Ok(n)
+    }
+
+    fn mirror_entity(
+        &mut self,
+        e: EntityId,
+        a: P2,
+        b: P2,
+        map: &mut std::collections::HashMap<EntityId, EntityId>,
+        pairs: &mut Vec<(EntityId, EntityId)>,
+    ) -> Result<(), SketchError> {
+        match self.sketch.kind(e)?.clone() {
+            EntityKind::Point(_) => {
+                self.mirror_point(e, a, b, map, pairs)?;
+            }
+            EntityKind::Line { p1, p2 } => {
+                let (q1, q2) = (
+                    self.mirror_point(p1, a, b, map, pairs)?,
+                    self.mirror_point(p2, a, b, map, pairs)?,
+                );
+                self.sketch.add_line(q1, q2);
+            }
+            EntityKind::Circle { center, radius } => {
+                let c = self.mirror_point(center, a, b, map, pairs)?;
+                let r = self.sketch.value(radius);
+                self.sketch.add_circle(c, r);
+            }
+            EntityKind::Arc { center, start, end } => {
+                let c = self.mirror_point(center, a, b, map, pairs)?;
+                let (s, en) = (
+                    self.mirror_point(start, a, b, map, pairs)?,
+                    self.mirror_point(end, a, b, map, pairs)?,
+                );
+                // a reflection reverses the sense of rotation: the arc now runs from the image of its end
+                self.sketch.add_arc(c, en, s);
+            }
+            EntityKind::Ellipse {
+                center,
+                major_end,
+                minor_radius,
+            } => {
+                let c = self.mirror_point(center, a, b, map, pairs)?;
+                let m = self.mirror_point(major_end, a, b, map, pairs)?;
+                let minor = self.sketch.value(minor_radius);
+                self.sketch.add_ellipse(c, m, minor);
+            }
+            EntityKind::Spline { degree, control } => {
+                let pts = control
+                    .iter()
+                    .map(|q| self.mirror_point(*q, a, b, map, pairs))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.sketch.add_spline(degree, pts)?;
+            }
+            EntityKind::FitSpline { points } => {
+                let pts = points
+                    .iter()
+                    .map(|q| self.mirror_point(*q, a, b, map, pairs))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.sketch.add_fit_spline(pts);
+            }
+        }
+        Ok(())
     }
 
     fn pick_curve_or_point(&self, p: P2) -> Option<EntityId> {

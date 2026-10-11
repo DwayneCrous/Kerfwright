@@ -55,6 +55,11 @@ impl DesignWorkspace {
             .features
             .iter()
             .any(|f| matches!(f.spec, FeatureSpec::Sketch(_)));
+        let doc_sketch_count = doc
+            .features
+            .iter()
+            .filter(|f| matches!(f.spec, FeatureSpec::Sketch(_)))
+            .count();
         let has_solid = project.evaluation().final_solid().is_some();
         let has_tool_feature = doc.features.iter().any(|f| {
             matches!(
@@ -253,7 +258,100 @@ impl DesignWorkspace {
                 self.params_open = !self.params_open;
             }
         });
+        rb::group(ui, "MORE", |ui| {
+            let sketches = doc_sketch_count;
+            let join = if has_solid { BodyOp::Join } else { BodyOp::New };
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                let small = |ui: &mut egui::Ui, label: &str, enabled: bool, tip: &str| {
+                    ui.add_enabled(
+                        enabled,
+                        egui::Button::new(egui::RichText::new(label).size(10.5)),
+                    )
+                    .on_hover_text(tip)
+                    .clicked()
+                };
+                ui.horizontal(|ui| {
+                    if small(
+                        ui,
+                        "Loft",
+                        sketches >= 2,
+                        "Blend between two or more profile sketches",
+                    ) {
+                        act.push(Action::Open(Tool::Loft {
+                            sketches: vec![None, None],
+                            op: join,
+                        }));
+                    }
+                    if small(
+                        ui,
+                        "Sweep",
+                        sketches >= 2,
+                        "Sweep a profile sketch along a path sketch",
+                    ) {
+                        act.push(Action::Open(Tool::Sweep {
+                            profile: None,
+                            path: None,
+                            op: join,
+                        }));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if small(
+                        ui,
+                        "Draft",
+                        has_solid,
+                        "Tilt faces for moulding or casting (click faces)",
+                    ) {
+                        act.push(Action::Open(Tool::Draft {
+                            angle: "3 deg".into(),
+                            axis: 2,
+                            position: "0 mm".into(),
+                        }));
+                    }
+                    if small(
+                        ui,
+                        "Offset body",
+                        has_solid,
+                        "Grow or shrink the whole body",
+                    ) {
+                        act.push(Action::Open(Tool::Offset {
+                            distance: "1 mm".into(),
+                        }));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if small(
+                        ui,
+                        "Var. fillet",
+                        has_solid,
+                        "Fillet whose radius changes along one edge",
+                    ) {
+                        act.push(Action::Open(Tool::VariableFillet {
+                            start: "1 mm".into(),
+                            end: "3 mm".into(),
+                        }));
+                    }
+                });
+            });
+        });
         rb::group(ui, "CONSTRUCT", |ui| {
+            if rb::button(
+                ui,
+                Icon::Plane,
+                "Plane",
+                true,
+                false,
+                "Construction plane: an origin plane moved and tilted",
+            )
+            .clicked()
+            {
+                act.push(Action::Open(Tool::ConstructionPlane {
+                    base: 0,
+                    offset: "10 mm".into(),
+                    tilt: "0 deg".into(),
+                }));
+            }
             let any = self.plane_visible.iter().any(|v| *v);
             if rb::button(
                 ui,
@@ -269,7 +367,19 @@ impl DesignWorkspace {
             }
         });
         rb::group(ui, "INSPECT", |ui| {
-            rb::button(ui, Icon::Measure, "Measure", false, false, "Not built yet");
+            if rb::button(
+                ui,
+                Icon::Measure,
+                "Measure",
+                has_solid,
+                self.measure_open,
+                "Distances, angles, areas, mass and centre of mass",
+            )
+            .clicked()
+            {
+                self.measure_open = !self.measure_open;
+                self.model.picks.clear();
+            }
         });
         rb::group(ui, "SELECT", |ui| {
             rb::button(
@@ -287,6 +397,8 @@ impl DesignWorkspace {
     fn sketch_tab(&mut self, ui: &mut egui::Ui) {
         let cur = self.sketch.app.editor.tool;
         let set: std::cell::Cell<Option<SkTool>> = std::cell::Cell::new(None);
+        let poly_sides = std::cell::Cell::new(self.sketch.app.editor.polygon_sides);
+        let corner = std::cell::Cell::new(self.sketch.app.editor.corner_size);
         let mut finish = false;
         let mut cancel = false;
         let tool_btn = |ui: &mut egui::Ui, icon: Icon, label: &str, tool: SkTool, tip: &str| {
@@ -314,10 +426,112 @@ impl DesignWorkspace {
             );
             tool_btn(ui, Icon::Point, "Point", SkTool::Point, "Point (P)");
         });
+        rb::group(ui, "SHAPES", |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                let more: [(&str, SkTool, &str); 6] = [
+                    (
+                        "Polygon",
+                        SkTool::Polygon,
+                        "Regular polygon (G): click the centre, then a vertex",
+                    ),
+                    (
+                        "Slot",
+                        SkTool::Slot,
+                        "Slot (U): two centres, then the width",
+                    ),
+                    (
+                        "Ellipse",
+                        SkTool::Ellipse,
+                        "Ellipse (H): centre, major axis end, minor axis point",
+                    ),
+                    (
+                        "3-pt arc",
+                        SkTool::Arc3,
+                        "Arc through three points (W): start, end, a point on it",
+                    ),
+                    (
+                        "3-pt circle",
+                        SkTool::Circle3,
+                        "Circle through three points (X)",
+                    ),
+                    (
+                        "Fit spline",
+                        SkTool::FitSpline,
+                        "Spline through its points (K); double-click or Enter to finish",
+                    ),
+                ];
+                for chunk in more.chunks(3) {
+                    ui.horizontal(|ui| {
+                        for (name, t, tip) in chunk {
+                            if ui
+                                .add(
+                                    egui::Button::new(egui::RichText::new(*name).size(10.5))
+                                        .selected(cur == *t),
+                                )
+                                .on_hover_text(*tip)
+                                .clicked()
+                            {
+                                set.set(Some(*t));
+                            }
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("sides").size(10.5));
+                    let mut n = poly_sides.get();
+                    if ui.add(egui::DragValue::new(&mut n).range(3..=64)).changed() {
+                        poly_sides.set(n);
+                    }
+                });
+            });
+        });
         rb::group(ui, "MODIFY", |ui| {
             tool_btn(ui, Icon::Trim, "Trim", SkTool::Trim, "Trim (T)");
             tool_btn(ui, Icon::Extend, "Extend", SkTool::Extend, "Extend (E)");
             tool_btn(ui, Icon::Offset, "Offset", SkTool::Offset, "Offset (O)");
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                let more: [(&str, SkTool, &str); 3] = [
+                    (
+                        "Fillet",
+                        SkTool::Fillet,
+                        "Round a corner (J): click the point where two lines meet",
+                    ),
+                    (
+                        "Chamfer",
+                        SkTool::Chamfer,
+                        "Bevel a corner (B): click the point where two lines meet",
+                    ),
+                    (
+                        "Mirror",
+                        SkTool::Mirror,
+                        "Mirror (M): click the entities, press Enter, click the mirror line",
+                    ),
+                ];
+                for (name, t, tip) in more {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(name).size(10.5))
+                                .selected(cur == t),
+                        )
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        set.set(Some(t));
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("size").size(10.5));
+                    let mut n = corner.get();
+                    if ui
+                        .add(egui::DragValue::new(&mut n).speed(0.1).range(1e-6..=1e6))
+                        .changed()
+                    {
+                        corner.set(n);
+                    }
+                });
+            });
         });
         rb::group(ui, "CONSTRAINTS", |ui| {
             tool_btn(
@@ -378,6 +592,8 @@ impl DesignWorkspace {
                 cancel = true;
             }
         });
+        self.sketch.app.editor.polygon_sides = poly_sides.get();
+        self.sketch.app.editor.corner_size = corner.get();
         if let Some(t) = set.get() {
             self.sketch.app.editor.set_tool(t);
         }

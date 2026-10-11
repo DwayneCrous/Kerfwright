@@ -8,9 +8,10 @@ use eframe::egui;
 use kw_brep::BRep;
 use kw_expr::{Dim, Param};
 use kw_feature::{
-    AxisSpec, BodyOp, ChamferSpec, CircularPatternSpec, CombineSpec, Document, EdgeRef,
-    ExtrudeSpec, FeatureId, FeatureSpec, FilletSpec, HoleKind, HoleSpec, LinearPatternSpec,
-    MirrorPlane, MirrorSpec, NameMap, PlaneSpec, RevolveSpec, ShellSpec,
+    AxisSpec, BodyOp, ChamferSpec, CircularPatternSpec, CombineSpec, DatumPlaneSpec, Document,
+    DraftSpec, EdgeRef, ExtrudeSpec, FeatureId, FeatureSpec, FilletSpec, HoleKind, HoleSpec,
+    LinearPatternSpec, LoftSpec, MirrorPlane, MirrorSpec, NameMap, OffsetSpec, PlaneSpec,
+    RevolveSpec, ShellSpec, SweepSpec,
 };
 use std::sync::Arc;
 
@@ -32,6 +33,12 @@ pub enum Tool {
         op: BodyOp,
         symmetric: bool,
         flip: bool,
+        /// Through all of the body (the distance is ignored).
+        through_all: bool,
+        /// Distance on the other side of the sketch plane; empty = none.
+        second: String,
+        /// Taper angle; empty = none.
+        taper: String,
     },
     Revolve {
         sketch: Option<FeatureId>,
@@ -49,6 +56,8 @@ pub enum Tool {
         cb_depth: String,
         cs_diameter: String,
         cs_angle: String,
+        /// Drill through the whole body (the depth is ignored).
+        through_all: bool,
     },
     Fillet {
         radius: String,
@@ -56,6 +65,11 @@ pub enum Tool {
     Chamfer {
         d1: String,
         d2: String,
+    },
+    /// Fillet whose radius changes linearly along one picked edge.
+    VariableFillet {
+        start: String,
+        end: String,
     },
     Shell {
         thickness: String,
@@ -81,6 +95,33 @@ pub enum Tool {
         target: Option<FeatureId>,
         tool: Option<FeatureId>,
         op: BodyOp,
+    },
+    /// Blend between two or more profile sketches, in order.
+    Loft {
+        sketches: Vec<Option<FeatureId>>,
+        op: BodyOp,
+    },
+    /// A profile sketch swept along the first line, arc or spline of a path sketch.
+    Sweep {
+        profile: Option<FeatureId>,
+        path: Option<FeatureId>,
+        op: BodyOp,
+    },
+    /// Tilt the picked faces about the neutral plane `axis = position`; `axis` is the pull direction.
+    Draft {
+        angle: String,
+        axis: u8,
+        position: String,
+    },
+    /// Grow (positive) or shrink the whole body.
+    Offset {
+        distance: String,
+    },
+    /// A construction plane: an origin plane moved along its normal and tilted about its x axis.
+    ConstructionPlane {
+        base: u8,
+        offset: String,
+        tilt: String,
     },
 }
 
@@ -178,6 +219,9 @@ impl Tool {
             op,
             symmetric: false,
             flip: false,
+            through_all: false,
+            second: String::new(),
+            taper: String::new(),
         }
     }
 
@@ -188,11 +232,17 @@ impl Tool {
             Tool::Hole { .. } => "HOLE",
             Tool::Fillet { .. } => "FILLET",
             Tool::Chamfer { .. } => "CHAMFER",
+            Tool::VariableFillet { .. } => "VARIABLE FILLET",
             Tool::Shell { .. } => "SHELL",
             Tool::Pattern { .. } => "RECTANGULAR PATTERN",
             Tool::CircularPattern { .. } => "CIRCULAR PATTERN",
             Tool::Mirror { .. } => "MIRROR",
             Tool::Combine { .. } => "COMBINE",
+            Tool::Loft { .. } => "LOFT",
+            Tool::Sweep { .. } => "SWEEP",
+            Tool::Draft { .. } => "DRAFT",
+            Tool::Offset { .. } => "OFFSET BODY",
+            Tool::ConstructionPlane { .. } => "CONSTRUCTION PLANE",
         }
     }
 
@@ -204,20 +254,32 @@ impl Tool {
             Tool::Hole { .. } => "Hole",
             Tool::Fillet { .. } => "Fillet",
             Tool::Chamfer { .. } => "Chamfer",
+            Tool::VariableFillet { .. } => "Variable Fillet",
             Tool::Shell { .. } => "Shell",
             Tool::Pattern { .. } => "Pattern",
             Tool::CircularPattern { .. } => "Circular Pattern",
             Tool::Mirror { .. } => "Mirror",
             Tool::Combine { .. } => "Combine",
+            Tool::Loft { .. } => "Loft",
+            Tool::Sweep { .. } => "Sweep",
+            Tool::Draft { .. } => "Draft",
+            Tool::Offset { .. } => "Offset",
+            Tool::ConstructionPlane { .. } => "Plane",
         }
     }
 
     /// Does this tool take faces or edges from the viewport?
     pub fn picks_edges(&self) -> bool {
-        matches!(self, Tool::Fillet { .. } | Tool::Chamfer { .. })
+        matches!(
+            self,
+            Tool::Fillet { .. } | Tool::Chamfer { .. } | Tool::VariableFillet { .. }
+        )
     }
     pub fn picks_faces(&self) -> bool {
-        matches!(self, Tool::Shell { .. } | Tool::Hole { .. })
+        matches!(
+            self,
+            Tool::Shell { .. } | Tool::Hole { .. } | Tool::Draft { .. }
+        )
     }
 
     /// The dialog that edits an existing feature (`None` for kinds without one).
@@ -229,6 +291,14 @@ impl Tool {
                 op: x.op,
                 symmetric: x.symmetric,
                 flip: x.flip,
+                through_all: x.extent.through_all,
+                second: x
+                    .extent
+                    .second_side
+                    .as_ref()
+                    .map(param_text)
+                    .unwrap_or_default(),
+                taper: x.extent.taper.as_ref().map(param_text).unwrap_or_default(),
             },
             FeatureSpec::Revolve(x) => Tool::Revolve {
                 sketch: Some(x.sketch),
@@ -242,6 +312,10 @@ impl Tool {
             FeatureSpec::Chamfer(x) => Tool::Chamfer {
                 d1: param_text(&x.d1),
                 d2: param_text(&x.d2),
+            },
+            FeatureSpec::VariableFillet(x) => Tool::VariableFillet {
+                start: param_text(&x.start),
+                end: param_text(&x.end),
             },
             FeatureSpec::Shell(x) => Tool::Shell {
                 thickness: param_text(&x.thickness),
@@ -280,6 +354,37 @@ impl Tool {
                 target: Some(x.target),
                 tool: Some(x.tool),
                 op: x.op,
+            },
+            FeatureSpec::Loft(x) => Tool::Loft {
+                sketches: x.sketches.iter().map(|s| Some(*s)).collect(),
+                op: x.op,
+            },
+            FeatureSpec::Sweep(x) => Tool::Sweep {
+                profile: Some(x.profile),
+                path: Some(x.path),
+                op: x.op,
+            },
+            FeatureSpec::Draft(x) => {
+                let axis = (0..3)
+                    .max_by(|a, b| x.pull[*a].abs().total_cmp(&x.pull[*b].abs()))
+                    .unwrap_or(2) as u8;
+                Tool::Draft {
+                    angle: param_text(&x.angle),
+                    axis,
+                    position: param_text(&x.neutral_origin[axis as usize]),
+                }
+            }
+            FeatureSpec::Offset(x) => Tool::Offset {
+                distance: param_text(&x.distance),
+            },
+            FeatureSpec::DatumPlane(x) => Tool::ConstructionPlane {
+                base: match x.base {
+                    PlaneSpec::Yz(_) => 1,
+                    PlaneSpec::Xz(_) => 2,
+                    _ => 0,
+                },
+                offset: param_text(&x.offset),
+                tilt: param_text(&x.tilt),
             },
             FeatureSpec::Hole(x) => {
                 let (kind, d, cbd, cbh, csd, csa) = match &x.kind {
@@ -331,6 +436,7 @@ impl Tool {
                     cb_depth: cbh,
                     cs_diameter: csd,
                     cs_angle: csa,
+                    through_all: x.through_all,
                 }
             }
             _ => return None,
@@ -348,6 +454,7 @@ impl Tool {
             cb_depth: "3 mm".into(),
             cs_diameter: "12 mm".into(),
             cs_angle: "90 deg".into(),
+            through_all: false,
         }
     }
 
@@ -386,18 +493,38 @@ impl Tool {
                 op,
                 symmetric,
                 flip,
+                through_all,
+                second,
+                taper,
             } => {
                 let base = match orig {
                     Some(FeatureSpec::Extrude(o)) => o.base,
                     _ => None,
                 };
+                let opt = |t: &str, dim| -> Result<Option<kw_expr::Param>, String> {
+                    if t.trim().is_empty() {
+                        Ok(None)
+                    } else {
+                        parse_param(t, dim).map(Some)
+                    }
+                };
                 FeatureSpec::Extrude(ExtrudeSpec {
                     sketch: need(sketch, "a sketch")?,
-                    depth: len(depth)?,
+                    depth: if *through_all {
+                        // not used: the tool is as long as the body needs
+                        len("1 mm")?
+                    } else {
+                        len(depth)?
+                    },
                     symmetric: *symmetric,
                     flip: *flip,
                     op: *op,
                     base,
+                    extent: kw_feature::ExtrudeExtent {
+                        through_all: *through_all,
+                        second_side: opt(second, Dim::LENGTH)?,
+                        taper: opt(taper, Dim::ANGLE)?,
+                    },
                 })
             }
             Tool::Revolve {
@@ -442,6 +569,24 @@ impl Tool {
                     base: None,
                 })
             }
+            Tool::VariableFillet { start, end } => {
+                let edge = match orig {
+                    Some(FeatureSpec::VariableFillet(o)) if ctx.picks.is_empty() => o.edge.clone(),
+                    _ => {
+                        let mut e = edge_refs(ctx)?;
+                        if e.len() != 1 {
+                            return Err("a variable fillet takes exactly one edge".into());
+                        }
+                        e.remove(0)
+                    }
+                };
+                FeatureSpec::VariableFillet(kw_feature::VariableFilletSpec {
+                    edge,
+                    start: len(start)?,
+                    end: len(end)?,
+                    base: None,
+                })
+            }
             Tool::Shell { thickness } => {
                 let open = match orig {
                     Some(FeatureSpec::Shell(o)) if ctx.picks.is_empty() => o.open.clone(),
@@ -463,6 +608,7 @@ impl Tool {
                 cb_depth,
                 cs_diameter,
                 cs_angle,
+                through_all,
             } => {
                 let plane = match (orig, &ctx.hole_plane) {
                     (_, Some(p)) => p.clone(),
@@ -489,6 +635,7 @@ impl Tool {
                     kind,
                     depth: len(depth)?,
                     base: None,
+                    through_all: *through_all,
                 })
             }
             Tool::Pattern {
@@ -537,6 +684,61 @@ impl Tool {
                 tool: need(tool, "a tool")?,
                 op: *op,
             }),
+            Tool::Loft { sketches, op } => {
+                let picked: Vec<FeatureId> = sketches.iter().flatten().copied().collect();
+                if picked.len() < 2 {
+                    return Err("a loft needs at least two profile sketches".into());
+                }
+                FeatureSpec::Loft(LoftSpec {
+                    sketches: picked,
+                    op: *op,
+                    base: None,
+                })
+            }
+            Tool::Sweep { profile, path, op } => FeatureSpec::Sweep(SweepSpec {
+                profile: need(profile, "a profile sketch")?,
+                path: need(path, "a path sketch")?,
+                op: *op,
+                base: None,
+            }),
+            Tool::Draft {
+                angle,
+                axis,
+                position,
+            } => {
+                let faces = match orig {
+                    Some(FeatureSpec::Draft(o)) if ctx.picks.is_empty() => o.faces.clone(),
+                    _ => face_refs(ctx)?,
+                };
+                let axis = (*axis as usize).min(2);
+                let mut pull = [0.0; 3];
+                pull[axis] = 1.0;
+                let mut origin = [Param::length(0.0), Param::length(0.0), Param::length(0.0)];
+                origin[axis] = len(position)?;
+                FeatureSpec::Draft(DraftSpec {
+                    faces,
+                    neutral_origin: origin,
+                    pull,
+                    angle: ang(angle)?,
+                    base: None,
+                })
+            }
+            Tool::Offset { distance } => FeatureSpec::Offset(OffsetSpec {
+                distance: len(distance)?,
+                base: None,
+            }),
+            Tool::ConstructionPlane { base, offset, tilt } => {
+                let zero = Param::length(0.0);
+                FeatureSpec::DatumPlane(DatumPlaneSpec {
+                    base: match base {
+                        1 => PlaneSpec::Yz(zero),
+                        2 => PlaneSpec::Xz(zero),
+                        _ => PlaneSpec::Xy(zero),
+                    },
+                    offset: len(offset)?,
+                    tilt: ang(tilt)?,
+                })
+            }
         })
     }
 
@@ -550,13 +752,26 @@ impl Tool {
                 op,
                 symmetric,
                 flip,
+                through_all,
+                second,
+                taper,
             } => {
                 feature_combo(ui, "ex_sk", "Profile", doc, sketch, is_sketch);
+                row(ui, "Extent", |ui| {
+                    ui.selectable_value(through_all, false, "Distance");
+                    ui.selectable_value(through_all, true, "Through all");
+                });
                 row(ui, "Direction", |ui| {
                     ui.selectable_value(symmetric, false, "One side");
                     ui.selectable_value(symmetric, true, "Symmetric");
                 });
-                text_field(ui, "Distance", depth);
+                if !*through_all {
+                    text_field(ui, "Distance", depth);
+                }
+                if !*symmetric {
+                    text_field(ui, "Second side", second);
+                }
+                text_field(ui, "Taper angle", taper);
                 row(ui, "", |ui| {
                     ui.checkbox(flip, "Flip direction");
                 });
@@ -586,6 +801,7 @@ impl Tool {
                 cb_depth,
                 cs_diameter,
                 cs_angle,
+                through_all,
             } => {
                 row(ui, "Placement", |ui| {
                     ui.label(if picks.iter().any(|p| matches!(p, Pick::Face(_))) {
@@ -602,7 +818,13 @@ impl Tool {
                     ui.selectable_value(kind, 2, "Countersink");
                 });
                 text_field(ui, "Diameter", diameter);
-                text_field(ui, "Depth", depth);
+                row(ui, "Extent", |ui| {
+                    ui.selectable_value(through_all, false, "Depth");
+                    ui.selectable_value(through_all, true, "Through all");
+                });
+                if !*through_all {
+                    text_field(ui, "Depth", depth);
+                }
                 if *kind == 1 {
                     text_field(ui, "CB diameter", cb_diameter);
                     text_field(ui, "CB depth", cb_depth);
@@ -631,6 +853,19 @@ impl Tool {
                 });
                 text_field(ui, "Distance 1", d1);
                 text_field(ui, "Distance 2", d2);
+            }
+            Tool::VariableFillet { start, end } => {
+                let n = picks.iter().filter(|p| matches!(p, Pick::Edge(_))).count();
+                row(ui, "Edge", |ui| {
+                    ui.label(format!("{n} selected"));
+                });
+                text_field(ui, "Start radius", start);
+                text_field(ui, "End radius", end);
+                ui.label(
+                    egui::RichText::new("Click one edge; the radius changes along it.")
+                        .color(TEXT_WEAK)
+                        .size(10.5),
+                );
             }
             Tool::Shell { thickness } => {
                 let n = picks.iter().filter(|p| matches!(p, Pick::Face(_))).count();
@@ -688,6 +923,94 @@ impl Tool {
                     is_tool_feature(s) || matches!(s, FeatureSpec::Combine(_))
                 });
                 op_combo(ui, "cb_op", op);
+            }
+            Tool::Loft { sketches, op } => {
+                let mut remove = None;
+                for (i, s) in sketches.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        feature_combo(
+                            ui,
+                            &format!("lf_{i}"),
+                            &format!("Profile {}", i + 1),
+                            doc,
+                            s,
+                            is_sketch,
+                        );
+                        if i >= 2
+                            && ui
+                                .small_button("x")
+                                .on_hover_text("Remove this profile")
+                                .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    sketches.remove(i);
+                }
+                row(ui, "", |ui| {
+                    if ui.small_button("+ Add profile").clicked() {
+                        sketches.push(None);
+                    }
+                });
+                op_combo(ui, "lf_op", op);
+                ui.label(
+                    egui::RichText::new("Profiles are blended in the order listed.")
+                        .color(TEXT_WEAK)
+                        .size(10.5),
+                );
+            }
+            Tool::Sweep { profile, path, op } => {
+                feature_combo(ui, "sw_p", "Profile", doc, profile, is_sketch);
+                feature_combo(ui, "sw_w", "Path", doc, path, is_sketch);
+                op_combo(ui, "sw_op", op);
+                ui.label(
+                    egui::RichText::new("The path is the first line, arc or spline of its sketch.")
+                        .color(TEXT_WEAK)
+                        .size(10.5),
+                );
+            }
+            Tool::Draft {
+                angle,
+                axis,
+                position,
+            } => {
+                let n = picks.iter().filter(|p| matches!(p, Pick::Face(_))).count();
+                row(ui, "Faces", |ui| {
+                    ui.label(format!("{n} selected"));
+                });
+                row(ui, "Pull direction", |ui| {
+                    ui.selectable_value(axis, 0, "X");
+                    ui.selectable_value(axis, 1, "Y");
+                    ui.selectable_value(axis, 2, "Z");
+                });
+                text_field(ui, "Neutral plane", position);
+                text_field(ui, "Angle", angle);
+                ui.label(
+                    egui::RichText::new(
+                        "Click the faces to tilt (Shift adds). The neutral plane stays put.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Offset { distance } => {
+                text_field(ui, "Distance", distance);
+                ui.label(
+                    egui::RichText::new("Positive grows the body, negative shrinks it.")
+                        .color(TEXT_WEAK)
+                        .size(10.5),
+                );
+            }
+            Tool::ConstructionPlane { base, offset, tilt } => {
+                row(ui, "Based on", |ui| {
+                    ui.selectable_value(base, 0, "XY");
+                    ui.selectable_value(base, 1, "YZ");
+                    ui.selectable_value(base, 2, "XZ");
+                });
+                text_field(ui, "Offset", offset);
+                text_field(ui, "Angle", tilt);
             }
         }
         *self != before

@@ -48,8 +48,25 @@ pub struct DatumPlaneSpec {
     pub tilt: Param,
 }
 
+/// How far an extrude reaches, beyond `depth` along one side of the sketch plane.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExtrudeExtent {
+    /// Through all of the body: the distance is ignored and the tool is long enough to clear it.
+    #[serde(default)]
+    pub through_all: bool,
+    /// Distance on the other side of the sketch plane (two-sided extrude with different distances).
+    #[serde(default)]
+    pub second_side: Option<Param>,
+    /// Taper angle: positive narrows the profile along the extrusion direction.
+    #[serde(default)]
+    pub taper: Option<Param>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtrudeSpec {
+    /// Extent options beyond the plain distance; the default is an ordinary one-sided extrude.
+    #[serde(default)]
+    pub extent: ExtrudeExtent,
     pub sketch: FeatureId,
     pub depth: Param,
     pub symmetric: bool,
@@ -173,8 +190,14 @@ pub struct HoleSpec {
     pub plane: PlaneSpec,
     /// Hole centres in the plane's (x, y).
     pub points: Vec<[Param; 2]>,
+    /// Stored as `style`: `kind` is the tag of [`FeatureSpec`], and a second `kind` key made every saved
+    /// document with a hole unreadable.
+    #[serde(rename = "style")]
     pub kind: HoleKind,
     pub depth: Param,
+    /// Drill through the whole body: `depth` is ignored (a counterbore still uses its own depth).
+    #[serde(default)]
+    pub through_all: bool,
     pub base: Option<FeatureId>,
 }
 
@@ -239,6 +262,23 @@ pub struct SubdSpec {
     pub tolerance: Param,
 }
 
+/// File format of an imported body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportFormat {
+    Step,
+    Iges,
+}
+
+/// A body read from another CAD system's file; the file's text is kept in the document so the part stays
+/// self-contained. The imported solids (united when there are several) become the body of this feature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportSpec {
+    /// Name of the file it came from (for display).
+    pub source: String,
+    pub format: ImportFormat,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum FeatureSpec {
@@ -262,6 +302,7 @@ pub enum FeatureSpec {
     Mirror(MirrorSpec),
     SheetMetal(SheetMetalSpec),
     Subd(SubdSpec),
+    Import(ImportSpec),
 }
 
 fn plane_params(p: &mut PlaneSpec, f: &mut dyn FnMut(&mut Param)) {
@@ -303,6 +344,7 @@ impl FeatureSpec {
             FeatureSpec::Mirror(_) => "Mirror",
             FeatureSpec::SheetMetal(_) => "SheetMetal",
             FeatureSpec::Subd(_) => "Subd",
+            FeatureSpec::Import(_) => "Import",
         }
     }
 
@@ -329,7 +371,15 @@ impl FeatureSpec {
                 f(&mut d.offset);
                 f(&mut d.tilt);
             }
-            FeatureSpec::Extrude(e) => f(&mut e.depth),
+            FeatureSpec::Extrude(e) => {
+                f(&mut e.depth);
+                if let Some(p) = &mut e.extent.second_side {
+                    f(p);
+                }
+                if let Some(p) = &mut e.extent.taper {
+                    f(p);
+                }
+            }
             FeatureSpec::Revolve(r) => f(&mut r.angle),
             FeatureSpec::Loft(_) | FeatureSpec::Sweep(_) | FeatureSpec::Combine(_) => {}
             FeatureSpec::Fillet(x) => f(&mut x.radius),
@@ -394,6 +444,7 @@ impl FeatureSpec {
             FeatureSpec::Mirror(m) => match &mut m.plane {
                 MirrorPlane::Xy(o) | MirrorPlane::Yz(o) | MirrorPlane::Xz(o) => f(o),
             },
+            FeatureSpec::Import(_) => {}
             FeatureSpec::Subd(s) => {
                 f(&mut s.scale);
                 f(&mut s.tolerance);
@@ -503,6 +554,7 @@ impl FeatureSpec {
             | FeatureSpec::DatumPlane(_)
             | FeatureSpec::Combine(_)
             | FeatureSpec::SheetMetal(_)
+            | FeatureSpec::Import(_)
             | FeatureSpec::Subd(_) => false,
             FeatureSpec::Sketch(s) => matches!(s.plane, PlaneSpec::Face(_)),
             FeatureSpec::Extrude(x) => x.op != BodyOp::New,
@@ -554,7 +606,7 @@ impl FeatureSpec {
             FeatureSpec::LinearPattern(x) => v.push(x.source),
             FeatureSpec::CircularPattern(x) => v.push(x.source),
             FeatureSpec::Mirror(x) => v.push(x.source),
-            FeatureSpec::SheetMetal(_) | FeatureSpec::Subd(_) => {}
+            FeatureSpec::SheetMetal(_) | FeatureSpec::Subd(_) | FeatureSpec::Import(_) => {}
         }
         if let Some(b) = self.explicit_base() {
             v.push(b);

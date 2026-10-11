@@ -1814,3 +1814,687 @@ fn while_edges_are_being_picked_the_view_shows_the_body_the_picks_refer_to() {
     // outside of a pick tool the reach is small, and picking a plane has none
     assert_eq!(h.app.design.viewport.edge_pick_px, 4);
 }
+
+// ------------------------------------------------------------------------------------ exchange (import / export)
+
+use kw_app::exchange::{self, ExportFormat};
+
+/// Volume of a binary STL by summing signed tetrahedra.
+fn stl_volume(bytes: &[u8]) -> (usize, f64) {
+    let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+    assert_eq!(bytes.len(), 84 + 50 * n, "binary STL layout");
+    let f = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap()) as f64;
+    let mut v = 0.0;
+    for t in 0..n {
+        let base = 84 + 50 * t + 12;
+        let p: Vec<[f64; 3]> = (0..3)
+            .map(|k| [f(base + 12 * k), f(base + 12 * k + 4), f(base + 12 * k + 8)])
+            .collect();
+        v += (p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1])
+            - p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0])
+            + p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]))
+            / 6.0;
+    }
+    (n, v)
+}
+
+#[test]
+fn the_solid_exports_to_step_stl_obj_and_glb_with_the_right_geometry() {
+    let dir = scratch("export");
+    let mut p = kw_app::project::Project::demo();
+    let want = volume(&mut p);
+    // STEP: reading it back gives the same volume
+    let step = dir.join("part.step");
+    let msg = exchange::export_file(&mut p, ExportFormat::Step, &step).unwrap();
+    assert!(msg.contains("part.step"), "{msg}");
+    let mut rep = kw_brep::BRep::new();
+    let r = kw_step::import(
+        &mut rep,
+        &std::fs::read_to_string(&step).unwrap(),
+        &kw_step::ImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(r.bodies.len(), 1);
+    let got = rep.mass_properties(r.bodies[0]).unwrap().volume;
+    assert!((got - want).abs() < 1e-6 * want, "{got} vs {want}");
+    // STL: a closed mesh whose enclosed volume matches
+    let stl = dir.join("part.stl");
+    exchange::export_file(&mut p, ExportFormat::Stl, &stl).unwrap();
+    let (tris, vol) = stl_volume(&std::fs::read(&stl).unwrap());
+    assert!(tris >= 12);
+    assert!(
+        (vol - want).abs() < 2e-3 * want,
+        "STL volume {vol} vs {want}"
+    );
+    // OBJ (+ its material file) and GLB
+    let obj = dir.join("part.obj");
+    exchange::export_file(&mut p, ExportFormat::Obj, &obj).unwrap();
+    let text = std::fs::read_to_string(&obj).unwrap();
+    assert!(
+        text.contains("mtllib part.mtl")
+            && text.lines().filter(|l| l.starts_with("f ")).count() == tris
+    );
+    assert!(dir.join("part.mtl").exists());
+    let glb = dir.join("part.glb");
+    exchange::export_file(&mut p, ExportFormat::Glb, &glb).unwrap();
+    let b = std::fs::read(&glb).unwrap();
+    assert_eq!(&b[0..4], b"glTF");
+    assert_eq!(
+        u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize,
+        b.len()
+    );
+    // an empty project has nothing to export
+    let mut empty = kw_app::project::Project::demo();
+    empty
+        .history
+        .edit(|d| {
+            let ids: Vec<_> = d.features.iter().rev().map(|f| f.id).collect();
+            for id in ids {
+                d.remove(id)?;
+            }
+            Ok::<_, kw_feature::TimelineError>(())
+        })
+        .unwrap();
+    assert!(exchange::export_file(&mut empty, ExportFormat::Step, &dir.join("none.step")).is_err());
+}
+
+#[test]
+fn importing_a_step_file_adds_a_body_that_survives_save_and_reopen_and_bad_files_change_nothing() {
+    let dir = scratch("import");
+    // a STEP file made from the demo part
+    let mut src = kw_app::project::Project::demo();
+    let want = volume(&mut src);
+    let file = dir.join("bracket.step");
+    exchange::export_file(&mut src, ExportFormat::Step, &file).unwrap();
+
+    let mut h = Harness::new(app_in(&dir));
+    h.app.create_project("Imported", &dir).unwrap();
+    h.app.set_workspace(Workspace::Design);
+    h.frame();
+    h.app.import_path(&file);
+    assert!(
+        h.app.message.contains("imported bracket.step"),
+        "{}",
+        h.app.message
+    );
+    let got = volume(h.app.project_mut().unwrap());
+    assert!((got - want).abs() < 1e-6 * want, "{got} vs {want}");
+    h.frame();
+    // the file is not needed any more: save, reopen
+    assert!(h.app.save());
+    let reopened = dir.join("Imported.kwf");
+    std::fs::remove_file(&file).unwrap();
+    let mut p2 = kw_app::project::Project::open(&reopened).unwrap();
+    assert!((volume(&mut p2) - want).abs() < 1e-6 * want);
+
+    // a hole drilled in the imported body saves and reopens too (holes once made files unreadable)
+    {
+        let p = h.app.project_mut().unwrap();
+        let ev = p.evaluation();
+        let (_, o) = ev.final_solid().unwrap();
+        let b = o.brep().unwrap();
+        let top = b
+            .faces
+            .keys()
+            .filter(|f| kw_app::design::geom::face_frame(b, *f).is_some_and(|fr| fr.n[2] > 0.99))
+            .max_by(|a, c| {
+                b.face_bbox(*a)
+                    .unwrap()
+                    .max
+                    .z
+                    .total_cmp(&b.face_bbox(*c).unwrap().max.z)
+            })
+            .unwrap();
+        let r = o.names.reference_to(b, top).unwrap();
+        let mm = |v: f64| kw_expr::Param::length(v);
+        p.history
+            .edit(|d| {
+                d.add(
+                    "Drill",
+                    kw_feature::FeatureSpec::Hole(kw_feature::HoleSpec {
+                        plane: kw_feature::PlaneSpec::Face(r),
+                        points: vec![[mm(1.0), mm(1.0)]],
+                        kind: kw_feature::HoleKind::Simple { diameter: mm(1.0) },
+                        depth: mm(1.0),
+                        base: None,
+                        through_all: false,
+                    }),
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+    assert!(h.app.save());
+    let p3 = kw_app::project::Project::open(&reopened).expect("a project with a hole reopens");
+    assert_eq!(p3.document().len(), 2);
+
+    // a file that is not CAD is refused and the project is untouched
+    let n = h.app.project().unwrap().document().len();
+    let junk = dir.join("junk.step");
+    std::fs::write(&junk, "ISO-10303-21; garbage").unwrap();
+    h.app.import_path(&junk);
+    assert!(
+        h.app.message.starts_with("import failed"),
+        "{}",
+        h.app.message
+    );
+    assert_eq!(h.app.project().unwrap().document().len(), n);
+    h.app.import_path(&dir.join("part.dwg"));
+    assert!(
+        h.app.message.contains("unsupported file type"),
+        "{}",
+        h.app.message
+    );
+}
+
+#[test]
+fn the_extrude_dialog_cuts_through_all_tapers_and_reports_what_cannot_combine() {
+    let (mut h, _d) = design_harness("extent_dialog");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let base = 3000.0;
+    let pocket = |h: &mut Harness| {
+        act(h, Action::StartSketch);
+        let f = top_face(h, 5.0);
+        click(h, Some(Pick::Face(f)));
+        let mut sk = kw_sketch::Sketch::new();
+        let pts: Vec<_> = [(10.0, 5.0), (20.0, 5.0), (20.0, 15.0), (10.0, 15.0)]
+            .iter()
+            .map(|p| sk.add_point(p.0, p.1))
+            .collect();
+        for i in 0..4 {
+            sk.add_line(pts[i], pts[(i + 1) % 4]);
+        }
+        h.app.design.sketch.app.editor.replace_sketch(sk);
+        act(h, Action::FinishSketch);
+        let d = h.app.design.dialog.as_mut().expect("Extrude dialog");
+        let Tool::Extrude { op, flip, .. } = &mut d.tool else {
+            panic!()
+        };
+        *op = kw_feature::BodyOp::Cut;
+        *flip = true;
+    };
+    // tapered: a 10 x 10 square pocket 3 mm deep narrowing by 8 degrees on each wall
+    pocket(&mut h);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude {
+            depth,
+            taper,
+            symmetric,
+            ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        *depth = "3 mm".into();
+        *taper = "8 deg".into();
+        *symmetric = true; // refused: a taper needs one side
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(
+        pv.error.as_deref().is_some_and(|e| e.contains("taper")),
+        "{:?}",
+        pv.error
+    );
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { symmetric, .. } = &mut d.tool else {
+            panic!()
+        };
+        *symmetric = false;
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let t = 8f64.to_radians();
+    let s1 = 10.0 - 2.0 * 3.0 * t.tan();
+    let frustum = 3.0 / 3.0 * (100.0 + s1 * s1 + (100.0 * s1 * s1).sqrt());
+    assert!(
+        (vol(&mut h) - (base - frustum)).abs() < 1e-4,
+        "{} vs {}",
+        vol(&mut h),
+        base - frustum
+    );
+    // through all, with the stated distance far too short, goes right through the remaining plate
+    let before = vol(&mut h);
+    pocket(&mut h);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude {
+            depth, through_all, ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        *depth = "0.5 mm".into();
+        *through_all = true;
+    }
+    h.frame();
+    commit(&mut h);
+    let want = base - 100.0 * 5.0; // the plate is 5 mm thick: a 10 x 10 hole straight through
+                                   // (the tapered pocket's volume is inside the through hole)
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-4,
+        "{} vs {want} (before {before})",
+        vol(&mut h)
+    );
+    // and the dialog reads the extent back when the feature is edited
+    let ex = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(ex));
+    let d = h.app.design.dialog.as_ref().expect("edit dialog");
+    assert!(matches!(
+        &d.tool,
+        Tool::Extrude {
+            through_all: true,
+            ..
+        }
+    ));
+}
+
+/// Sketch `sk` on a plane and leave the Extrude dialog that opens afterwards.
+fn sketch_only(
+    h: &mut Harness,
+    spec: kw_feature::PlaneSpec,
+    frame: geom::PlaneFrame,
+    sk: kw_sketch::Sketch,
+) {
+    act(h, Action::StartSketch);
+    act(h, Action::SketchOn(spec, frame));
+    h.app.design.sketch.app.editor.replace_sketch(sk);
+    act(h, Action::FinishSketch);
+    h.app.design.close_dialog();
+    h.frame();
+}
+
+fn square(c: (f64, f64), half: f64) -> kw_sketch::Sketch {
+    let mut sk = kw_sketch::Sketch::new();
+    let pts: Vec<_> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+        .iter()
+        .map(|p| sk.add_point(c.0 + p.0 * half, c.1 + p.1 * half))
+        .collect();
+    for i in 0..4 {
+        sk.add_line(pts[i], pts[(i + 1) % 4]);
+    }
+    sk
+}
+
+fn open_commit(h: &mut Harness, tool: Tool) {
+    act(h, Action::Open(tool));
+    h.frame();
+    let pv = h.app.design.preview.clone();
+    if let Some(pv) = pv {
+        assert!(pv.error.is_none(), "{:?}", pv.error);
+    }
+    commit(h);
+}
+
+#[test]
+fn loft_sweep_draft_offset_and_construction_plane_dialogs_build_the_expected_solids() {
+    // a construction plane 10 mm above XY; a 20 mm square on XY and a 10 mm square on it, lofted
+    let (mut h, _d) = design_harness("more_tools");
+    open_commit(
+        &mut h,
+        Tool::ConstructionPlane {
+            base: 0,
+            offset: "10 mm".into(),
+            tilt: "0 deg".into(),
+        },
+    );
+    let plane_feature = proj(&mut h).document().features.last().unwrap().id;
+    sketch_only(
+        &mut h,
+        geom::origin_spec(0),
+        geom::origin_frame(0),
+        square((0.0, 0.0), 10.0),
+    );
+    let mut f10 = geom::origin_frame(0);
+    f10.origin = [0.0, 0.0, 10.0];
+    sketch_only(
+        &mut h,
+        kw_feature::PlaneSpec::Datum(plane_feature),
+        f10,
+        square((0.0, 0.0), 5.0),
+    );
+    open_commit(
+        &mut h,
+        Tool::Loft {
+            sketches: vec![None, None],
+            op: kw_feature::BodyOp::New,
+        },
+    );
+    let frustum = 10.0 / 3.0 * (400.0 + 100.0 + (400.0f64 * 100.0).sqrt());
+    assert!(
+        (vol(&mut h) - frustum).abs() < 1e-3 * frustum,
+        "loft {} vs {frustum}",
+        vol(&mut h)
+    );
+
+    // offset: a body made of free-form faces cannot be offset in closed form, and the dialog says so
+    act(
+        &mut h,
+        Action::Open(Tool::Offset {
+            distance: "1 mm".into(),
+        }),
+    );
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(
+        pv.error.as_deref().is_some_and(|e| e.contains("offset")),
+        "{:?}",
+        pv.error
+    );
+    h.app.design.close_dialog();
+
+    // offset of a block: grows by the Minkowski sum with a ball (or its mitred variant): print and check
+    let (mut h2, _d2) = design_harness("offset_dialog");
+    sketch_block(&mut h2, 30.0, 20.0, "5 mm");
+    commit(&mut h2);
+    let before = vol(&mut h2);
+    open_commit(
+        &mut h2,
+        Tool::Offset {
+            distance: "1 mm".into(),
+        },
+    );
+    let after = vol(&mut h2);
+    let rounded = before
+        + 2.0 * (600.0 + 150.0 + 100.0)
+        + std::f64::consts::PI * 55.0
+        + 4.0 / 3.0 * std::f64::consts::PI;
+    let mitred = 32.0 * 22.0 * 7.0;
+    assert!(
+        (after - rounded).abs() < 1e-3 * rounded || (after - mitred).abs() < 1e-3 * mitred,
+        "offset {before} -> {after} (rounded {rounded}, mitred {mitred})"
+    );
+    proj(&mut h2).history.undo();
+    assert!((vol(&mut h2) - before).abs() < 1e-6);
+
+    // sweep: a circle swept along a quarter-circle path (Pappus: area x path length)
+    let (mut h, _d) = design_harness("sweep_dialog");
+    let mut sk = kw_sketch::Sketch::new();
+    let c = sk.add_point(0.0, 0.0);
+    sk.add_circle(c, 3.0);
+    sketch_only(&mut h, geom::origin_spec(0), geom::origin_frame(0), sk);
+    let mut path = kw_sketch::Sketch::new();
+    // the XZ plane's sketch x axis runs along world Z: the path leaves the origin along +Z and bends to +X
+    path.add_arc_xy(0.0, 20.0, 20.0, -std::f64::consts::FRAC_PI_2, 0.0);
+    sketch_only(&mut h, geom::origin_spec(2), geom::origin_frame(2), path);
+    open_commit(
+        &mut h,
+        Tool::Sweep {
+            profile: None,
+            path: None,
+            op: kw_feature::BodyOp::New,
+        },
+    );
+    let want = std::f64::consts::PI * 9.0 * (std::f64::consts::FRAC_PI_2 * 20.0);
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-3 * want,
+        "sweep {} vs {want}",
+        vol(&mut h)
+    );
+
+    // draft: a 30 x 20 x 5 block, side faces tilted 5 degrees about the bottom plane
+    let (mut h, _d) = design_harness("draft_dialog");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let sides: Vec<kw_brep::FaceId> = {
+        let ev = proj(&mut h).evaluation();
+        let b = ev.final_solid().unwrap().1.brep().unwrap().clone();
+        b.faces
+            .keys()
+            .filter(|f| geom::face_frame(&b, *f).is_some_and(|fr| fr.n[2].abs() < 1e-9))
+            .collect()
+    };
+    assert_eq!(sides.len(), 4);
+    act(
+        &mut h,
+        Action::Open(Tool::Draft {
+            angle: "5 deg".into(),
+            axis: 2,
+            position: "0 mm".into(),
+        }),
+    );
+    for f in &sides {
+        click(&mut h, Some(Pick::Face(*f)));
+    }
+    assert_eq!(h.app.design.model.picks.len(), 4);
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let t = 5f64.to_radians().tan();
+    let (a1, b1) = (30.0 - 2.0 * 5.0 * t, 20.0 - 2.0 * 5.0 * t);
+    let (a0, a1a) = (600.0, a1 * b1);
+    let drafted = 5.0 / 3.0 * (a0 + a1a + (a0 * a1a).sqrt());
+    assert!(
+        (vol(&mut h) - drafted).abs() < 1e-3 * drafted,
+        "draft {} vs {drafted}",
+        vol(&mut h)
+    );
+}
+
+#[test]
+fn measure_reports_body_properties_and_picked_geometry_against_closed_forms() {
+    use kw_app::design::measure::{
+        body_props, describe, edge_kind, face_kind, EdgeKind, FaceKind, MATERIALS,
+    };
+    let (mut h, _d) = design_harness("measure");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let ev = proj(&mut h).evaluation();
+    let (_, o) = ev.final_solid().unwrap();
+    let (b, body) = (o.brep().unwrap(), o.body().unwrap());
+    // body: a 30 x 20 x 5 block
+    let p = body_props(b, body).unwrap();
+    assert!((p.volume - 3000.0).abs() < 1e-6 && (p.area - 1700.0).abs() < 1e-6);
+    for (got, want) in p.centroid.iter().zip([15.0, 10.0, 2.5]) {
+        assert!((got - want).abs() < 1e-6, "{:?}", p.centroid);
+    }
+    assert!((p.size()[0] - 30.0).abs() < 1e-6 && (p.size()[2] - 5.0).abs() < 1e-6);
+    let al = MATERIALS
+        .iter()
+        .find(|m| m.name == "Aluminium")
+        .unwrap()
+        .density;
+    assert!((p.mass_g(al) - 8.1).abs() < 1e-6, "{}", p.mass_g(al));
+    let ixx = 3000.0 / 12.0 * (400.0 + 25.0);
+    assert!(
+        (p.inertia[0][0] - ixx).abs() < 1e-3 * ixx,
+        "{}",
+        p.inertia[0][0]
+    );
+    assert!((p.inertia_g_mm2(al)[0][0] - ixx * al * 1e-6).abs() < 1e-3);
+
+    // faces: the top is 600 mm², the top and bottom are 5 mm apart, top and a side meet at 90 degrees
+    let faces: Vec<_> = b.faces.keys().collect();
+    let by_normal = |nz: f64, ny: f64| {
+        *faces
+            .iter()
+            .find(|f| {
+                matches!(face_kind(b, **f), Some((FaceKind::Plane { normal }, _)) if (normal[2] - nz).abs() < 1e-9 && (normal[1] - ny).abs() < 1e-9)
+            })
+            .unwrap()
+    };
+    let (top, bottom, front) = (
+        by_normal(1.0, 0.0),
+        by_normal(-1.0, 0.0),
+        by_normal(0.0, -1.0),
+    );
+    assert!((face_kind(b, top).unwrap().1 - 600.0).abs() < 1e-6);
+    let d = describe(b, &[Pick::Face(top), Pick::Face(bottom)]);
+    assert!(d.iter().any(|l| l.contains("5.0000 mm apart")), "{d:?}");
+    let d = describe(b, &[Pick::Face(top), Pick::Face(front)]);
+    assert!(d.iter().any(|l| l.contains("90.0000°")), "{d:?}");
+    // edges: the long top edges are 30 mm and 20 mm apart, parallel
+    let long: Vec<_> = b
+        .edges
+        .keys()
+        .filter(|e| matches!(edge_kind(b, *e), Some(EdgeKind::Line { length, direction }) if (length - 30.0).abs() < 1e-9 && direction[0].abs() > 0.99))
+        .collect();
+    assert_eq!(long.len(), 4);
+    let top_long: Vec<_> = long
+        .iter()
+        .copied()
+        .filter(|e| (b.vertices[b.edges[*e].start].point.z - 5.0).abs() < 1e-9)
+        .collect();
+    assert_eq!(top_long.len(), 2);
+    let d = describe(b, &[Pick::Edge(top_long[0]), Pick::Edge(top_long[1])]);
+    assert!(
+        d.iter()
+            .any(|l| l.contains("distance between the edges: 20.0000")),
+        "{d:?}"
+    );
+    assert!(
+        d.iter()
+            .any(|l| l.contains("angle between the lines: 0.0000")),
+        "{d:?}"
+    );
+    assert!(describe(b, &[Pick::Edge(top_long[0])])[0].contains("length 30.0000"));
+
+    // a cylinder: radius, side area, circular edge
+    let (mut h2, _d2) = design_harness("measure_cyl");
+    act(&mut h2, Action::StartSketch);
+    act(
+        &mut h2,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    let mut sk = kw_sketch::Sketch::new();
+    let c = sk.add_point(0.0, 0.0);
+    sk.add_circle(c, 4.0);
+    h2.app.design.sketch.app.editor.replace_sketch(sk);
+    act(&mut h2, Action::FinishSketch);
+    let Some(dlg) = h2.app.design.dialog.as_mut() else {
+        panic!()
+    };
+    if let Tool::Extrude { depth, .. } = &mut dlg.tool {
+        *depth = "10 mm".into();
+    }
+    h2.frame();
+    commit(&mut h2);
+    let ev = proj(&mut h2).evaluation();
+    let (_, o) = ev.final_solid().unwrap();
+    let b = o.brep().unwrap();
+    let side = b
+        .faces
+        .keys()
+        .find(|f| matches!(face_kind(b, *f), Some((FaceKind::Cylinder { .. }, _))))
+        .unwrap();
+    let (k, area) = face_kind(b, side).unwrap();
+    assert!(matches!(k, FaceKind::Cylinder { radius } if (radius - 4.0).abs() < 1e-9));
+    assert!(
+        (area - 2.0 * std::f64::consts::PI * 4.0 * 10.0).abs() < 1e-6,
+        "{area}"
+    );
+    let rim = b
+        .edges
+        .keys()
+        .find(|e| matches!(edge_kind(b, *e), Some(EdgeKind::Circle { .. })))
+        .unwrap();
+    let EdgeKind::Circle { radius, length } = edge_kind(b, rim).unwrap() else {
+        unreachable!()
+    };
+    assert!(
+        (radius - 4.0).abs() < 1e-9 && (length - 2.0 * std::f64::consts::PI * 4.0).abs() < 1e-6,
+        "{length}"
+    );
+
+    // the window: opens from the ribbon state, picks pile up without a tool, closing clears them
+    h2.app.design.measure_open = true;
+    h2.frame();
+    click(&mut h2, Some(Pick::Face(side)));
+    click(&mut h2, Some(Pick::Edge(rim)));
+    assert_eq!(h2.app.design.model.picks.len(), 2);
+    h2.frame();
+    assert_eq!(h2.app.design.viewport.edge_pick_px, 8);
+}
+
+#[test]
+fn a_hole_through_all_and_a_variable_fillet_through_their_dialogs() {
+    let (mut h, _d) = design_harness("hole_vfillet");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    // hole: 4 mm wide, through all, although the stated depth is only 1 mm
+    act(&mut h, Action::Open(Tool::default_hole()));
+    let f = top_face(&mut h, 5.0);
+    click(&mut h, Some(Pick::Face(f)));
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Hole {
+            x,
+            y,
+            diameter,
+            depth,
+            through_all,
+            ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        *x = "15 mm".into();
+        *y = "10 mm".into();
+        *diameter = "4 mm".into();
+        *depth = "1 mm".into();
+        *through_all = true;
+    }
+    h.frame();
+    commit(&mut h);
+    let want = 3000.0 - std::f64::consts::PI * 4.0 * 5.0;
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-3,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+    // the dialog reads it back
+    let id = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(id));
+    assert!(matches!(
+        &h.app.design.dialog.as_ref().unwrap().tool,
+        Tool::Hole {
+            through_all: true,
+            ..
+        }
+    ));
+    h.app.design.close_dialog();
+
+    // variable fillet on a long top edge of a fresh block: radius 1 -> 3 over 30 mm
+    let (mut h, _d) = design_harness("vfillet");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    let edge = {
+        let ev = proj(&mut h).evaluation();
+        let b = ev.final_solid().unwrap().1.brep().unwrap().clone();
+        b.edges
+            .keys()
+            .find(|e| {
+                let ed = &b.edges[*e];
+                let (p, q) = (b.vertices[ed.start].point, b.vertices[ed.end].point);
+                (p.z - 5.0).abs() < 1e-9
+                    && (q.z - 5.0).abs() < 1e-9
+                    && ((p.x - q.x).abs() - 30.0).abs() < 1e-9
+                    && p.y.abs() < 1e-9
+            })
+            .unwrap()
+    };
+    act(
+        &mut h,
+        Action::Open(Tool::VariableFillet {
+            start: "1 mm".into(),
+            end: "3 mm".into(),
+        }),
+    );
+    click(&mut h, Some(Pick::Edge(edge)));
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let removed = (1.0 - std::f64::consts::FRAC_PI_4) * 30.0 * (1.0 + 3.0 + 9.0) / 3.0;
+    let got = 3000.0 - vol(&mut h);
+    assert!(
+        (got - removed).abs() < 0.03 * removed,
+        "removed {got} vs {removed}"
+    );
+}

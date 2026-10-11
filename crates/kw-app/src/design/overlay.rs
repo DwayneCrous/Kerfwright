@@ -148,6 +148,7 @@ impl DesignWorkspace {
         });
         self.extrude_handle(ui, ev, out);
         self.params_window(ui.ctx(), project);
+        self.measure_window(ui.ctx(), project);
     }
 
     /// The arrow that drags the Extrude distance.

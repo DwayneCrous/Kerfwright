@@ -176,6 +176,7 @@ fn build(m: &Model) -> (Document, Ids) {
                         flip: true,
                         op: BodyOp::Cut,
                         base: None,
+                        extent: Default::default(),
                     }),
                 )
                 .unwrap();
@@ -216,6 +217,7 @@ fn build(m: &Model) -> (Document, Ids) {
                     flip: true,
                     op: BodyOp::Cut,
                     base: None,
+                    extent: Default::default(),
                 }),
             )
             .unwrap();
@@ -236,6 +238,7 @@ fn build(m: &Model) -> (Document, Ids) {
                     flip: true,
                     op: BodyOp::Cut,
                     base: None,
+                    extent: Default::default(),
                 }),
             )
             .unwrap();
@@ -519,6 +522,7 @@ fn edited_doc(m1: &Model) -> Document {
                 flip: false,
                 op: BodyOp::Join,
                 base: None,
+                extent: Default::default(),
             }),
         )
         .unwrap();

@@ -9,6 +9,8 @@ pub trait Dialogs {
     fn save_project(&mut self, suggested: &str) -> Option<PathBuf>;
     /// Choose a folder for a new project (or for exported files).
     fn choose_folder(&mut self) -> Option<PathBuf>;
+    /// Choose an existing file of the given kind (`filter` is a label, `exts` the extensions).
+    fn open_file(&mut self, filter: &str, exts: &[&str]) -> Option<PathBuf>;
     /// Choose where to save a file of the given kind (`filter` is a label, `exts` the extensions).
     fn save_file(&mut self, suggested: &str, filter: &str, exts: &[&str]) -> Option<PathBuf>;
 }
@@ -38,6 +40,13 @@ impl Dialogs for NativeDialogs {
             .pick_folder()
     }
 
+    fn open_file(&mut self, filter: &str, exts: &[&str]) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_title("Import")
+            .add_filter(filter, exts)
+            .pick_file()
+    }
+
     fn save_file(&mut self, suggested: &str, filter: &str, exts: &[&str]) -> Option<PathBuf> {
         rfd::FileDialog::new()
             .set_title("Save")
@@ -64,6 +73,9 @@ impl Dialogs for ScriptedDialogs {
     }
     fn choose_folder(&mut self) -> Option<PathBuf> {
         (!self.folder.is_empty()).then(|| self.folder.remove(0))
+    }
+    fn open_file(&mut self, _filter: &str, _exts: &[&str]) -> Option<PathBuf> {
+        (!self.open.is_empty()).then(|| self.open.remove(0))
     }
     fn save_file(&mut self, _suggested: &str, _filter: &str, _exts: &[&str]) -> Option<PathBuf> {
         (!self.save.is_empty()).then(|| self.save.remove(0))

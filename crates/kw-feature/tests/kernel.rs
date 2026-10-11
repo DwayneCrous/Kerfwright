@@ -297,6 +297,7 @@ fn sketches_far_from_the_origin_and_tools_that_miss() {
                 flip: true,
                 op: BodyOp::Cut,
                 base: None,
+                extent: Default::default(),
             }),
         )
         .unwrap()

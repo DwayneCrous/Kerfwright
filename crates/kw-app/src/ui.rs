@@ -287,6 +287,40 @@ impl KerfwrightApp {
                 });
                 app.zoom_to_fit();
             }
+            "shapes" => {
+                use kw_sketch::editor::{Input, Tool as T};
+                self.design
+                    .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
+                let app = &mut self.design.sketch.app;
+                app.editor.polygon_sides = 5;
+                let ed = &mut app.editor;
+                let mut go = |tool: T, pts: &[(f64, f64)]| {
+                    ed.set_tool(tool);
+                    for p in pts {
+                        ed.handle(Input::Click(*p));
+                    }
+                    ed.handle(Input::Finish);
+                    ed.handle(Input::Escape);
+                };
+                go(T::Polygon, &[(-30.0, 20.0), (-30.0, 30.0)]);
+                go(T::Slot, &[(0.0, 25.0), (25.0, 25.0), (12.0, 31.0)]);
+                go(T::Ellipse, &[(-25.0, -5.0), (-5.0, -5.0), (-25.0, 3.0)]);
+                go(T::Arc3, &[(8.0, -2.0), (28.0, -2.0), (18.0, 8.0)]);
+                go(
+                    T::Circle3,
+                    &[(-30.0, -30.0), (-18.0, -30.0), (-24.0, -20.0)],
+                );
+                go(
+                    T::FitSpline,
+                    &[(0.0, -30.0), (8.0, -20.0), (16.0, -32.0), (28.0, -22.0)],
+                );
+                go(T::Slot, &[]);
+                ed.set_tool(T::Slot);
+                ed.handle(Input::Click((0.0, 8.0)));
+                ed.handle(Input::Click((22.0, 8.0)));
+                app.demo_cursor = Some((11.0, 12.0));
+                app.zoom_to_fit();
+            }
             "face" | "faceextrude" => {
                 if let Some((frame, reference, _)) = top_face(project) {
                     self.design.begin_sketch(
@@ -541,6 +575,54 @@ impl KerfwrightApp {
                 false
             }
         }
+    }
+
+    /// File ▸ Import: ask for a STEP / IGES file and add its solids to the project.
+    pub fn import_file_dialog(&mut self) {
+        let Some(path) = self
+            .dialogs
+            .open_file("STEP / IGES", &["step", "stp", "iges", "igs"])
+        else {
+            return;
+        };
+        self.import_path(&path);
+    }
+
+    pub fn import_path(&mut self, path: &Path) {
+        let Some(p) = self.project_mut() else {
+            return;
+        };
+        self.message = match crate::exchange::import_file(p, path) {
+            Ok(m) => m,
+            Err(e) => format!("import failed: {e}"),
+        };
+    }
+
+    /// File ▸ Export: ask where to write the model's solid and write it.
+    pub fn export_file_dialog(&mut self, format: crate::exchange::ExportFormat) {
+        let suggested = format!(
+            "{}.{}",
+            self.project().map(|p| p.name()).unwrap_or_default(),
+            format.extensions()[0]
+        );
+        let Some(path) = self
+            .dialogs
+            .save_file(&suggested, format.filter(), format.extensions())
+        else {
+            return;
+        };
+        let path = if path.extension().is_none() {
+            path.with_extension(format.extensions()[0])
+        } else {
+            path
+        };
+        let Some(p) = self.project_mut() else {
+            return;
+        };
+        self.message = match crate::exchange::export_file(p, format, &path) {
+            Ok(m) => m,
+            Err(e) => format!("export failed: {e}"),
+        };
     }
 
     pub fn save_as(&mut self) -> bool {
@@ -943,6 +1025,21 @@ impl KerfwrightApp {
                         ui.close();
                     }
                     ui.separator();
+                    if self.workspace().is_some() {
+                        if ui.button("Import STEP / IGES…").clicked() {
+                            self.import_file_dialog();
+                            ui.close();
+                        }
+                        ui.menu_button("Export", |ui| {
+                            for f in crate::exchange::ExportFormat::ALL {
+                                if ui.button(f.label()).clicked() {
+                                    self.export_file_dialog(f);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                    }
                     if ui.button("Open project…").clicked() {
                         if let Some(p) = self.dialogs.open_project() {
                             self.request(Pending::Open(p));

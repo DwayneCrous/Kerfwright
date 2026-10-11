@@ -134,6 +134,7 @@ impl Document {
                 flip: false,
                 op,
                 base: None,
+                extent: Default::default(),
             }),
         )
     }

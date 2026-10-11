@@ -530,22 +530,59 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
         }
         FeatureSpec::Extrude(x) => {
             let sk = inp.sketch(x.sketch)?;
-            let depth = length(&x.depth)?;
-            if !(depth > 0.0) {
+            let ext = &x.extent;
+            let n = sk.plane.z;
+            let dir = if x.flip { -n } else { n };
+            let d1 = if ext.through_all {
+                // long enough to clear the whole body from wherever the sketch plane is
+                let b = body_of(inp, "a through-all extrude")?;
+                let bb = b.brep().unwrap().body_bbox(b.body().unwrap());
+                let centre = (bb.min.coords + bb.max.coords) * 0.5;
+                2.0 * (bb.max - bb.min).norm() + (sk.plane.origin.coords - centre).norm() + 1.0
+            } else {
+                length(&x.depth)?
+            };
+            if !(d1 > 0.0) {
                 return Err(EvalError::Kernel(
                     "the extrusion depth must be positive".into(),
                 ));
             }
-            let n = sk.plane.z;
-            let dir = if x.flip { -n } else { n };
+            let d2 = match &ext.second_side {
+                Some(p) => length(p)?,
+                None => 0.0,
+            };
+            if d2 < 0.0 || (d2 > 0.0 && x.symmetric) {
+                return Err(EvalError::Kernel(
+                    "the second side needs a positive distance and excludes a symmetric extent"
+                        .into(),
+                ));
+            }
+            let taper = match &ext.taper {
+                Some(p) => angle(p)?,
+                None => 0.0,
+            };
+            if taper.abs() >= std::f64::consts::FRAC_PI_2 - 1e-6 {
+                return Err(EvalError::Kernel(
+                    "the taper angle must be under 90 degrees".into(),
+                ));
+            }
+            if taper != 0.0 && d2 > 0.0 {
+                return Err(EvalError::Kernel(
+                    "a taper cannot be combined with a second side".into(),
+                ));
+            }
+            // a second side starts the tool that far behind the sketch plane
+            let mut plane = sk.plane;
+            plane.origin -= dir * d2;
             let gen = ToolGen {
                 tag: String::new(),
                 shape: ToolShape::Extrude {
-                    plane: sk.plane,
+                    plane,
                     sketch: sk,
                     sketch_id: x.sketch,
-                    vector: dir * depth,
+                    vector: dir * (d1 + d2),
                     symmetric: x.symmetric,
+                    taper,
                 },
             };
             from_gens(id, inp, vec![gen], x.op, notes)
@@ -738,7 +775,14 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
         FeatureSpec::Hole(h) => {
             let b = body_of(inp, "hole")?;
             let plane = plane_frame(&h.plane, inp, &mut notes)?;
-            let depth = length(&h.depth)?;
+            let depth = if h.through_all {
+                // as long as it takes to clear the body from the plane the hole starts on
+                let bb = b.brep().unwrap().body_bbox(b.body().unwrap());
+                let centre = (bb.min.coords + bb.max.coords) * 0.5;
+                2.0 * (bb.max - bb.min).norm() + (plane.origin.coords - centre).norm() + 1.0
+            } else {
+                length(&h.depth)?
+            };
             if !(depth > 0.0) {
                 return Err(EvalError::Kernel("the hole depth must be positive".into()));
             }
@@ -901,6 +945,53 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 );
             }
             sess.names = names;
+            sess.finish(None, notes)
+        }
+        FeatureSpec::Import(im) => {
+            let mut sess = Session::new(id, None);
+            let bodies: Vec<BodyId> = match im.format {
+                ImportFormat::Step => {
+                    kw_step::import(&mut sess.rep, &im.data, &kw_step::ImportOptions::default())
+                        .map_err(|e| kernel("STEP import", e))?
+                        .bodies
+                }
+                ImportFormat::Iges => {
+                    kw_iges::import(&mut sess.rep, &im.data)
+                        .map_err(|e| kernel("IGES import", e))?
+                        .bodies
+                }
+            };
+            let Some((&first, rest)) = bodies.split_first() else {
+                return Err(EvalError::Kernel(format!(
+                    "{} holds no solid body",
+                    im.source
+                )));
+            };
+            let mut body = first;
+            for b in rest {
+                let r = boolean(&mut sess.rep, body, *b, Op::Union, &BoolOptions::default())
+                    .map_err(|e| kernel("joining the imported solids", e))?;
+                body = r.body;
+            }
+            sess.body = Some(body);
+            sess.names = sess
+                .rep
+                .body_faces(body)
+                .into_iter()
+                .enumerate()
+                .map(|(k, f)| {
+                    (
+                        EntityRef::Face(f),
+                        TopoName {
+                            feature: id,
+                            origin: NameOrigin::Primitive {
+                                role: format!("face-{k}"),
+                            },
+                            ordinal: 0,
+                        },
+                    )
+                })
+                .collect();
             sess.finish(None, notes)
         }
         FeatureSpec::LinearPattern(p) => {

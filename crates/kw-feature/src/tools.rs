@@ -9,7 +9,7 @@ use crate::naming::{NameOrigin, TopoName};
 use crate::profile::sketch_profile_labeled;
 use kw_brep::{make_cone, BRep, BodyId, EntityRef, FaceId, ShapeHistory};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
-use kw_model::{extrude, revolve, ExtrudeOptions, Profile, ProfileLoop};
+use kw_model::{draft_faces, extrude, revolve, ExtrudeOptions, Profile, ProfileLoop};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -21,6 +21,8 @@ pub enum ToolShape {
         plane: Frame3,
         vector: Vector3<f64>,
         symmetric: bool,
+        /// Taper angle (radians); positive narrows the profile along `vector`. Zero = straight.
+        taper: f64,
     },
     Revolve {
         sketch: Arc<SketchProduct>,
@@ -124,12 +126,14 @@ impl ToolGen {
                 plane,
                 vector,
                 symmetric,
+                taper,
             } => ToolShape::Extrude {
                 sketch: sketch.clone(),
                 sketch_id: *sketch_id,
                 plane: place.frame(plane),
                 vector: place.vector(vector),
                 symmetric: *symmetric,
+                taper: *taper,
             },
             ToolShape::Revolve {
                 sketch,
@@ -186,6 +190,7 @@ impl ToolGen {
         let mut labels: Vec<Vec<u32>> = Vec::new();
         let mut sketch_id = feature;
         let mut swept_role = "side";
+        let mut first: Option<kw_brep::BuildResult> = None;
         let result = match &self.shape {
             ToolShape::Extrude {
                 sketch,
@@ -193,11 +198,12 @@ impl ToolGen {
                 plane,
                 vector,
                 symmetric,
+                taper,
             } => {
                 sketch_id = *sid;
                 let lp = sketch_profile_labeled(&sketch.sketch, &sketch.entities, *plane)?;
                 labels = lp.labels;
-                extrude(
+                let straight = extrude(
                     &mut rep,
                     &lp.profile,
                     *vector,
@@ -205,7 +211,38 @@ impl ToolGen {
                         symmetric: *symmetric,
                     },
                 )
-                .map_err(|e| kernel("extrude", &e))?
+                .map_err(|e| kernel("extrude", &e))?;
+                if *taper != 0.0 {
+                    if *symmetric {
+                        return Err(EvalError::Kernel(
+                            "a taper cannot be combined with a symmetric extent".into(),
+                        ));
+                    }
+                    let pull = vector.normalize();
+                    // every side face leans; the two caps (perpendicular to the extrusion) stay put
+                    let sides: Vec<FaceId> = rep
+                        .body_faces(straight.body)
+                        .into_iter()
+                        .filter(|f| match &rep.surfaces[rep.faces[*f].surface] {
+                            kw_nurbs::SurfaceGeom::Plane(p) => {
+                                p.frame.z.dot(&pull).abs() < 1.0 - 1e-9
+                            }
+                            _ => true,
+                        })
+                        .collect();
+                    let drafted =
+                        draft_faces(&mut rep, straight.body, &sides, plane.origin, pull, *taper)
+                            .map_err(|e| {
+                                kernel(
+                                    "taper (only straight and circular walls can be tapered)",
+                                    &e,
+                                )
+                            })?;
+                    first = Some(straight);
+                    drafted
+                } else {
+                    straight
+                }
             }
             ToolShape::Revolve {
                 sketch,
@@ -279,13 +316,20 @@ impl ToolGen {
             }
         };
         let mut namer = Namer::new(feature);
-        let named = namer.name_result(
-            &rep,
-            result.body,
-            &result.history,
-            &HashMap::new(),
-            &new_origin,
-        );
+        let named = match first {
+            // a tapered extrude: name the straight prism, then carry its names through the taper
+            Some(f) => {
+                let n1 = namer.name_result(&rep, f.body, &f.history, &HashMap::new(), &new_origin);
+                namer.name_result(&rep, result.body, &result.history, &n1, &new_origin)
+            }
+            None => namer.name_result(
+                &rep,
+                result.body,
+                &result.history,
+                &HashMap::new(),
+                &new_origin,
+            ),
+        };
         let names = named
             .into_iter()
             .filter_map(|(k, v)| match k {

@@ -16,10 +16,19 @@ pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Circle, "Circle", "C"),
     (Tool::Arc, "Arc", "A"),
     (Tool::Spline, "Spline", "S"),
+    (Tool::FitSpline, "Fit spline", "K"),
+    (Tool::Polygon, "Polygon", "G"),
+    (Tool::Slot, "Slot", "U"),
+    (Tool::Ellipse, "Ellipse", "H"),
+    (Tool::Arc3, "3-point arc", "W"),
+    (Tool::Circle3, "3-point circle", "X"),
     (Tool::Dimension, "Dimension", "D"),
     (Tool::Trim, "Trim", "T"),
     (Tool::Extend, "Extend", "E"),
     (Tool::Offset, "Offset", "O"),
+    (Tool::Fillet, "Sketch fillet", "J"),
+    (Tool::Chamfer, "Sketch chamfer", "B"),
+    (Tool::Mirror, "Sketch mirror", "M"),
 ];
 
 pub const CONSTRAINTS: &[(ConstraintTool, &str)] = &[
@@ -295,6 +304,18 @@ impl SketcherApp {
             }
         }
         ui.horizontal(|ui| {
+            ui.label("Polygon sides");
+            ui.add(egui::DragValue::new(&mut self.editor.polygon_sides).range(3..=64));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Fillet / chamfer size");
+            ui.add(
+                egui::DragValue::new(&mut self.editor.corner_size)
+                    .speed(0.1)
+                    .range(1e-6..=1e6),
+            );
+        });
+        ui.horizontal(|ui| {
             ui.label("Offset");
             ui.add(
                 egui::DragValue::new(&mut self.editor.offset_distance)
@@ -552,10 +573,19 @@ impl SketcherApp {
                 (Key::C, Tool::Circle),
                 (Key::A, Tool::Arc),
                 (Key::S, Tool::Spline),
+                (Key::K, Tool::FitSpline),
+                (Key::G, Tool::Polygon),
+                (Key::U, Tool::Slot),
+                (Key::H, Tool::Ellipse),
+                (Key::W, Tool::Arc3),
+                (Key::X, Tool::Circle3),
                 (Key::D, Tool::Dimension),
                 (Key::T, Tool::Trim),
                 (Key::E, Tool::Extend),
                 (Key::O, Tool::Offset),
+                (Key::J, Tool::Fillet),
+                (Key::B, Tool::Chamfer),
+                (Key::M, Tool::Mirror),
             ];
             (
                 ctrl && i.key_pressed(Key::Z) && !i.modifiers.shift,
@@ -938,8 +968,20 @@ impl SketcherApp {
                         4.0,
                     ));
                 }
-                if let Some(last) = anchors.last() {
-                    painter.extend(Shape::dashed_line(&[pt(*last), sp], rub, 4.0, 3.0));
+                let outlines = self.editor.preview(v.to_world(rect, pos));
+                if outlines.is_empty() {
+                    if let Some(last) = anchors.last() {
+                        painter.extend(Shape::dashed_line(&[pt(*last), sp], rub, 4.0, 3.0));
+                    }
+                }
+                for outline in &outlines {
+                    let pts: Vec<Pos2> = outline.iter().map(|q| pt(*q)).collect();
+                    painter.extend(Shape::dashed_line(
+                        &pts,
+                        Stroke::new(1.5, Color32::from_rgb(60, 140, 220)),
+                        5.0,
+                        3.0,
+                    ));
                 }
                 for p in &anchors {
                     painter.circle_stroke(pt(*p), 4.0, rub);

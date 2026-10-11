@@ -219,6 +219,7 @@ impl ScriptDoc {
                 flip,
                 op,
                 base: None,
+                extent: Default::default(),
             }),
         );
         tl(r).map(|i| i.0 as i64)
