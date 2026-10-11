@@ -60,6 +60,10 @@ fn main() -> eframe::Result {
                 Some(what) => app.design_demo(&what),
                 None => return usage("--design-demo needs idle|pick|sketch|extrude|face|faceextrude|hole|fillet|params"),
             },
+            "--open-menu" => match args.next() {
+                Some(t) => app.force_menu = Some(t),
+                None => return usage("--open-menu needs a group title such as CREATE"),
+            },
             "--cam-demo" => app.cam_demo(),
             "--ecad-demo" => app.ecad_demo(5),
             "--screenshot" => match args.next() {

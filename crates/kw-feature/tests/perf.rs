@@ -171,6 +171,7 @@ fn parts_model(parts: usize, per_part: usize) -> (Document, FeatureId, FeatureId
                     target: acc,
                     tool: *part,
                     op: BodyOp::Join,
+                    keep_tool: false,
                 }),
             )
             .unwrap();

@@ -97,6 +97,7 @@ impl Document {
             FeatureSpec::Sketch(SketchSpec {
                 plane,
                 recipe: rect_recipe(x0, y0, w, h),
+                base: None,
             }),
         )
     }
@@ -114,6 +115,7 @@ impl Document {
             FeatureSpec::Sketch(SketchSpec {
                 plane,
                 recipe: circle_recipe(cx, cy, diameter),
+                base: None,
             }),
         )
     }

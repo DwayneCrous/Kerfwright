@@ -13,6 +13,8 @@ pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Point, "Point", "P"),
     (Tool::Line, "Line", "L"),
     (Tool::Rectangle, "Rectangle", "R"),
+    (Tool::CenterRectangle, "Center rectangle", "Shift+R"),
+    (Tool::AlignedRectangle, "Aligned rectangle", ""),
     (Tool::Circle, "Circle", "C"),
     (Tool::Arc, "Arc", "A"),
     (Tool::Spline, "Spline", "S"),
@@ -569,7 +571,14 @@ impl SketcherApp {
             let letters = [
                 (Key::P, Tool::Point),
                 (Key::L, Tool::Line),
-                (Key::R, Tool::Rectangle),
+                (
+                    Key::R,
+                    if i.modifiers.shift {
+                        Tool::CenterRectangle
+                    } else {
+                        Tool::Rectangle
+                    },
+                ),
                 (Key::C, Tool::Circle),
                 (Key::A, Tool::Arc),
                 (Key::S, Tool::Spline),
@@ -726,6 +735,57 @@ impl SketcherApp {
         }
 
         self.paint(&painter, rect, response.hover_pos());
+        self.tool_options(ui.ctx(), rect);
+    }
+
+    /// A small floating bar in the corner of the canvas with the options of the active tool (polygon sides,
+    /// fillet size, offset distance).
+    fn tool_options(&mut self, ctx: &egui::Context, rect: Rect) {
+        let tool = self.editor.tool;
+        if !matches!(
+            tool,
+            Tool::Polygon | Tool::Fillet | Tool::Chamfer | Tool::Offset
+        ) {
+            return;
+        }
+        egui::Area::new(egui::Id::new("sketch_tool_options"))
+            .fixed_pos(rect.min + Vec2::new(10.0, 10.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| match tool {
+                        Tool::Polygon => {
+                            ui.label("Sides");
+                            ui.add(
+                                egui::DragValue::new(&mut self.editor.polygon_sides).range(3..=64),
+                            );
+                        }
+                        Tool::Fillet | Tool::Chamfer => {
+                            ui.label(if tool == Tool::Fillet {
+                                "Radius"
+                            } else {
+                                "Distance"
+                            });
+                            ui.add(
+                                egui::DragValue::new(&mut self.editor.corner_size)
+                                    .speed(0.1)
+                                    .range(1e-6..=1e6)
+                                    .suffix(" mm"),
+                            );
+                        }
+                        Tool::Offset => {
+                            ui.label("Distance");
+                            ui.add(
+                                egui::DragValue::new(&mut self.editor.offset_distance)
+                                    .speed(0.1)
+                                    .range(1e-6..=1e6)
+                                    .suffix(" mm"),
+                            );
+                        }
+                        _ => {}
+                    });
+                });
+            });
     }
 
     /// Resting the pointer on a point acquires it: its horizontal and vertical lines then offer alignments.

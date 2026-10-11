@@ -767,6 +767,7 @@ fn assemble(rep: &mut BRep, faces: Vec<SoupFace>, tol: f64, report: &mut ImportR
                 &kw_brep::CopyOptions {
                     transform: None,
                     flip: true,
+                    ..Default::default()
                 },
             );
             vol = flipped_rep.volume(nb).unwrap_or(f64::NAN);

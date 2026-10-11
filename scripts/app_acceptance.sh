@@ -38,6 +38,17 @@ shot design_hole_dialog --design-demo hole
 shot design_fillet_dialog --design-demo fillet
 shot design_fillet_edges_picked --design-demo fillet-picked
 shot design_parameters --design-demo params
+shot design_create_menu --demo --open-menu CREATE
+shot design_modify_menu --demo --open-menu MODIFY
+shot design_construct_menu --demo --open-menu CONSTRUCT
+shot design_construction --design-demo construct
+shot design_section --design-demo section
+shot design_assembly --design-demo assembly
+shot design_sheet_metal --design-demo sheet
+shot design_form --design-demo form
+shot design_tools_tab --design-demo tools
+shot design_sketch_text --design-demo text
+shot design_sketch_project --design-demo project
 shot cam --cam-demo
 shot fea --fea-demo
 shot ecad --ecad-demo

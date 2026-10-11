@@ -27,6 +27,7 @@ kw-subd.workspace = true
 kw-dxf.workspace = true
 kw-step.workspace = true
 kw-iges.workspace = true
+i_overlay.workspace = true
 
 [dev-dependencies]
 kw-tess.workspace = true

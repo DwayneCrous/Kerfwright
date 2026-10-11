@@ -140,6 +140,7 @@ fn copy_transform_and_flip() {
             &CopyOptions {
                 transform: Some(xf),
                 flip: false,
+                ..Default::default()
             },
         );
         assert!(dst.validate().is_ok(), "{:?}", dst.validate());
@@ -151,6 +152,7 @@ fn copy_transform_and_flip() {
             &CopyOptions {
                 transform: Some(xf),
                 flip: true,
+                ..Default::default()
             },
         );
         assert!(

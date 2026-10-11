@@ -28,6 +28,7 @@ kw-mesh3d.workspace = true
 kw-viewer.workspace = true
 kw-render.workspace = true
 kw-tess.workspace = true
+kw-boolean.workspace = true
 kw-step.workspace = true
 kw-iges.workspace = true
 kw-io.workspace = true
@@ -40,6 +41,11 @@ kw-sketch.workspace = true
 kw-sketcher = { path = "../kw-sketcher" }
 
 kw-nurbs.workspace = true
+kw-subd.workspace = true
+kw-sheet.workspace = true
+kw-dxf.workspace = true
+kw-assembly.workspace = true
+epaint_default_fonts = "0.36"
 
 [dev-dependencies]
 kw-fabcheck.workspace = true

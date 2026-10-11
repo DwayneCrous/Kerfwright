@@ -21,10 +21,12 @@ pub mod naming;
 pub mod ops;
 pub mod profile;
 pub mod recipe;
+pub mod regions;
 pub mod spec;
+pub mod threads;
 pub mod tools;
 
-pub use doc::{Document, Feature, History, TimelineError};
+pub use doc::{Appearance, Document, Feature, History, TimelineError};
 pub use engine::{CancelToken, Engine, Evaluation, FeatureState, RunStats, KERNEL_VERSION};
 pub use eval::{
     EvalError, EvalOutput, Product, Resolution, SketchProduct, SolidProduct, ToolProduct,

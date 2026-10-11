@@ -19,6 +19,9 @@ struct Globals {
     ids: [u32; 4],
     /// Extra selected ids (a multi-selection), four per row.
     sel: [[u32; 4]; 16],
+    /// Section plane: unit normal and offset (points with `dot(n, p) > d` are cut away); `w` of `ids`
+    /// is 1 when it is on.
+    clip: [f32; 4],
 }
 
 /// How many extra selected ids the shaders can highlight.
@@ -35,6 +38,9 @@ pub struct RenderSettings {
     /// Draw the shaded faces (off = wireframe of the edges only).
     pub show_mesh: bool,
     pub background: [f64; 3],
+    /// A section plane: `(unit normal, offset)`; everything with `dot(normal, p) > offset` is cut away and
+    /// the inside of the cut is shown as a flat cap.
+    pub section: Option<([f64; 3], f64)>,
 }
 
 impl Default for RenderSettings {
@@ -48,6 +54,7 @@ impl Default for RenderSettings {
             show_edges: true,
             show_mesh: true,
             background: [0.10, 0.11, 0.13],
+            section: None,
         }
     }
 }
@@ -173,7 +180,8 @@ impl Renderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // back faces are drawn too: the shader drops them unless a section is on, where they form the cap
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(depth(true, wgpu::CompareFunction::Less, face_bias)),
@@ -329,9 +337,12 @@ impl Renderer {
                 self.hovered,
                 self.selected,
                 self.selected_extra.len().min(MAX_EXTRA_SELECTED) as u32,
-                0,
+                s.section.is_some() as u32,
             ],
             sel,
+            clip: s.section.map_or([0.0, 0.0, 1.0, 0.0], |(n, d)| {
+                [n[0] as f32, n[1] as f32, n[2] as f32, d as f32]
+            }),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
     }

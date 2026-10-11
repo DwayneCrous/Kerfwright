@@ -6,8 +6,9 @@ struct Globals {
     light_dir: vec4<f32>,
     viewport: vec4<f32>, // width, height, line width (px), edge depth bias
     params: vec4<f32>,   // metallic, roughness, exposure, ambient
-    ids: vec4<u32>,      // hovered id, selected id, number of extra selected ids, unused
+    ids: vec4<u32>,      // hovered id, selected id, number of extra selected ids, section on
     sel: array<vec4<u32>, 16>, // extra selected ids
+    clip: vec4<f32>,     // section plane: normal, offset (dot(n, p) > offset is cut away)
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -87,7 +88,16 @@ struct FsOut {
 };
 
 @fragment
-fn fs_main(i: VsOut) -> FsOut {
+fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> FsOut {
+    if (g.ids.w == 1u && dot(g.clip.xyz, i.world) > g.clip.w) { discard; }
+    if (!front) {
+        // the inside of a closed solid is only ever seen through a section: a flat cap
+        if (g.ids.w == 0u) { discard; }
+        var cap: FsOut;
+        cap.color = vec4<f32>(pow(vec3<f32>(0.93, 0.55, 0.20), vec3<f32>(2.2)), 1.0);
+        cap.id = i.id;
+        return cap;
+    }
     var albedo = i.color.rgb;
     if (i.id == g.ids.x) { albedo = mix(albedo, vec3<f32>(1.0, 0.85, 0.2), 0.55); }
     if (is_selected(i.id)) { albedo = mix(albedo, vec3<f32>(1.0, 0.45, 0.1), 0.7); }

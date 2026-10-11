@@ -373,3 +373,75 @@ fn mirror_copies_geometry_across_a_line_with_symmetry_constraints() {
         .fold(f64::INFINITY, f64::min);
     assert!(d < 0.06, "{d}");
 }
+
+#[test]
+fn centre_rectangle_grows_outwards_from_its_centre_and_stays_centred() {
+    let mut ed = Editor::default();
+    ed.set_tool(Tool::CenterRectangle);
+    click(&mut ed, 10.0, 5.0); // centre
+    click(&mut ed, 16.0, 8.0); // a corner: 12 x 6
+    ok(&ed);
+    // four sides, two construction diagonals
+    let lines: Vec<_> = ed
+        .sketch
+        .entities
+        .values()
+        .filter(|e| matches!(e.kind, EntityKind::Line { .. }))
+        .collect();
+    assert_eq!(lines.iter().filter(|l| !l.construction).count(), 4);
+    assert_eq!(lines.iter().filter(|l| l.construction).count(), 2);
+    let pts: Vec<(f64, f64)> = ed
+        .sketch
+        .entities
+        .iter()
+        .filter(|(_, e)| matches!(e.kind, EntityKind::Point(_)))
+        .map(|(id, _)| ed.sketch.point(id).unwrap())
+        .collect();
+    let (x0, x1) = (
+        pts.iter().map(|p| p.0).fold(f64::MAX, f64::min),
+        pts.iter().map(|p| p.0).fold(f64::MIN, f64::max),
+    );
+    let (y0, y1) = (
+        pts.iter().map(|p| p.1).fold(f64::MAX, f64::min),
+        pts.iter().map(|p| p.1).fold(f64::MIN, f64::max),
+    );
+    assert!(
+        (x0 - 4.0).abs() < 1e-9 && (x1 - 16.0).abs() < 1e-9,
+        "{x0} {x1}"
+    );
+    assert!(
+        (y0 - 2.0).abs() < 1e-9 && (y1 - 8.0).abs() < 1e-9,
+        "{y0} {y1}"
+    );
+    // dragging a corner keeps the centre: resize by constraining the width, the middle stays at x = 10
+    let rep = ed.report.clone().unwrap();
+    assert_eq!(rep.dof, 4, "{rep:?}"); // centre (2) + half-width + half-height
+}
+
+#[test]
+fn aligned_rectangle_is_a_rectangle_at_any_angle() {
+    let mut ed = Editor::default();
+    ed.set_tool(Tool::AlignedRectangle);
+    click(&mut ed, 0.0, 0.0);
+    click(&mut ed, 8.0, 6.0); // one side of length 10 at atan2(6, 8)
+    click(&mut ed, 8.0 - 3.0, 6.0 + 4.0); // 5 away on the left of that side
+    ok(&ed);
+    let rep = ed.report.clone().unwrap();
+    assert_eq!(rep.dof, 5, "{rep:?}"); // position (2) + angle + two sides
+    let pts: Vec<(f64, f64)> = ed
+        .sketch
+        .entities
+        .iter()
+        .filter(|(_, e)| matches!(e.kind, EntityKind::Point(_)))
+        .map(|(id, _)| ed.sketch.point(id).unwrap())
+        .collect();
+    assert_eq!(pts.len(), 4);
+    // the far corners are (8, 6) + 5 (-0.6, 0.8) and (0, 0) + 5 (-0.6, 0.8)
+    let has = |x: f64, y: f64| {
+        pts.iter()
+            .any(|p| (p.0 - x).abs() < 1e-9 && (p.1 - y).abs() < 1e-9)
+    };
+    assert!(has(5.0, 10.0) && has(-3.0, 4.0), "{pts:?}");
+    // sides are 10 and 5 long
+    assert!(has(8.0, 6.0) && has(0.0, 0.0));
+}

@@ -2098,8 +2098,12 @@ name = "kw-app"
 version = "0.0.1"
 dependencies = [
  "eframe",
+ "epaint_default_fonts",
+ "kw-assembly",
+ "kw-boolean",
  "kw-brep",
  "kw-cam",
+ "kw-dxf",
  "kw-ecad",
  "kw-expr",
  "kw-fabcheck",
@@ -2112,10 +2116,12 @@ dependencies = [
  "kw-mesh3d",
  "kw-nurbs",
  "kw-render",
+ "kw-sheet",
  "kw-sketch",
  "kw-sketcher",
  "kw-step",
  "kw-store",
+ "kw-subd",
  "kw-tess",
  "kw-viewer",
  "nalgebra",
@@ -2247,6 +2253,7 @@ name = "kw-feature"
 version = "0.0.1"
 dependencies = [
  "ciborium",
+ "i_overlay",
  "kw-blend",
  "kw-boolean",
  "kw-brep",
@@ -2417,7 +2424,9 @@ dependencies = [
 name = "kw-sketch"
 version = "0.0.1"
 dependencies = [
+ "ab_glyph",
  "criterion",
+ "epaint_default_fonts",
  "faer",
  "kw-math",
  "kw-nurbs",

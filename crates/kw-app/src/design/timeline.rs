@@ -28,6 +28,20 @@ pub fn icon_for(kind: &str) -> Icon {
         "Combine" => Icon::Combine,
         "Parameter" => Icon::Parameters,
         "DatumPlane" => Icon::Plane,
+        "DatumAxis" => Icon::Axis,
+        "DatumPoint" => Icon::PointDatum,
+        "Sweep" => Icon::Sweep,
+        "Loft" => Icon::Loft,
+        "Draft" => Icon::Draft,
+        "Thread" => Icon::Thread,
+        "Offset" => Icon::OffsetBody,
+        "MoveBody" => Icon::Move,
+        "CopyBody" => Icon::Component,
+        "ScaleBody" => Icon::Scale,
+        "SplitBody" => Icon::Split,
+        "Import" => Icon::Folder,
+        "SheetMetal" => Icon::Flange,
+        "Subd" => Icon::FormBox,
         _ => Icon::Generic,
     }
 }
@@ -207,7 +221,7 @@ impl DesignWorkspace {
     /// dropped.
     fn marker(&mut self, ui: &mut Ui, doc: &kw_feature::Document) -> Option<egui::Pos2> {
         let (rect, resp) = ui.allocate_exact_size(vec2(9.0, 38.0), Sense::click_and_drag());
-        let c = if doc.rollback.is_some() {
+        let c = if doc.rolled_back() {
             ACCENT
         } else {
             TEXT_WEAK.gamma_multiply(0.7)

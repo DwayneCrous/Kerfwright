@@ -375,18 +375,22 @@ impl DesignWorkspace {
         if !self.measure_open {
             return;
         }
-        let ev = project.evaluation();
+        let threads = {
+            let ev = project.evaluation();
+            let doc = project.document();
+            kw_feature::threads::report(&doc, &ev.scope(&doc))
+        };
         let mut open = true;
         let picks = self.model.picks.clone();
+        let bodies = self.bodies.clone();
+        let target = self.target_index();
         egui::Window::new(egui::RichText::new("MEASURE").size(11.5).strong())
             .open(&mut open)
             .default_pos(egui::pos2(330.0, 190.0))
             .collapsible(false)
             .default_width(330.0)
             .show(ctx, |ui| {
-                let solid = ev.final_solid();
-                let Some((brep, body)) = solid.and_then(|(_, o)| Some((o.brep()?, o.body()?)))
-                else {
+                let Some(bodies) = bodies else {
                     ui.label("There is no solid to measure yet.");
                     return;
                 };
@@ -398,7 +402,8 @@ impl DesignWorkspace {
                     .color(TEXT_WEAK),
                 );
                 ui.add_space(4.0);
-                let lines = describe(brep, &picks);
+                // picks are ids of the drawn B-rep, which holds every body: distances between bodies work too
+                let lines = describe(&bodies.brep, &picks);
                 if lines.is_empty() {
                     ui.label(egui::RichText::new("Nothing picked.").color(TEXT_WEAK));
                 }
@@ -409,9 +414,26 @@ impl DesignWorkspace {
                     self.model.picks.clear();
                 }
                 ui.separator();
-                ui.label(egui::RichText::new("Body").strong());
-                if let Some(p) = body_props(brep, body) {
+                let idx = target.unwrap_or(0).min(bodies.list.len() - 1);
+                let body = &bodies.list[idx];
+                ui.label(egui::RichText::new(format!("Body: {}", body.name)).strong());
+                let Some((brep, id)) = body.output.brep().zip(body.output.body()) else {
+                    return;
+                };
+                if let Some(p) = body_props(brep, id) {
                     let size = p.size();
+                    let own = body
+                        .material
+                        .as_deref()
+                        .and_then(|n| MATERIALS.iter().position(|m| m.name == n));
+                    if let Some(i) = own {
+                        self.material = i;
+                        ui.label(
+                            egui::RichText::new("material set on the body")
+                                .size(10.5)
+                                .color(TEXT_WEAK),
+                        );
+                    }
                     egui::ComboBox::from_id_salt("material")
                         .selected_text(MATERIALS[self.material.min(MATERIALS.len() - 1)].name)
                         .show_ui(ui, |ui| {
@@ -454,10 +476,74 @@ impl DesignWorkspace {
                             );
                         });
                 }
+                if !threads.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("Threads ({})", threads.len())).strong());
+                    for t in &threads {
+                        ui.label(egui::RichText::new(t.text()).size(10.5));
+                    }
+                }
             });
         if !open {
             self.measure_open = false;
             self.model.picks.clear();
+        }
+    }
+}
+
+impl DesignWorkspace {
+    /// The Interference window: which bodies share volume, and how much.
+    pub fn interference_window(&mut self, ctx: &egui::Context) {
+        if !self.interference_open {
+            return;
+        }
+        let bodies = self.bodies.clone();
+        let mut open = true;
+        egui::Window::new(egui::RichText::new("INTERFERENCE").size(11.5).strong())
+            .open(&mut open)
+            .default_pos(egui::pos2(330.0, 190.0))
+            .collapsible(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                let Some(bodies) = bodies else {
+                    ui.label("There are no bodies yet.");
+                    return;
+                };
+                if bodies.list.len() < 2 {
+                    ui.label("Interference compares two or more bodies; there is one.");
+                    return;
+                }
+                let key = egui::Id::new(("interference", bodies.key));
+                let found: Vec<crate::bodies::Overlap> =
+                    ctx.data_mut(|d| d.get_temp(key)).unwrap_or_else(|| {
+                        let f = crate::bodies::interference(&bodies);
+                        ctx.data_mut(|d| d.insert_temp(key, f.clone()));
+                        f
+                    });
+                if found.is_empty() {
+                    ui.colored_label(
+                        crate::chrome::theme::GOOD,
+                        "No two bodies share any volume.",
+                    );
+                }
+                for o in &found {
+                    let (a, b) = (&bodies.list[o.a].name, &bodies.list[o.b].name);
+                    match (&o.volume, &o.error) {
+                        (Some(v), _) => {
+                            ui.colored_label(
+                                crate::chrome::theme::BAD,
+                                format!("{a} and {b} overlap: {v:.3} mm³"),
+                            );
+                        }
+                        (None, Some(e)) => {
+                            ui.label(format!("{a} and {b}: could not be checked ({e})"));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        if !open {
+            self.interference_open = false;
         }
     }
 }

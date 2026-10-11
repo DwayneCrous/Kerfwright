@@ -329,11 +329,11 @@ impl RenderWorkspace {
 
     pub fn show(&mut self, ui: &mut egui::Ui, project: &mut Project, dialogs: &mut dyn Dialogs) {
         let ev = project.evaluation();
-        let brep = ev.final_solid().and_then(|(_, o)| o.brep().cloned());
-        let key = ev
-            .final_hashes()
-            .map(|h| h.0 ^ h.1.rotate_left(1))
-            .unwrap_or(0);
+        // every body of the model is rendered
+        let doc = project.document();
+        let bodies = crate::bodies::Bodies::new(&doc, &ev, &std::collections::HashSet::new());
+        let brep = bodies.as_ref().map(|b| b.brep.clone());
+        let key = bodies.as_ref().map(|b| b.key).unwrap_or(0);
         let have_gpu = self.ensure_gpu();
         if have_gpu {
             if self.frame.is_none() {

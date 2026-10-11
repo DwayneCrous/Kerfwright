@@ -73,6 +73,7 @@ pub fn sample_document() -> Document {
             base: PlaneSpec::Xz(mm(5.0)),
             offset: mm(2.0),
             tilt: Param::angle_deg(0.0),
+            mode: Default::default(),
         }),
     )
     .unwrap();

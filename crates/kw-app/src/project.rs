@@ -15,6 +15,8 @@ pub struct Project {
     pub cam: Option<CamSetup>,
     pub fea: Option<FeaStudy>,
     pub board: Option<kw_ecad::Board>,
+    /// The assembly (components and joints) stored with the project, if there is one.
+    pub assembly: Option<kw_assembly::Assembly>,
     /// The container as read, so unknown entries and fields survive a save.
     file: KwfFile,
     saved_hash: u128,
@@ -32,6 +34,7 @@ impl Project {
         let cam = kw_store::cam_from_file(&file).transpose()?;
         let fea = kw_store::fea_from_file(&file).transpose()?;
         let board = kw_store::board_from_file(&file).transpose()?;
+        let assembly = kw_assembly::Assembly::from_file(&file).transpose()?;
         let doc = file.document.clone();
         let saved_hash = doc.content_hash();
         Ok(Project {
@@ -41,6 +44,7 @@ impl Project {
             cam,
             fea,
             board,
+            assembly,
             file,
             saved_hash,
             extras_dirty: false,
@@ -117,6 +121,10 @@ impl Project {
         }
         if let Some(b) = &self.board {
             kw_store::attach_board(&mut self.file, b);
+        }
+        self.file.extra_entries.remove("assembly.cbor");
+        if let Some(a) = &self.assembly {
+            a.attach(&mut self.file);
         }
         self.file.save(path).map_err(|e| e.to_string())?;
         self.path = Some(path.to_path_buf());

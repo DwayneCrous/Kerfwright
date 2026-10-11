@@ -12,6 +12,7 @@
 pub mod ad;
 pub mod analysis;
 pub mod constraint;
+pub mod curves;
 pub mod editor;
 pub mod entity;
 pub mod geom;
@@ -23,6 +24,7 @@ pub mod solve;
 pub mod system;
 #[doc(hidden)]
 pub mod testgen;
+pub mod text;
 
 pub use analysis::{DofReport, SketchStatus};
 pub use constraint::{

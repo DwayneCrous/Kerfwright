@@ -14,10 +14,12 @@ rayon.workspace = true
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 kw-math.workspace = true
 kw-nurbs.workspace = true
+ab_glyph = "0.2"
 
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true
+epaint_default_fonts = "0.36"
 
 [[bench]]
 name = "solver"

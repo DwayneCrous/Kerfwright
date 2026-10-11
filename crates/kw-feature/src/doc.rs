@@ -8,7 +8,7 @@ use crate::id::FeatureId;
 use crate::spec::FeatureSpec;
 use kw_expr::is_reserved;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -20,9 +20,20 @@ pub struct Feature {
     pub spec: FeatureSpec,
 }
 
+/// How a body is named, coloured and made of.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Appearance {
+    pub name: Option<String>,
+    pub colour: Option<[u8; 3]>,
+    pub material: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub features: Vec<Feature>,
+    /// Name, colour and material of bodies, keyed by the id of the feature that started the body.
+    #[serde(default)]
+    pub appearance: BTreeMap<u64, Appearance>,
     /// Features at positions ≥ `rollback` are not evaluated (the rollback bar). `None` = evaluate all.
     pub rollback: Option<usize>,
     pub(crate) next_id: u64,
@@ -123,6 +134,7 @@ impl Document {
     pub fn new() -> Document {
         Document {
             features: Vec::new(),
+            appearance: BTreeMap::new(),
             rollback: None,
             next_id: 1,
         }
@@ -171,6 +183,71 @@ impl Document {
             .rev()
             .find(|f| f.spec.produces_solid())
             .map(|f| f.id)
+    }
+
+    /// The bodies of the document: solid features that no later feature builds on (a copy does not use up
+    /// its source, a Combine with `keep_tool` does not use up its tool). Only features that are evaluated
+    /// (before the rollback bar, not suppressed) count. In feature order.
+    pub fn heads(&self) -> Vec<FeatureId> {
+        let limit = self
+            .rollback
+            .unwrap_or(self.features.len())
+            .min(self.features.len());
+        let mut used: HashSet<FeatureId> = HashSet::new();
+        for j in 0..limit {
+            let f = &self.features[j];
+            if f.suppressed || !f.spec.produces_solid() {
+                continue;
+            }
+            if f.spec.consumes_body() {
+                if let Some(b) = self.body_input(j) {
+                    used.insert(b);
+                }
+            }
+            if let FeatureSpec::Combine(c) = &f.spec {
+                used.insert(c.target);
+                if !c.keep_tool {
+                    used.insert(c.tool);
+                }
+            }
+        }
+        self.features[..limit]
+            .iter()
+            .filter(|f| f.spec.produces_solid() && !f.suppressed && !used.contains(&f.id))
+            .map(|f| f.id)
+            .collect()
+    }
+
+    /// The feature that started the body `head` belongs to (follow the body input back to its start).
+    pub fn body_root(&self, head: FeatureId) -> FeatureId {
+        let mut cur = head;
+        for _ in 0..=self.features.len() {
+            let Some(i) = self.index_of(cur) else {
+                break;
+            };
+            // a copy starts a body of its own
+            if !self.features[i].spec.consumes_body() {
+                break;
+            }
+            match self.body_input(i) {
+                Some(prev) if prev != cur => cur = prev,
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// Set (or clear, with a default value) the appearance of the body started by `root`.
+    pub fn set_appearance(&mut self, root: FeatureId, a: Appearance) {
+        if a == Appearance::default() {
+            self.appearance.remove(&root.0);
+        } else {
+            self.appearance.insert(root.0, a);
+        }
+    }
+
+    pub fn appearance_of(&self, root: FeatureId) -> Option<&Appearance> {
+        self.appearance.get(&root.0)
     }
 
     /// The feature whose body the feature at `index` modifies, looking through suppressed features.
@@ -425,8 +502,14 @@ impl Document {
     /// Evaluate only the features up to and including `id` (the rollback bar sits after it).
     pub fn rollback_to(&mut self, id: FeatureId) -> Result<(), TimelineError> {
         let i = self.index_of(id).ok_or(TimelineError::UnknownFeature(id))?;
-        self.rollback = Some(i + 1);
+        // a bar after the last feature is no rollback at all
+        self.rollback = (i + 1 < self.features.len()).then_some(i + 1);
         Ok(())
+    }
+
+    /// Is the bar really before the end (so that adding features is refused)?
+    pub fn rolled_back(&self) -> bool {
+        self.rollback.is_some_and(|r| r < self.features.len())
     }
 
     pub fn clear_rollback(&mut self) {

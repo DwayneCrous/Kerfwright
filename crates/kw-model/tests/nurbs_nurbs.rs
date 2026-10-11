@@ -62,6 +62,7 @@ fn moved(rep: &mut BRep, b: BodyId, t: Transform3) -> BodyId {
         &CopyOptions {
             transform: Some(t),
             flip: false,
+            ..Default::default()
         },
     )
     .0

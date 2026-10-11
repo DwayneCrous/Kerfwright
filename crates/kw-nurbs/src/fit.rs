@@ -297,3 +297,170 @@ pub fn offset_surface(s: &SurfaceGeom, d: f64) -> Option<SurfaceGeom> {
         _ => None,
     }
 }
+
+// ---------------------------------------------------------------------------------- uniform scaling
+
+fn sp(p: &Point3<f64>, k: f64, c: &Point3<f64>) -> Point3<f64> {
+    c + (p - c) * k
+}
+
+fn sframe(f: &kw_math::Frame3, k: f64, c: &Point3<f64>) -> kw_math::Frame3 {
+    kw_math::Frame3 {
+        origin: sp(&f.origin, k, c),
+        ..*f
+    }
+}
+
+fn scale_nurbs_curve(n: &NurbsCurve, k: f64, c: &Point3<f64>) -> NurbsCurve {
+    let pts = n.points().iter().map(|p| sp(p, k, c)).collect();
+    NurbsCurve::new(n.knots().clone(), pts, n.weights().to_vec()).expect("same counts")
+}
+
+fn scale_nurbs_surface(s: &NurbsSurface, k: f64, c: &Point3<f64>) -> NurbsSurface {
+    let pts = s.points().iter().map(|p| sp(p, k, c)).collect();
+    NurbsSurface::new(
+        s.knots_u().clone(),
+        s.knots_v().clone(),
+        pts,
+        s.weights().to_vec(),
+    )
+    .expect("same counts")
+}
+
+/// Scale a curve by `k > 0` about `centre`. Curve parameters keep their meaning (angles stay angles, a
+/// line's direction vector is scaled), so edge parameter ranges stay valid.
+pub fn scale_curve(c: &CurveGeom, k: f64, centre: &Point3<f64>) -> CurveGeom {
+    match c {
+        CurveGeom::Line(l) => CurveGeom::Line(Line {
+            origin: sp(&l.origin, k, centre),
+            dir: l.dir * k,
+        }),
+        CurveGeom::Circle(ci) => CurveGeom::Circle(Circle {
+            frame: sframe(&ci.frame, k, centre),
+            radius: ci.radius * k,
+        }),
+        CurveGeom::Ellipse(e) => CurveGeom::Ellipse(Ellipse {
+            frame: sframe(&e.frame, k, centre),
+            major: e.major * k,
+            minor: e.minor * k,
+        }),
+        CurveGeom::Nurbs(n) => CurveGeom::Nurbs(scale_nurbs_curve(n, k, centre)),
+        CurveGeom::Procedural(p) => CurveGeom::Procedural(Box::new(ProceduralCurve {
+            kind: p.kind.clone(),
+            approximation: scale_nurbs_curve(&p.approximation, k, centre),
+            tolerance: p.tolerance * k,
+        })),
+    }
+}
+
+/// Scale a surface by `k > 0` about `centre`. Angular parameters are unchanged; the length parameters
+/// of a plane (`u`, `v`), a cylinder and a cone (`v`) are multiplied by `k` — see [`scale_pcurve`].
+pub fn scale_surface(s: &SurfaceGeom, k: f64, centre: &Point3<f64>) -> SurfaceGeom {
+    match s {
+        SurfaceGeom::Plane(p) => SurfaceGeom::Plane(Plane {
+            frame: sframe(&p.frame, k, centre),
+        }),
+        SurfaceGeom::Cylinder(c) => SurfaceGeom::Cylinder(Cylinder {
+            frame: sframe(&c.frame, k, centre),
+            radius: c.radius * k,
+        }),
+        SurfaceGeom::Cone(c) => SurfaceGeom::Cone(Cone {
+            frame: sframe(&c.frame, k, centre),
+            radius_at_origin: c.radius_at_origin * k,
+            half_angle: c.half_angle,
+        }),
+        SurfaceGeom::Sphere(c) => SurfaceGeom::Sphere(Sphere {
+            frame: sframe(&c.frame, k, centre),
+            radius: c.radius * k,
+        }),
+        SurfaceGeom::Torus(c) => SurfaceGeom::Torus(Torus {
+            frame: sframe(&c.frame, k, centre),
+            major_radius: c.major_radius * k,
+            minor_radius: c.minor_radius * k,
+        }),
+        SurfaceGeom::Nurbs(n) => SurfaceGeom::Nurbs(scale_nurbs_surface(n, k, centre)),
+        SurfaceGeom::Extrusion { profile, dir } => SurfaceGeom::Extrusion {
+            profile: Box::new(scale_curve(profile, k, centre)),
+            dir: dir * k,
+        },
+        SurfaceGeom::Revolution {
+            profile,
+            axis_origin,
+            axis_dir,
+        } => SurfaceGeom::Revolution {
+            profile: Box::new(scale_curve(profile, k, centre)),
+            axis_origin: sp(axis_origin, k, centre),
+            axis_dir: *axis_dir,
+        },
+        SurfaceGeom::Procedural(p) => SurfaceGeom::Procedural(Box::new(ProceduralSurface {
+            kind: match &p.kind {
+                ProceduralSurfaceKind::Offset { distance } => ProceduralSurfaceKind::Offset {
+                    distance: distance * k,
+                },
+                other => other.clone(),
+            },
+            approximation: scale_nurbs_surface(&p.approximation, k, centre),
+            tolerance: p.tolerance * k,
+        })),
+    }
+}
+
+/// How a surface's `(u, v)` parameters change under [`scale_surface`] with factor `k`.
+pub fn scale_param_factors(s: &SurfaceGeom, k: f64) -> (f64, f64) {
+    match s {
+        SurfaceGeom::Plane(_) => (k, k),
+        SurfaceGeom::Cylinder(_) | SurfaceGeom::Cone(_) => (1.0, k),
+        _ => (1.0, 1.0),
+    }
+}
+
+/// Scale a pcurve (a curve in the `z = 0` parameter plane) by `(su, sv)`. A circle or ellipse only stays
+/// one when `su == sv`; otherwise `None`.
+pub fn scale_pcurve(c: &CurveGeom, su: f64, sv: f64) -> Option<CurveGeom> {
+    if su == 1.0 && sv == 1.0 {
+        return Some(c.clone());
+    }
+    let m = |p: &Point3<f64>| Point3::new(p.x * su, p.y * sv, p.z);
+    let mv = |v: &Vector3<f64>| Vector3::new(v.x * su, v.y * sv, v.z);
+    Some(match c {
+        CurveGeom::Line(l) => CurveGeom::Line(Line {
+            origin: m(&l.origin),
+            dir: mv(&l.dir),
+        }),
+        CurveGeom::Circle(ci) if su == sv => {
+            let mut f = ci.frame;
+            f.origin = m(&f.origin);
+            CurveGeom::Circle(Circle {
+                frame: f,
+                radius: ci.radius * su,
+            })
+        }
+        CurveGeom::Ellipse(e) if su == sv => {
+            let mut f = e.frame;
+            f.origin = m(&f.origin);
+            CurveGeom::Ellipse(Ellipse {
+                frame: f,
+                major: e.major * su,
+                minor: e.minor * su,
+            })
+        }
+        CurveGeom::Nurbs(n) => {
+            let pts = n.points().iter().map(m).collect();
+            CurveGeom::Nurbs(NurbsCurve::new(n.knots().clone(), pts, n.weights().to_vec()).ok()?)
+        }
+        CurveGeom::Procedural(p) => {
+            let pts = p.approximation.points().iter().map(m).collect();
+            CurveGeom::Procedural(Box::new(ProceduralCurve {
+                kind: p.kind.clone(),
+                approximation: NurbsCurve::new(
+                    p.approximation.knots().clone(),
+                    pts,
+                    p.approximation.weights().to_vec(),
+                )
+                .ok()?,
+                tolerance: p.tolerance * su.max(sv),
+            }))
+        }
+        _ => return None,
+    })
+}

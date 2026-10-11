@@ -9,6 +9,7 @@ struct Globals {
     params: vec4<f32>,
     ids: vec4<u32>,
     sel: array<vec4<u32>, 16>,
+    clip: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -44,11 +45,24 @@ fn vs_main(v: VsIn) -> VsOut {
     let t = ts[v.vi];
     let side = sides[v.vi];
 
-    var a = g.view_proj * vec4<f32>(v.p0, 1.0);
-    var b = g.view_proj * vec4<f32>(v.p1, 1.0);
+    var p0 = v.p0;
+    var p1 = v.p1;
     var o: VsOut;
     o.id = v.id;
     o.state = edge_state(v.id);
+    if (g.ids.w == 1u) {
+        // cut the segment at the section plane
+        let da = dot(g.clip.xyz, p0) - g.clip.w;
+        let db = dot(g.clip.xyz, p1) - g.clip.w;
+        if (da > 0.0 && db > 0.0) {
+            o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+            return o;
+        }
+        if (da > 0.0) { p0 = mix(p0, p1, da / (da - db)); }
+        if (db > 0.0) { p1 = mix(p1, p0, db / (db - da)); }
+    }
+    var a = g.view_proj * vec4<f32>(p0, 1.0);
+    var b = g.view_proj * vec4<f32>(p1, 1.0);
     let near_w = 0.01;
     if (a.w < near_w && b.w < near_w) {
         o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);

@@ -37,10 +37,16 @@ pub enum PlaneSpec {
 pub struct SketchSpec {
     pub plane: PlaneSpec,
     pub recipe: SketchRecipe,
+    /// For a sketch on a face: the body the face belongs to (`None` = the body so far).
+    #[serde(default)]
+    pub base: Option<FeatureId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatumPlaneSpec {
+    /// How the plane is made; the base, offset and tilt below are used by `PlaneMode::Offset`.
+    #[serde(default)]
+    pub mode: PlaneMode,
     pub base: PlaneSpec,
     /// Offset along the base plane's normal.
     pub offset: Param,
@@ -60,6 +66,36 @@ pub struct ExtrudeExtent {
     /// Taper angle: positive narrows the profile along the extrusion direction.
     #[serde(default)]
     pub taper: Option<Param>,
+    /// Make a wall of this thickness along the profile instead of a solid.
+    #[serde(default)]
+    pub thin: Option<ThinWall>,
+    /// Stop at this planar face of the body instead of after a distance.
+    #[serde(default)]
+    pub to_face: Option<Reference>,
+    /// Start the extrusion this far from the sketch plane (along the extrusion direction).
+    #[serde(default)]
+    pub start_offset: Option<Param>,
+    /// Extrude only these regions of the sketch: each is the set of closed loops (by the smallest label of
+    /// the loop's entities) the region lies inside. Empty = everything the loops enclose.
+    #[serde(default)]
+    pub regions: Vec<Vec<u32>>,
+}
+
+/// Which side of the profile curve a thin extrusion's wall lies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThinSide {
+    /// Inside the profile (the profile is the outer face of the wall).
+    Inside,
+    /// Outside the profile (the profile is the inner face of the wall).
+    Outside,
+    /// Half on each side.
+    Centered,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThinWall {
+    pub thickness: Param,
+    pub side: ThinSide,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +118,10 @@ pub enum AxisSpec {
     SketchY,
     /// A line entity of the profile sketch (by label).
     SketchLine(u32),
+    /// A straight edge of the body, named by the two faces that meet there.
+    Edge(Box<EdgeRef>),
+    /// A construction axis feature.
+    Datum(FeatureId),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,6 +194,18 @@ pub struct DraftSpec {
     pub base: Option<FeatureId>,
 }
 
+/// A cosmetic thread on a cylindrical face: the geometry is not changed; the designation, length and
+/// hand are recorded for drawings, the feature list and export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSpec {
+    pub face: Reference,
+    pub designation: String,
+    pub length: Param,
+    /// A tapped hole (true) or a bolt (false).
+    pub internal: bool,
+    pub base: Option<FeatureId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OffsetSpec {
     pub distance: Param,
@@ -165,6 +217,9 @@ pub struct CombineSpec {
     pub target: FeatureId,
     pub tool: FeatureId,
     pub op: BodyOp,
+    /// Keep the tool body (it stays a body of its own) instead of consuming it.
+    #[serde(default)]
+    pub keep_tool: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,6 +237,12 @@ pub enum HoleKind {
         cs_diameter: Param,
         /// Full included angle of the countersink cone.
         cs_angle: Param,
+    },
+    /// Drilled to the tap-drill diameter of a standard size (see [`crate::threads`]) with a cosmetic
+    /// internal thread of `thread_length` (the rest of the hole stays plain).
+    Tapped {
+        designation: String,
+        thread_length: Param,
     },
 }
 
@@ -214,6 +275,9 @@ pub struct LinearPatternSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CircularPatternSpec {
     pub source: FeatureId,
+    /// A construction axis to turn about; when set, `axis_origin` and `axis_dir` are not used.
+    #[serde(default)]
+    pub axis_feature: Option<FeatureId>,
     pub axis_origin: [Param; 3],
     pub axis_dir: [f64; 3],
     pub count: Param,
@@ -227,6 +291,10 @@ pub enum MirrorPlane {
     Xy(Param),
     Yz(Param),
     Xz(Param),
+    /// A construction plane feature.
+    Datum(FeatureId),
+    /// A planar face of the body.
+    Face(Reference),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -262,11 +330,128 @@ pub struct SubdSpec {
     pub tolerance: Param,
 }
 
+/// Move (translate, then rotate about a world axis through the origin) a body, or put a moved copy next to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoveBodySpec {
+    pub base: Option<FeatureId>,
+    pub delta: [Param; 3],
+    /// World axis of the rotation: 0 = X, 1 = Y, 2 = Z.
+    pub axis: u8,
+    pub angle: Param,
+    /// Leave the original in place and add the moved body as a second body.
+    pub copy: bool,
+}
+
+/// Uniform scale of a body about a point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScaleBodySpec {
+    pub base: Option<FeatureId>,
+    pub factor: Param,
+    pub centre: [Param; 3],
+}
+
+/// Which side of the splitting plane a split keeps (relative to the plane's normal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitSide {
+    Positive,
+    Negative,
+}
+
+/// One half of a body cut by a plane; a Split Body command adds one feature per half.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplitBodySpec {
+    pub base: Option<FeatureId>,
+    pub plane: PlaneSpec,
+    pub keep: SplitSide,
+}
+
+/// A wall standing on the sketch plane: every line and arc of the sketch is thickened (in the plane) and the
+/// result is extruded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RibSpec {
+    pub sketch: FeatureId,
+    pub thickness: Param,
+    pub depth: Param,
+    pub symmetric: bool,
+    pub flip: bool,
+    pub op: BodyOp,
+    pub base: Option<FeatureId>,
+}
+
+/// A tube of the given outer diameter (and wall thickness) along the path of a sketch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipeSpec {
+    pub path: FeatureId,
+    pub diameter: Param,
+    /// Wall thickness; at least half the diameter makes a solid rod.
+    pub wall: Param,
+    pub op: BodyOp,
+    pub base: Option<FeatureId>,
+}
+
 /// File format of an imported body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImportFormat {
     Step,
     Iges,
+}
+
+/// A point given by coordinates (mm) or by a datum point feature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // a handful per document, built once
+pub enum PointSrc {
+    Coords([Param; 3]),
+    Datum(FeatureId),
+}
+
+/// How a construction plane is made.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub enum PlaneMode {
+    /// The base plane moved along its normal and tilted about its x axis.
+    #[default]
+    Offset,
+    /// Halfway between the base plane and another (parallel) plane.
+    Midplane(PlaneSpec),
+    /// Through three points.
+    ThreePoints(Box<[PointSrc; 3]>),
+}
+
+/// How a construction axis is made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // a handful per document, built once
+pub enum AxisKind {
+    /// Through two points.
+    TwoPoints(Box<[PointSrc; 2]>),
+    /// Along a straight edge of the body.
+    Edge(Box<EdgeRef>),
+    /// Through the point `at` (plane coordinates of the face) normal to a planar face of the body.
+    NormalToFace { face: Reference, at: [Param; 2] },
+    /// Where two planes meet.
+    PlanePlane(Box<(PlaneSpec, PlaneSpec)>),
+}
+
+/// A construction axis: a line the Revolve, Circular Pattern and sketches can use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatumAxisSpec {
+    pub kind: AxisKind,
+}
+
+/// How a construction point is made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PointKind {
+    Coords([Param; 3]),
+    /// The middle of an edge of the body.
+    EdgeMidpoint(Box<EdgeRef>),
+    /// Where an axis pierces a plane.
+    AxisPlane {
+        axis: FeatureId,
+        plane: PlaneSpec,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatumPointSpec {
+    pub kind: PointKind,
 }
 
 /// A body read from another CAD system's file; the file's text is kept in the document so the part stays
@@ -294,6 +479,7 @@ pub enum FeatureSpec {
     VariableFillet(VariableFilletSpec),
     Shell(ShellSpec),
     Draft(DraftSpec),
+    Thread(ThreadSpec),
     Offset(OffsetSpec),
     Combine(CombineSpec),
     Hole(HoleSpec),
@@ -303,6 +489,13 @@ pub enum FeatureSpec {
     SheetMetal(SheetMetalSpec),
     Subd(SubdSpec),
     Import(ImportSpec),
+    MoveBody(MoveBodySpec),
+    ScaleBody(ScaleBodySpec),
+    SplitBody(SplitBodySpec),
+    Rib(RibSpec),
+    Pipe(PipeSpec),
+    DatumAxis(DatumAxisSpec),
+    DatumPoint(DatumPointSpec),
 }
 
 fn plane_params(p: &mut PlaneSpec, f: &mut dyn FnMut(&mut Param)) {
@@ -327,6 +520,8 @@ impl FeatureSpec {
             FeatureSpec::Parameter { .. } => "Parameter",
             FeatureSpec::Sketch(_) => "Sketch",
             FeatureSpec::DatumPlane(_) => "DatumPlane",
+            FeatureSpec::DatumAxis(_) => "DatumAxis",
+            FeatureSpec::DatumPoint(_) => "DatumPoint",
             FeatureSpec::Extrude(_) => "Extrude",
             FeatureSpec::Revolve(_) => "Revolve",
             FeatureSpec::Loft(_) => "Loft",
@@ -336,6 +531,7 @@ impl FeatureSpec {
             FeatureSpec::VariableFillet(_) => "VariableFillet",
             FeatureSpec::Shell(_) => "Shell",
             FeatureSpec::Draft(_) => "Draft",
+            FeatureSpec::Thread(_) => "Thread",
             FeatureSpec::Offset(_) => "Offset",
             FeatureSpec::Combine(_) => "Combine",
             FeatureSpec::Hole(_) => "Hole",
@@ -345,6 +541,17 @@ impl FeatureSpec {
             FeatureSpec::SheetMetal(_) => "SheetMetal",
             FeatureSpec::Subd(_) => "Subd",
             FeatureSpec::Import(_) => "Import",
+            FeatureSpec::MoveBody(m) => {
+                if m.copy {
+                    "CopyBody"
+                } else {
+                    "MoveBody"
+                }
+            }
+            FeatureSpec::ScaleBody(_) => "ScaleBody",
+            FeatureSpec::SplitBody(_) => "SplitBody",
+            FeatureSpec::Rib(_) => "Rib",
+            FeatureSpec::Pipe(_) => "Pipe",
         }
     }
 
@@ -352,7 +559,11 @@ impl FeatureSpec {
     pub fn produces_solid(&self) -> bool {
         !matches!(
             self,
-            FeatureSpec::Parameter { .. } | FeatureSpec::Sketch(_) | FeatureSpec::DatumPlane(_)
+            FeatureSpec::Parameter { .. }
+                | FeatureSpec::Sketch(_)
+                | FeatureSpec::DatumPlane(_)
+                | FeatureSpec::DatumAxis(_)
+                | FeatureSpec::DatumPoint(_)
         )
     }
 
@@ -370,13 +581,61 @@ impl FeatureSpec {
                 plane_params(&mut d.base, &mut |p| f(p));
                 f(&mut d.offset);
                 f(&mut d.tilt);
+                match &mut d.mode {
+                    PlaneMode::Offset => {}
+                    PlaneMode::Midplane(o) => plane_params(o, &mut |p| f(p)),
+                    PlaneMode::ThreePoints(pts) => {
+                        for pt in pts.iter_mut() {
+                            if let PointSrc::Coords(c) = pt {
+                                for p in c.iter_mut() {
+                                    f(p);
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            FeatureSpec::DatumAxis(a) => match &mut a.kind {
+                AxisKind::TwoPoints(pts) => {
+                    for pt in pts.iter_mut() {
+                        if let PointSrc::Coords(c) = pt {
+                            for p in c.iter_mut() {
+                                f(p);
+                            }
+                        }
+                    }
+                }
+                AxisKind::NormalToFace { at, .. } => {
+                    f(&mut at[0]);
+                    f(&mut at[1]);
+                }
+                AxisKind::PlanePlane(pp) => {
+                    plane_params(&mut pp.0, &mut |p| f(p));
+                    plane_params(&mut pp.1, &mut |p| f(p));
+                }
+                AxisKind::Edge(_) => {}
+            },
+            FeatureSpec::DatumPoint(d) => match &mut d.kind {
+                PointKind::Coords(c) => {
+                    for p in c.iter_mut() {
+                        f(p);
+                    }
+                }
+                PointKind::AxisPlane { plane, .. } => plane_params(plane, &mut |p| f(p)),
+                PointKind::EdgeMidpoint(_) => {}
+            },
             FeatureSpec::Extrude(e) => {
                 f(&mut e.depth);
                 if let Some(p) = &mut e.extent.second_side {
                     f(p);
                 }
                 if let Some(p) = &mut e.extent.taper {
+                    f(p);
+                }
+                if let Some(t) = &mut e.extent.thin {
+                    f(&mut t.thickness);
+                }
+                if let Some(p) = &mut e.extent.start_offset {
                     f(p);
                 }
             }
@@ -398,6 +657,7 @@ impl FeatureSpec {
                 }
                 f(&mut x.angle);
             }
+            FeatureSpec::Thread(x) => f(&mut x.length),
             FeatureSpec::Offset(x) => f(&mut x.distance),
             FeatureSpec::Hole(h) => {
                 plane_params(&mut h.plane, &mut |p| f(p));
@@ -425,6 +685,7 @@ impl FeatureSpec {
                         f(cs_diameter);
                         f(cs_angle);
                     }
+                    HoleKind::Tapped { thread_length, .. } => f(thread_length),
                 }
                 f(&mut h.depth);
             }
@@ -443,8 +704,30 @@ impl FeatureSpec {
             }
             FeatureSpec::Mirror(m) => match &mut m.plane {
                 MirrorPlane::Xy(o) | MirrorPlane::Yz(o) | MirrorPlane::Xz(o) => f(o),
+                MirrorPlane::Datum(_) | MirrorPlane::Face(_) => {}
             },
             FeatureSpec::Import(_) => {}
+            FeatureSpec::MoveBody(m) => {
+                for p in &mut m.delta {
+                    f(p);
+                }
+                f(&mut m.angle);
+            }
+            FeatureSpec::ScaleBody(m) => {
+                f(&mut m.factor);
+                for p in &mut m.centre {
+                    f(p);
+                }
+            }
+            FeatureSpec::SplitBody(m) => plane_params(&mut m.plane, &mut |p| f(p)),
+            FeatureSpec::Rib(r) => {
+                f(&mut r.thickness);
+                f(&mut r.depth);
+            }
+            FeatureSpec::Pipe(p) => {
+                f(&mut p.diameter);
+                f(&mut p.wall);
+            }
             FeatureSpec::Subd(s) => {
                 f(&mut s.scale);
                 f(&mut s.tolerance);
@@ -493,6 +776,7 @@ impl FeatureSpec {
             FeatureSpec::VariableFillet(x) => x.edge.faces.iter_mut().for_each(&mut *f),
             FeatureSpec::Shell(x) => x.open.iter_mut().for_each(&mut *f),
             FeatureSpec::Draft(x) => x.faces.iter_mut().for_each(&mut *f),
+            FeatureSpec::Thread(x) => f(&mut x.face),
             _ => {}
         }
     }
@@ -538,13 +822,53 @@ impl FeatureSpec {
             FeatureSpec::VariableFillet(x) => x.base,
             FeatureSpec::Shell(x) => x.base,
             FeatureSpec::Draft(x) => x.base,
+            FeatureSpec::Thread(x) => x.base,
             FeatureSpec::Offset(x) => x.base,
             FeatureSpec::Hole(x) => x.base,
             FeatureSpec::LinearPattern(x) => x.base,
             FeatureSpec::CircularPattern(x) => x.base,
             FeatureSpec::Mirror(x) => x.base,
+            FeatureSpec::Sketch(x) => x.base,
+            FeatureSpec::MoveBody(x) => x.base,
+            FeatureSpec::ScaleBody(x) => x.base,
+            FeatureSpec::SplitBody(x) => x.base,
+            FeatureSpec::Rib(x) => x.base,
+            FeatureSpec::Pipe(x) => x.base,
             _ => None,
         }
+    }
+
+    /// Point the feature at another body (`None` = the body so far). Features that take no body ignore it.
+    pub fn set_base(&mut self, b: Option<FeatureId>) {
+        match self {
+            FeatureSpec::Extrude(x) => x.base = b,
+            FeatureSpec::Revolve(x) => x.base = b,
+            FeatureSpec::Loft(x) => x.base = b,
+            FeatureSpec::Sweep(x) => x.base = b,
+            FeatureSpec::Fillet(x) => x.base = b,
+            FeatureSpec::Chamfer(x) => x.base = b,
+            FeatureSpec::VariableFillet(x) => x.base = b,
+            FeatureSpec::Shell(x) => x.base = b,
+            FeatureSpec::Draft(x) => x.base = b,
+            FeatureSpec::Thread(x) => x.base = b,
+            FeatureSpec::Offset(x) => x.base = b,
+            FeatureSpec::Hole(x) => x.base = b,
+            FeatureSpec::LinearPattern(x) => x.base = b,
+            FeatureSpec::CircularPattern(x) => x.base = b,
+            FeatureSpec::Mirror(x) => x.base = b,
+            FeatureSpec::Sketch(x) => x.base = b,
+            FeatureSpec::MoveBody(x) => x.base = b,
+            FeatureSpec::ScaleBody(x) => x.base = b,
+            FeatureSpec::SplitBody(x) => x.base = b,
+            FeatureSpec::Rib(x) => x.base = b,
+            FeatureSpec::Pipe(x) => x.base = b,
+            _ => {}
+        }
+    }
+
+    /// Does the feature use up the body it reads? A copy leaves its source alive as a body of its own.
+    pub fn consumes_body(&self) -> bool {
+        !matches!(self, FeatureSpec::MoveBody(m) if m.copy)
     }
 
     /// Does the feature take the body so far as an input (the previous solid unless `base` names one)?
@@ -561,6 +885,12 @@ impl FeatureSpec {
             FeatureSpec::Revolve(x) => x.op != BodyOp::New,
             FeatureSpec::Loft(x) => x.op != BodyOp::New,
             FeatureSpec::Sweep(x) => x.op != BodyOp::New,
+            FeatureSpec::Rib(x) => x.op != BodyOp::New,
+            FeatureSpec::Pipe(x) => x.op != BodyOp::New,
+            FeatureSpec::DatumAxis(a) => {
+                matches!(a.kind, AxisKind::Edge(_) | AxisKind::NormalToFace { .. })
+            }
+            FeatureSpec::DatumPoint(p) => matches!(p.kind, PointKind::EdgeMidpoint(_)),
             _ => true,
         }
     }
@@ -576,9 +906,59 @@ impl FeatureSpec {
         match self {
             FeatureSpec::Parameter { .. } => {}
             FeatureSpec::Sketch(s) => plane_refs(&s.plane, &mut v),
-            FeatureSpec::DatumPlane(d) => plane_refs(&d.base, &mut v),
-            FeatureSpec::Extrude(x) => v.push(x.sketch),
-            FeatureSpec::Revolve(x) => v.push(x.sketch),
+            FeatureSpec::DatumPlane(d) => {
+                plane_refs(&d.base, &mut v);
+                match &d.mode {
+                    PlaneMode::Offset => {}
+                    PlaneMode::Midplane(o) => plane_refs(o, &mut v),
+                    PlaneMode::ThreePoints(pts) => {
+                        for p in pts.iter() {
+                            if let PointSrc::Datum(id) = p {
+                                v.push(*id);
+                            }
+                        }
+                    }
+                }
+            }
+            FeatureSpec::DatumAxis(a) => match &a.kind {
+                AxisKind::TwoPoints(pts) => {
+                    for p in pts.iter() {
+                        if let PointSrc::Datum(id) = p {
+                            v.push(*id);
+                        }
+                    }
+                }
+                AxisKind::Edge(e) => refs(&e.faces, &mut v),
+                AxisKind::NormalToFace { face, .. } => v.push(face.name.feature),
+                AxisKind::PlanePlane(pp) => {
+                    plane_refs(&pp.0, &mut v);
+                    plane_refs(&pp.1, &mut v);
+                }
+            },
+            FeatureSpec::DatumPoint(p) => match &p.kind {
+                PointKind::Coords(_) => {}
+                PointKind::EdgeMidpoint(e) => refs(&e.faces, &mut v),
+                PointKind::AxisPlane { axis, plane } => {
+                    v.push(*axis);
+                    plane_refs(plane, &mut v);
+                }
+            },
+            FeatureSpec::Extrude(x) => {
+                v.push(x.sketch);
+                if let Some(r) = &x.extent.to_face {
+                    v.push(r.name.feature);
+                }
+            }
+            FeatureSpec::Rib(x) => v.push(x.sketch),
+            FeatureSpec::Pipe(x) => v.push(x.path),
+            FeatureSpec::Revolve(x) => {
+                v.push(x.sketch);
+                match &x.axis {
+                    AxisSpec::Edge(e) => refs(&e.faces, &mut v),
+                    AxisSpec::Datum(a) => v.push(*a),
+                    _ => {}
+                }
+            }
             FeatureSpec::Loft(x) => v.extend(x.sketches.iter().copied()),
             FeatureSpec::Sweep(x) => {
                 v.push(x.profile);
@@ -597,6 +977,7 @@ impl FeatureSpec {
             FeatureSpec::VariableFillet(x) => refs(&x.edge.faces, &mut v),
             FeatureSpec::Shell(x) => refs(&x.open, &mut v),
             FeatureSpec::Draft(x) => refs(&x.faces, &mut v),
+            FeatureSpec::Thread(x) => refs(std::slice::from_ref(&x.face), &mut v),
             FeatureSpec::Offset(_) => {}
             FeatureSpec::Combine(x) => {
                 v.push(x.target);
@@ -604,9 +985,26 @@ impl FeatureSpec {
             }
             FeatureSpec::Hole(x) => plane_refs(&x.plane, &mut v),
             FeatureSpec::LinearPattern(x) => v.push(x.source),
-            FeatureSpec::CircularPattern(x) => v.push(x.source),
-            FeatureSpec::Mirror(x) => v.push(x.source),
-            FeatureSpec::SheetMetal(_) | FeatureSpec::Subd(_) | FeatureSpec::Import(_) => {}
+            FeatureSpec::CircularPattern(x) => {
+                v.push(x.source);
+                if let Some(a) = x.axis_feature {
+                    v.push(a);
+                }
+            }
+            FeatureSpec::Mirror(x) => {
+                v.push(x.source);
+                match &x.plane {
+                    MirrorPlane::Datum(d) => v.push(*d),
+                    MirrorPlane::Face(r) => v.push(r.name.feature),
+                    _ => {}
+                }
+            }
+            FeatureSpec::SplitBody(x) => plane_refs(&x.plane, &mut v),
+            FeatureSpec::SheetMetal(_)
+            | FeatureSpec::Subd(_)
+            | FeatureSpec::Import(_)
+            | FeatureSpec::MoveBody(_)
+            | FeatureSpec::ScaleBody(_) => {}
         }
         if let Some(b) = self.explicit_base() {
             v.push(b);

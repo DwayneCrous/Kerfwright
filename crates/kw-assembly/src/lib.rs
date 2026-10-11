@@ -445,6 +445,7 @@ impl Assembly {
                 &CopyOptions {
                     transform: Some(placements[i]),
                     flip: false,
+                    ..Default::default()
                 },
             );
             bodies.push(b);

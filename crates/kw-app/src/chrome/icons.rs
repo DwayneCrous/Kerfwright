@@ -47,25 +47,91 @@ pub enum Icon {
     Board,
     Render,
     Generic,
+    // ----- solid tools
+    Sweep,
+    Loft,
+    Rib,
+    Thread,
+    Pipe,
+    Draft,
+    Scale,
+    Move,
+    Split,
+    OffsetBody,
+    VarFillet,
+    Appearance,
+    Component,
+    Joint,
+    Motion,
+    // ----- construction
+    PlaneAngle,
+    PlaneMid,
+    Plane3Pt,
+    Axis,
+    PointDatum,
+    // ----- inspect
+    Section,
+    Interference,
+    // ----- sketch shapes
+    Polygon,
+    Slot,
+    Ellipse,
+    Arc3,
+    Circle3,
+    FitSpline,
+    SkFillet,
+    SkChamfer,
+    SkMirror,
+    SkPattern,
+    Project,
+    Text,
+    Dxf,
+    // ----- sketch constraints
+    CCoincident,
+    CHorizontal,
+    CVertical,
+    CParallel,
+    CPerpendicular,
+    CTangent,
+    CEqual,
+    CFix,
+    CMidpoint,
+    CConcentric,
+    CCollinear,
+    COnCurve,
+    CSymmetric,
+    // ----- sheet metal and form
+    Flange,
+    Bend,
+    Unfold,
+    Refold,
+    FormBox,
+    FormCylinder,
+    FormSphere,
+    FormTorus,
+    FormPlane,
+    FormFinish,
+    Crease,
+    Chevron,
 }
 
-const BLUE: Color32 = Color32::from_rgb(76, 160, 224);
-const BLUE_DARK: Color32 = Color32::from_rgb(40, 110, 170);
-const ORANGE: Color32 = Color32::from_rgb(235, 150, 70);
-const GREEN: Color32 = Color32::from_rgb(70, 170, 90);
-const GREY: Color32 = Color32::from_rgb(150, 150, 150);
-const INK: Color32 = Color32::from_rgb(70, 70, 70);
+pub(super) const BLUE: Color32 = Color32::from_rgb(76, 160, 224);
+pub(super) const BLUE_DARK: Color32 = Color32::from_rgb(40, 110, 170);
+pub(super) const ORANGE: Color32 = Color32::from_rgb(235, 150, 70);
+pub(super) const GREEN: Color32 = Color32::from_rgb(70, 170, 90);
+pub(super) const GREY: Color32 = Color32::from_rgb(150, 150, 150);
+pub(super) const INK: Color32 = Color32::from_rgb(70, 70, 70);
 
-fn line(p: &Painter, a: Pos2, b: Pos2, c: Color32, w: f32) {
+pub(super) fn line(p: &Painter, a: Pos2, b: Pos2, c: Color32, w: f32) {
     p.line_segment([a, b], Stroke::new(w, c));
 }
 
-fn plus(p: &Painter, at: Pos2, r: f32, c: Color32) {
+pub(super) fn plus(p: &Painter, at: Pos2, r: f32, c: Color32) {
     line(p, at - vec2(r, 0.0), at + vec2(r, 0.0), c, 2.2);
     line(p, at - vec2(0.0, r), at + vec2(0.0, r), c, 2.2);
 }
 
-fn arrow_up(p: &Painter, base: Pos2, h: f32, c: Color32) {
+pub(super) fn arrow_up(p: &Painter, base: Pos2, h: f32, c: Color32) {
     line(p, base, base - vec2(0.0, h), c, 2.0);
     p.add(Shape::convex_polygon(
         vec![
@@ -79,7 +145,7 @@ fn arrow_up(p: &Painter, base: Pos2, h: f32, c: Color32) {
 }
 
 /// An isometric box in `r` (top face lighter).
-fn iso_box(p: &Painter, r: Rect, top: Color32, left: Color32, right: Color32) {
+pub(super) fn iso_box(p: &Painter, r: Rect, top: Color32, left: Color32, right: Color32) {
     let (c, w, h) = (r.center(), r.width() / 2.0, r.height() / 2.0);
     let a = c + vec2(0.0, -h);
     let b = c + vec2(w, -h / 2.0);
@@ -607,6 +673,7 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
                 egui::StrokeKind::Middle,
             );
         }
+        other => super::icons_more::paint(p, rect, other, enabled),
     }
     let _ = (ACCENT, TEXT_WEAK);
 }

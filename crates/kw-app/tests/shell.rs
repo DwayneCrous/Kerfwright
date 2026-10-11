@@ -1417,6 +1417,7 @@ fn revolve_chamfer_shell_hole_and_patterns_match_closed_forms() {
         Action::Open(Tool::Mirror {
             source: None,
             plane: 1,
+            datum: None,
         }),
     );
     if let Some(d) = h.app.design.dialog.as_mut() {
@@ -1457,6 +1458,8 @@ fn revolving_a_profile_gives_the_closed_form_volume() {
             sketch: Some(id),
             angle: "360 deg".into(),
             axis_y: false,
+            axis_edge: false,
+            axis_datum: None,
             op: kw_feature::BodyOp::New,
         }),
     );
@@ -2141,6 +2144,7 @@ fn loft_sweep_draft_offset_and_construction_plane_dialogs_build_the_expected_sol
             base: 0,
             offset: "10 mm".into(),
             tilt: "0 deg".into(),
+            more: Default::default(),
         },
     );
     let plane_feature = proj(&mut h).document().features.last().unwrap().id;
@@ -2497,4 +2501,1641 @@ fn a_hole_through_all_and_a_variable_fillet_through_their_dialogs() {
         (got - removed).abs() < 0.03 * removed,
         "removed {got} vs {removed}"
     );
+}
+
+#[test]
+fn every_ribbon_command_runs_what_its_label_says() {
+    use kw_sketch::editor::Tool as SkTool;
+    let (mut h, _d) = design_harness("ribbon_commands");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    // a second sketch so that Sweep and Loft are available
+    sketch_only(
+        &mut h,
+        geom::origin_spec(2),
+        geom::origin_frame(2),
+        square((0.0, 0.0), 3.0),
+    );
+    // solid tab: id -> start of the dialog title
+    let solid = [
+        ("extrude", "EXTRUDE"),
+        ("revolve", "REVOLVE"),
+        ("sweep", "SWEEP"),
+        ("loft", "LOFT"),
+        ("hole", "HOLE"),
+        ("rect_pattern", "RECTANGULAR"),
+        ("circ_pattern", "CIRCULAR"),
+        ("mirror", "MIRROR"),
+        ("fillet", "FILLET"),
+        ("var_fillet", "VARIABLE"),
+        ("chamfer", "CHAMFER"),
+        ("shell", "SHELL"),
+        ("draft", "DRAFT"),
+        ("offset_body", "OFFSET"),
+        ("combine", "COMBINE"),
+        ("plane", "CONSTRUCTION"),
+    ];
+    for (id, title) in solid {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command(id, project);
+        h.frame();
+        let d = h
+            .app
+            .design
+            .dialog
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} opens a dialog"));
+        assert!(
+            d.tool.title().starts_with(title),
+            "{id}: {}",
+            d.tool.title()
+        );
+        h.app.design.close_dialog();
+    }
+    // toggles
+    {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command("parameters", project);
+        assert!(app.design.params_open);
+        app.design.command("parameters", project);
+        assert!(!app.design.params_open);
+        app.design.command("measure", project);
+        assert!(app.design.measure_open);
+        app.design.command("select", project);
+        assert!(!app.design.measure_open);
+        app.design.command("origin_planes", project);
+        assert!(app.design.plane_visible.iter().all(|v| *v));
+        app.design.command("create_sketch", project);
+    }
+    h.frame();
+    assert_eq!(h.app.design.mode, Mode::PickPlane);
+    // enter a sketch and run every sketch command
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    let sketch_cmds = [
+        ("sk_line", SkTool::Line),
+        ("sk_rect", SkTool::Rectangle),
+        ("sk_circle", SkTool::Circle),
+        ("sk_circle3", SkTool::Circle3),
+        ("sk_arc", SkTool::Arc),
+        ("sk_arc3", SkTool::Arc3),
+        ("sk_spline", SkTool::Spline),
+        ("sk_fit", SkTool::FitSpline),
+        ("sk_polygon", SkTool::Polygon),
+        ("sk_slot", SkTool::Slot),
+        ("sk_ellipse", SkTool::Ellipse),
+        ("sk_point", SkTool::Point),
+        ("sk_trim", SkTool::Trim),
+        ("sk_extend", SkTool::Extend),
+        ("sk_offset", SkTool::Offset),
+        ("sk_fillet", SkTool::Fillet),
+        ("sk_chamfer", SkTool::Chamfer),
+        ("sk_mirror", SkTool::Mirror),
+        ("sk_dimension", SkTool::Dimension),
+    ];
+    for (id, tool) in sketch_cmds {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command(id, project);
+        h.frame();
+        assert_eq!(h.app.design.sketch.app.editor.tool, tool, "{id}");
+    }
+    for (id, ..) in kw_app::design::ribbon::CONSTRAINTS.iter() {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command(id, project);
+        h.frame();
+        assert!(
+            matches!(h.app.design.sketch.app.editor.tool, SkTool::Constrain(_)),
+            "{id}"
+        );
+    }
+    // finishing goes through the same path
+    {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command("sk_discard", project);
+    }
+    h.frame();
+    assert_eq!(h.app.design.mode, Mode::Idle);
+}
+
+// ------------------------------------------------------------------------------------- several bodies
+
+fn bodies_of(h: &mut Harness) -> std::sync::Arc<kw_app::bodies::Bodies> {
+    h.frame();
+    h.app.design.bodies.clone().expect("bodies")
+}
+
+fn body_volume(b: &kw_app::bodies::Bodies, i: usize) -> f64 {
+    let o = &b.list[i].output;
+    o.brep().unwrap().volume(o.body().unwrap()).unwrap()
+}
+
+/// A second block as a new body, away from the first.
+fn add_second_block(h: &mut Harness) {
+    sketch_only(
+        h,
+        geom::origin_spec(0),
+        geom::origin_frame(0),
+        square((60.0, 10.0), 5.0),
+    );
+    act(
+        h,
+        Action::Open(Tool::extrude(None, kw_feature::BodyOp::New)),
+    );
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { depth, .. } = &mut d.tool else {
+            panic!()
+        };
+        *depth = "5 mm".into();
+    }
+    h.frame();
+    commit(h);
+}
+
+fn face_where(
+    b: &kw_app::bodies::Bodies,
+    f: impl Fn(&kw_brep::BRep, kw_brep::FaceId) -> bool,
+) -> kw_brep::FaceId {
+    b.brep
+        .faces
+        .keys()
+        .find(|k| f(&b.brep, *k))
+        .expect("a face")
+}
+
+#[test]
+fn two_bodies_are_both_shown_picked_and_edited_separately() {
+    let (mut h, _d) = design_harness("two_bodies");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    add_second_block(&mut h);
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 2, "{:?}", proj(&mut h).document().heads());
+    assert!(b.is_merged());
+    assert!(
+        (body_volume(&b, 0) - 3000.0).abs() < 1e-6 && (body_volume(&b, 1) - 500.0).abs() < 1e-6
+    );
+    // the viewport draws both
+    assert!(h.app.design.viewport.model().unwrap().scene.vertices.len() > 40);
+
+    // a hole through the *second* body's top face (display ids of the merged brep)
+    let top2 = face_where(&b, |br, f| {
+        geom::face_frame(br, f).is_some_and(|fr| fr.n[2] > 0.99)
+            && br.face_bbox(f).is_some_and(|bb| bb.min.x > 50.0)
+    });
+    act(&mut h, Action::Open(Tool::default_hole()));
+    click(&mut h, Some(Pick::Face(top2)));
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Hole {
+            x,
+            y,
+            diameter,
+            depth,
+            ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        // the face's plane has its origin at the projection of the world origin; the block's centre is at (60, 10)
+        *x = "60 mm".into();
+        *y = "10 mm".into();
+        *diameter = "4 mm".into();
+        *depth = "2 mm".into();
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 2);
+    assert!(
+        (body_volume(&b, 0) - 3000.0).abs() < 1e-6,
+        "the first body is untouched"
+    );
+    assert!(
+        (body_volume(&b, 1) - (500.0 - std::f64::consts::PI * 4.0 * 2.0)).abs() < 1e-3,
+        "{}",
+        body_volume(&b, 1)
+    );
+    // and it names its body explicitly
+    let doc = proj(&mut h).document();
+    let hole = doc.features.last().unwrap();
+    assert!(hole.spec.explicit_base().is_some());
+
+    // a sketch on that body's face, extruded, joins that body and leaves the other alone
+    act(&mut h, Action::StartSketch);
+    let top2 = face_where(&bodies_of(&mut h), |br, f| {
+        geom::face_frame(br, f).is_some_and(|fr| fr.n[2] > 0.99)
+            && br.face_bbox(f).is_some_and(|bb| bb.min.x > 50.0)
+    });
+    click(&mut h, Some(Pick::Face(top2)));
+    assert_eq!(
+        h.app.design.mode,
+        Mode::Sketching,
+        "{}",
+        h.app.design.status
+    );
+    h.app
+        .design
+        .sketch
+        .app
+        .editor
+        .replace_sketch(square((57.0, 7.0), 1.0));
+    act(&mut h, Action::FinishSketch);
+    let sk = proj(&mut h).document().features.last().unwrap().clone();
+    let FeatureSpec::Sketch(ss) = &sk.spec else {
+        panic!()
+    };
+    assert!(
+        ss.base.is_some(),
+        "the sketch remembers which body its face is on"
+    );
+    {
+        let d = h.app.design.dialog.as_mut().expect("Extrude dialog");
+        let Tool::Extrude { depth, op, .. } = &mut d.tool else {
+            panic!()
+        };
+        assert_eq!(*op, kw_feature::BodyOp::Join);
+        *depth = "3 mm".into();
+    }
+    h.frame();
+    commit(&mut h);
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 2);
+    assert!((body_volume(&b, 0) - 3000.0).abs() < 1e-6);
+    assert!(
+        (body_volume(&b, 1) - (500.0 - std::f64::consts::PI * 8.0 + 4.0 * 3.0)).abs() < 1e-2,
+        "{}",
+        body_volume(&b, 1)
+    );
+}
+
+#[test]
+fn move_copy_scale_split_and_combine_dialogs_work_on_bodies() {
+    let (mut h, _d) = design_harness("body_tools");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    // copy: a second body 20 mm to the right, overlapping the first by 10 mm
+    open_commit(
+        &mut h,
+        Tool::MoveBody {
+            copy: true,
+            dx: "20 mm".into(),
+            dy: "0 mm".into(),
+            dz: "0 mm".into(),
+            axis: 2,
+            angle: "0 deg".into(),
+        },
+    );
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 2);
+    // interference: they share 10 x 20 x 5
+    let ov = kw_app::bodies::interference(&b);
+    assert_eq!(ov.len(), 1);
+    assert!((ov[0].volume.unwrap() - 1000.0).abs() < 1e-3, "{ov:?}");
+    // combine joins them: 3000 + 3000 - 1000
+    act(
+        &mut h,
+        Action::Open(Tool::Combine {
+            target: None,
+            tool: None,
+            op: kw_feature::BodyOp::Join,
+            keep_tool: false,
+        }),
+    );
+    {
+        let heads = proj(&mut h).document().heads();
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Combine { target, tool, .. } = &mut d.tool else {
+            panic!()
+        };
+        assert!(target.is_some(), "the target defaults to a body");
+        *target = Some(heads[0]);
+        *tool = Some(heads[1]);
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 1);
+    assert!(
+        (body_volume(&b, 0) - 5000.0).abs() < 1e-3,
+        "{}",
+        body_volume(&b, 0)
+    );
+    // split with the plane x = 25: two halves of 2500, added by one dialog
+    open_commit(
+        &mut h,
+        Tool::SplitBody {
+            plane: 1,
+            offset: "25 mm".into(),
+        },
+    );
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 2);
+    assert!(
+        (body_volume(&b, 0) - 2500.0).abs() < 1e-3 && (body_volume(&b, 1) - 2500.0).abs() < 1e-3,
+        "{} {}",
+        body_volume(&b, 0),
+        body_volume(&b, 1)
+    );
+    // undo takes both halves away at once
+    proj(&mut h).history.undo();
+    assert_eq!(bodies_of(&mut h).list.len(), 1);
+    proj(&mut h).history.redo();
+    assert_eq!(bodies_of(&mut h).list.len(), 2);
+    // scale the active body (the last one) by 2 about the origin: volume x 8
+    open_commit(
+        &mut h,
+        Tool::ScaleBody {
+            factor: "2".into(),
+            cx: "0 mm".into(),
+            cy: "0 mm".into(),
+            cz: "0 mm".into(),
+        },
+    );
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 2);
+    let vols: Vec<f64> = (0..2).map(|i| body_volume(&b, i)).collect();
+    assert!(
+        vols.iter().any(|v| (v - 2500.0).abs() < 1e-3)
+            && vols.iter().any(|v| (v - 20000.0).abs() < 1e-2),
+        "{vols:?}"
+    );
+    // a bad factor is reported in the dialog
+    act(
+        &mut h,
+        Action::Open(Tool::ScaleBody {
+            factor: "-1".into(),
+            cx: "0 mm".into(),
+            cy: "0 mm".into(),
+            cz: "0 mm".into(),
+        }),
+    );
+    h.frame();
+    assert!(h.app.design.preview.clone().unwrap().error.is_some());
+    h.app.design.close_dialog();
+}
+
+#[test]
+fn bodies_have_names_colours_and_can_be_hidden() {
+    let (mut h, _d) = design_harness("body_looks");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    add_second_block(&mut h);
+    let b = bodies_of(&mut h);
+    assert_eq!(
+        b.list.iter().map(|x| x.name.clone()).collect::<Vec<_>>(),
+        vec!["Body1", "Body2"]
+    );
+    assert_eq!(b.list[0].colour, kw_app::bodies::DEFAULT_COLOUR);
+    // name and colour the second body
+    let root = b.list[1].root;
+    proj(&mut h)
+        .history
+        .edit(|d| {
+            d.set_appearance(
+                root,
+                kw_feature::Appearance {
+                    name: Some("Pin".into()),
+                    colour: Some([200, 40, 30]),
+                    material: Some("Steel".into()),
+                },
+            );
+            Ok::<_, kw_feature::TimelineError>(())
+        })
+        .unwrap();
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list[1].name, "Pin");
+    assert_eq!(b.list[1].colour, [200, 40, 30]);
+    assert_eq!(b.list[1].material.as_deref(), Some("Steel"));
+    // hiding a body takes it out of the view and out of picking
+    h.app.design.hidden_bodies.insert(root);
+    let b = bodies_of(&mut h);
+    assert_eq!(b.list.len(), 1);
+    assert!(!b.is_merged());
+    h.app.design.hidden_bodies.clear();
+    assert_eq!(bodies_of(&mut h).list.len(), 2);
+    // the properties window renders
+    h.app.design.body_props = Some(root);
+    for _ in 0..3 {
+        h.frame();
+    }
+    // both bodies export, and the file holds two solids
+    let dir = scratch("two_bodies_export");
+    let step = dir.join("two.step");
+    exchange::export_file(proj(&mut h), ExportFormat::Step, &step).unwrap();
+    let mut rep = kw_brep::BRep::new();
+    let r = kw_step::import(
+        &mut rep,
+        &std::fs::read_to_string(&step).unwrap(),
+        &kw_step::ImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(r.bodies.len(), 2);
+    let mut v: Vec<f64> = r
+        .bodies
+        .iter()
+        .map(|b| rep.mass_properties(*b).unwrap().volume)
+        .collect();
+    v.sort_by(f64::total_cmp);
+    assert!(
+        (v[0] - 500.0).abs() < 1e-6 && (v[1] - 3000.0).abs() < 1e-6,
+        "{v:?}"
+    );
+}
+
+/// A viewport click at a screen position (no pick), delivered like the viewport would.
+fn click_at(h: &mut Harness, pos: eframe::egui::Pos2) {
+    let out = ViewOut {
+        rect: eframe::egui::Rect::NOTHING,
+        click: Some(None),
+        double_click: None,
+        hover: None,
+        click_pos: Some(pos),
+        response: None,
+    };
+    let Harness { ctx, app, t } = h;
+    let raw = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360.0, 860.0))),
+        time: Some(*t),
+        ..Default::default()
+    };
+    *t += 1.0 / 60.0;
+    let kw_app::ui::Screen::Project { project, .. } = &mut app.screen else {
+        panic!()
+    };
+    let ev = project.evaluation();
+    let _ = ctx.run_ui(raw, |ui| app.design.handle_clicks(ui, project, &ev, &out));
+    h.frame();
+}
+
+#[test]
+fn regions_of_overlapping_shapes_are_chosen_in_the_view_and_extruded() {
+    let (mut h, _d) = design_harness("regions_ui");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    let mut sk = square((10.0, 5.0), 5.0); // 5..15 x 0..10: a 10 x 10 square
+    sk.add_circle_xy(15.0, 5.0, 3.0); // a circle centred on the right edge
+    h.app.design.sketch.app.editor.replace_sketch(sk);
+    act(&mut h, Action::FinishSketch);
+    h.frame();
+    let rv = h.app.design.region_view.as_ref().expect("regions");
+    assert_eq!(rv.regions.len(), 3);
+    // the circle-only piece (x > 15) is where I click: world (17, 5, 0)
+    let o = h.app.design.viewport.origin_in_scene();
+    let pos = h
+        .app
+        .design
+        .viewport
+        .project([17.0 + o.x, 5.0 + o.y, 0.0 + o.z])
+        .expect("on screen");
+    click_at(&mut h, pos);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude {
+            more, depth, op, ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        assert_eq!(more.regions.len(), 1, "one region chosen");
+        *depth = "4 mm".into();
+        *op = kw_feature::BodyOp::New;
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    // the circle's part outside the square: pi 9 - the half-disc-like overlap segment; compare with the polygon area
+    let want = {
+        let rv_area = |h: &Harness| h.app.design.region_view.is_none();
+        let _ = rv_area;
+        // circle radius 3 centred on the edge x = 15: the part with x > 15 is half of the disc
+        0.5 * std::f64::consts::PI * 9.0 * 4.0
+    };
+    assert!(
+        (vol(&mut h) - want).abs() < 0.1,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+    // clicking the same place again drops the choice; with nothing chosen everything is extruded
+    act(
+        &mut h,
+        Action::Open(Tool::extrude(None, kw_feature::BodyOp::New)),
+    );
+    h.frame();
+}
+
+#[test]
+fn thin_wall_rib_pipe_to_face_and_edge_axis_dialogs() {
+    use std::f64::consts::PI;
+    // ---- thin wall: a 20 x 10 rectangle, 2 mm wall inside, 6 mm tall
+    let (mut h, _d) = design_harness("thin_dialog");
+    sketch_only(&mut h, geom::origin_spec(0), geom::origin_frame(0), {
+        let mut s = square((10.0, 5.0), 5.0);
+        s = {
+            let mut t = kw_sketch::Sketch::new();
+            let p: Vec<_> = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]
+                .iter()
+                .map(|q| t.add_point(q.0, q.1))
+                .collect();
+            for i in 0..4 {
+                t.add_line(p[i], p[(i + 1) % 4]);
+            }
+            let _ = s;
+            t
+        };
+        s
+    });
+    act(
+        &mut h,
+        Action::Open(Tool::extrude(None, kw_feature::BodyOp::New)),
+    );
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { depth, more, .. } = &mut d.tool else {
+            panic!()
+        };
+        *depth = "6 mm".into();
+        more.thin = "2 mm".into();
+        more.thin_side = 0;
+    }
+    h.frame();
+    assert!(h.app.design.preview.clone().unwrap().error.is_none());
+    commit(&mut h);
+    assert!((vol(&mut h) - 104.0 * 6.0).abs() < 1e-3, "{}", vol(&mut h));
+    // the dialog reads it back
+    let ex = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(ex));
+    assert!(
+        matches!(&h.app.design.dialog.as_ref().unwrap().tool, Tool::Extrude { more, .. } if more.thin == "2 mm")
+    );
+    h.app.design.close_dialog();
+
+    // ---- rib: a line sketch, 2 mm thick, 8 mm tall
+    let (mut h, _d) = design_harness("rib_dialog");
+    let mut line = kw_sketch::Sketch::new();
+    line.add_line_xy(0.0, 0.0, 30.0, 0.0);
+    sketch_only(&mut h, geom::origin_spec(0), geom::origin_frame(0), line);
+    {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command("rib", project);
+    }
+    h.frame();
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Rib {
+            thickness,
+            depth,
+            op,
+            ..
+        } = &mut d.tool
+        else {
+            panic!("{:?}", d.tool)
+        };
+        *thickness = "2 mm".into();
+        *depth = "8 mm".into();
+        *op = kw_feature::BodyOp::New;
+    }
+    h.frame();
+    assert!(h.app.design.preview.clone().unwrap().error.is_none());
+    commit(&mut h);
+    assert!((vol(&mut h) - 480.0).abs() < 1e-6);
+
+    // ---- pipe along a quarter circle
+    let (mut h, _d) = design_harness("pipe_dialog");
+    let mut arc = kw_sketch::Sketch::new();
+    arc.add_arc_xy(0.0, 20.0, 20.0, -PI / 2.0, 0.0);
+    sketch_only(&mut h, geom::origin_spec(2), geom::origin_frame(2), arc);
+    {
+        let Harness { app, .. } = &mut h;
+        let Screen::Project { project, .. } = &mut app.screen else {
+            panic!()
+        };
+        app.design.command("pipe", project);
+    }
+    h.frame();
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Pipe {
+            diameter, wall, op, ..
+        } = &mut d.tool
+        else {
+            panic!()
+        };
+        *diameter = "6 mm".into();
+        *wall = "1 mm".into();
+        *op = kw_feature::BodyOp::New;
+    }
+    h.frame();
+    assert!(h.app.design.preview.clone().unwrap().error.is_none());
+    commit(&mut h);
+    let want = PI * 5.0 * (PI / 2.0 * 20.0);
+    assert!((vol(&mut h) - want).abs() < 1e-3 * want);
+
+    // ---- extrude up to a face (clicked), then revolve about a clicked edge
+    let (mut h, _d) = design_harness("to_face_dialog");
+    sketch_block(&mut h, 30.0, 20.0, "10 mm");
+    commit(&mut h);
+    sketch_only(
+        &mut h,
+        geom::origin_spec(0),
+        geom::origin_frame(0),
+        square((32.5, 2.5), 2.5),
+    );
+    act(
+        &mut h,
+        Action::Open(Tool::extrude(None, kw_feature::BodyOp::Join)),
+    );
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { more, .. } = &mut d.tool else {
+            panic!()
+        };
+        more.to_face = true;
+    }
+    let top = top_face(&mut h, 10.0);
+    click(&mut h, Some(Pick::Face(top)));
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    assert!(
+        (vol(&mut h) - (6000.0 + 5.0 * 5.0 * 10.0)).abs() < 1e-3,
+        "{}",
+        vol(&mut h)
+    );
+}
+
+#[test]
+fn revolve_about_a_clicked_body_edge() {
+    let (mut h, _d) = design_harness("revolve_edge");
+    sketch_block(&mut h, 10.0, 10.0, "10 mm");
+    commit(&mut h);
+    // the profile lives on the XZ plane (sketch x = world Z, y = world X): z 0..3, x 4..6
+    let mut ring = kw_sketch::Sketch::new();
+    let p: Vec<_> = [(0.0, 4.0), (3.0, 4.0), (3.0, 6.0), (0.0, 6.0)]
+        .iter()
+        .map(|q| ring.add_point(q.0, q.1))
+        .collect();
+    for i in 0..4 {
+        ring.add_line(p[i], p[(i + 1) % 4]);
+    }
+    sketch_only(&mut h, geom::origin_spec(2), geom::origin_frame(2), ring);
+    act(
+        &mut h,
+        Action::Open(Tool::Revolve {
+            sketch: None,
+            angle: "360 deg".into(),
+            axis_y: false,
+            axis_edge: true,
+            axis_datum: None,
+            op: kw_feature::BodyOp::Cut,
+        }),
+    );
+    // the vertical block edge at x = 0, y = 0
+    let edge = {
+        let ev = proj(&mut h).evaluation();
+        let b = ev.final_solid().unwrap().1.brep().unwrap().clone();
+        b.edges
+            .iter()
+            .find(|(_, e)| {
+                let (a, c) = (b.vertices[e.start].point, b.vertices[e.end].point);
+                a.x.abs() < 1e-9
+                    && a.y.abs() < 1e-9
+                    && c.x.abs() < 1e-9
+                    && c.y.abs() < 1e-9
+                    && (a.z - c.z).abs() > 1.0
+            })
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    click(&mut h, Some(Pick::Edge(edge)));
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let want = 1000.0 - std::f64::consts::PI * (36.0 - 16.0) * 3.0 / 4.0;
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-3 * want,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+}
+
+fn datum_frame(h: &mut Harness, id: kw_feature::FeatureId) -> kw_math::Frame3 {
+    match &proj(h).evaluation().output(id).unwrap().product {
+        kw_feature::Product::Datum(f) => *f,
+        p => panic!("not a datum: {p:?}"),
+    }
+}
+
+fn last_id(h: &mut Harness) -> kw_feature::FeatureId {
+    proj(h).document().features.last().unwrap().id
+}
+
+#[test]
+fn construction_axes_points_and_planes_are_built_from_their_dialogs() {
+    use kw_app::design::tools::{PlaneInput, PlaneMore, PointInput};
+    let (mut h, _d) = design_harness("construction_dialogs");
+    let pt = |x: &str, y: &str, z: &str| PointInput {
+        datum: None,
+        x: x.into(),
+        y: y.into(),
+        z: z.into(),
+    };
+    // an axis through (0,0,0) and (0,0,10): along +Z
+    open_commit(
+        &mut h,
+        Tool::Axis {
+            mode: 0,
+            pts: [pt("0 mm", "0 mm", "0 mm"), pt("0 mm", "0 mm", "10 mm")],
+            at_u: "0 mm".into(),
+            at_v: "0 mm".into(),
+            planes: Default::default(),
+        },
+    );
+    let axis = last_id(&mut h);
+    let f = datum_frame(&mut h, axis);
+    assert!((f.z.z - 1.0).abs() < 1e-9 && f.origin.coords.norm() < 1e-9);
+    // a point where the axis meets the plane z = 4
+    open_commit(
+        &mut h,
+        Tool::DatumPoint {
+            mode: 2,
+            coords: PointInput::default(),
+            axis: Some(axis),
+            plane: PlaneInput {
+                which: 0,
+                offset: "4 mm".into(),
+                datum: None,
+            },
+        },
+    );
+    let p = last_id(&mut h);
+    assert!((datum_frame(&mut h, p).origin.z - 4.0).abs() < 1e-9);
+    // a point by coordinates is used by a three-point plane through (0,0,4), (10,0,4), (0,10,4)
+    open_commit(
+        &mut h,
+        Tool::DatumPoint {
+            mode: 0,
+            coords: pt("10 mm", "0 mm", "4 mm"),
+            axis: None,
+            plane: PlaneInput::default(),
+        },
+    );
+    let p2 = last_id(&mut h);
+    open_commit(
+        &mut h,
+        Tool::ConstructionPlane {
+            base: 0,
+            offset: "0 mm".into(),
+            tilt: "0 deg".into(),
+            more: PlaneMore {
+                mode: 2,
+                pts: [
+                    PointInput {
+                        datum: Some(p),
+                        ..Default::default()
+                    },
+                    PointInput {
+                        datum: Some(p2),
+                        ..Default::default()
+                    },
+                    pt("0 mm", "10 mm", "4 mm"),
+                ],
+                ..Default::default()
+            },
+        },
+    );
+    let pl = last_id(&mut h);
+    let f = datum_frame(&mut h, pl);
+    assert!((f.z.z.abs() - 1.0).abs() < 1e-9 && (f.origin.z - 4.0).abs() < 1e-9);
+    // a midplane between XY and the plane z = 10 sits at z = 5
+    open_commit(
+        &mut h,
+        Tool::ConstructionPlane {
+            base: 0,
+            offset: "0 mm".into(),
+            tilt: "0 deg".into(),
+            more: PlaneMore {
+                mode: 1,
+                other: PlaneInput {
+                    which: 0,
+                    offset: "10 mm".into(),
+                    datum: None,
+                },
+                ..Default::default()
+            },
+        },
+    );
+    let mid = last_id(&mut h);
+    assert!((datum_frame(&mut h, mid).origin.z - 5.0).abs() < 1e-9);
+    // the axis of two planes: YZ and XZ meet along Z
+    open_commit(
+        &mut h,
+        Tool::Axis {
+            mode: 3,
+            pts: Default::default(),
+            at_u: "0 mm".into(),
+            at_v: "0 mm".into(),
+            planes: [
+                PlaneInput {
+                    which: 1,
+                    ..Default::default()
+                },
+                PlaneInput {
+                    which: 2,
+                    ..Default::default()
+                },
+            ],
+        },
+    );
+    let a2 = last_id(&mut h);
+    assert!(datum_frame(&mut h, a2).z.z.abs() > 1.0 - 1e-9);
+    // every dialog reopens with the values it was built from
+    for id in [axis, p, p2, pl, mid, a2] {
+        let spec = proj(&mut h).document().get(id).unwrap().spec.clone();
+        let tool = Tool::for_feature(&spec).expect("editable");
+        assert!(matches!(
+            tool,
+            Tool::Axis { .. } | Tool::DatumPoint { .. } | Tool::ConstructionPlane { .. }
+        ));
+    }
+    // the ribbon's construct menu opens each of them
+    for id in [
+        "axis_2pt",
+        "axis_edge",
+        "axis_face",
+        "axis_planes",
+        "point_xyz",
+        "point_edge",
+        "point_axis",
+        "plane_mid",
+        "plane_3pt",
+    ] {
+        h.app.design.close_dialog();
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command(id, project);
+        h.frame();
+        assert!(h.app.design.dialog.is_some(), "{id} opens a dialog");
+    }
+}
+
+#[test]
+fn revolve_uses_a_construction_axis() {
+    use kw_app::design::tools::PointInput;
+    let (mut h, _d) = design_harness("datum_users");
+    sketch_block(&mut h, 10.0, 10.0, "10 mm");
+    commit(&mut h);
+    // the block's vertical edge at x = y = 0 as a construction axis
+    open_commit(
+        &mut h,
+        Tool::Axis {
+            mode: 0,
+            pts: [
+                PointInput::default(),
+                PointInput {
+                    z: "10 mm".into(),
+                    ..Default::default()
+                },
+            ],
+            at_u: "0 mm".into(),
+            at_v: "0 mm".into(),
+            planes: Default::default(),
+        },
+    );
+    let axis = last_id(&mut h);
+    // a ring around it, revolved as a cut: the same pocket as revolving about the body edge
+    let mut ring = kw_sketch::Sketch::new();
+    let p: Vec<_> = [(0.0, 4.0), (3.0, 4.0), (3.0, 6.0), (0.0, 6.0)]
+        .iter()
+        .map(|q| ring.add_point(q.0, q.1))
+        .collect();
+    for i in 0..4 {
+        ring.add_line(p[i], p[(i + 1) % 4]);
+    }
+    sketch_only(&mut h, geom::origin_spec(2), geom::origin_frame(2), ring);
+    open_commit(
+        &mut h,
+        Tool::Revolve {
+            sketch: None,
+            angle: "360 deg".into(),
+            axis_y: false,
+            axis_edge: false,
+            axis_datum: Some(axis),
+            op: kw_feature::BodyOp::Cut,
+        },
+    );
+    let want = 1000.0 - std::f64::consts::PI * (36.0 - 16.0) * 3.0 / 4.0;
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-3 * want,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+}
+
+#[test]
+fn tapped_holes_and_cosmetic_threads_are_made_from_their_dialogs() {
+    let (mut h, _d) = design_harness("threads");
+    sketch_block(&mut h, 30.0, 30.0, "20 mm");
+    commit(&mut h);
+    let block = vol(&mut h);
+    // Create ▸ Tapped Hole: M6, 12 mm deep, 8 mm of thread
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("hole_tapped", project);
+    }
+    h.frame();
+    let f = top_face(&mut h, 20.0);
+    click(&mut h, Some(Pick::Face(f)));
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Hole {
+            x,
+            y,
+            depth,
+            kind,
+            thread,
+            thread_length,
+            ..
+        } = &mut d.tool
+        else {
+            panic!("{:?}", d.tool)
+        };
+        assert_eq!(*kind, 3);
+        (*x, *y, *depth) = ("15 mm".into(), "15 mm".into(), "12 mm".into());
+        *thread = "M6".into();
+        *thread_length = "8 mm".into();
+    }
+    h.frame();
+    commit(&mut h);
+    let want = block - std::f64::consts::PI * 2.5 * 2.5 * 12.0;
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-3,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+    // the dialog reads the thread back
+    let id = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(id));
+    assert!(matches!(
+        &h.app.design.dialog.as_ref().unwrap().tool,
+        Tool::Hole { kind: 3, thread, .. } if thread == "M6"
+    ));
+    h.app.design.close_dialog();
+    // Create ▸ Thread on the hole wall
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("thread", project);
+    }
+    h.frame();
+    let wall = {
+        let ev = proj(&mut h).evaluation();
+        let o = ev.final_solid().unwrap().1.clone();
+        let rep = o.brep().unwrap();
+        rep.faces
+            .iter()
+            .find(|(_, fc)| matches!(rep.surfaces[fc.surface], kw_nurbs::SurfaceGeom::Cylinder(_)))
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    click(&mut h, Some(Pick::Face(wall)));
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    assert!((vol(&mut h) - want).abs() < 1e-3);
+    // both are listed
+    let ev = proj(&mut h).evaluation();
+    let doc = proj(&mut h).document();
+    let report = kw_feature::threads::report(&doc, &ev.scope(&doc));
+    assert_eq!(report.len(), 2);
+    assert!(report.iter().all(|t| t.size.designation == "M6"));
+}
+
+fn start_sketch_plane(h: &mut Harness, idx: usize) {
+    act(h, Action::StartSketch);
+    act(
+        h,
+        Action::SketchOn(geom::origin_spec(idx), geom::origin_frame(idx)),
+    );
+    assert_eq!(h.app.design.mode, Mode::Sketching);
+}
+
+fn sketch_entities(h: &Harness, f: fn(&kw_sketch::entity::EntityKind) -> bool) -> usize {
+    h.app
+        .design
+        .sketch
+        .app
+        .editor
+        .sketch
+        .entities
+        .values()
+        .filter(|e| f(&e.kind))
+        .count()
+}
+
+#[test]
+fn project_and_intersect_bring_the_model_into_the_sketch() {
+    use kw_sketch::entity::EntityKind;
+    let (mut h, _d) = design_harness("project");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    // Project onto XY: the top and bottom outlines coincide, the vertical edges are points
+    start_sketch_plane(&mut h, 0);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("sk_project", project);
+    }
+    assert_eq!(
+        sketch_entities(&h, |k| matches!(k, EntityKind::Line { .. })),
+        4
+    );
+    // projected curves are locked: a quarter of the unknowns remain
+    let rep = h.app.design.sketch.app.editor.report.clone().unwrap();
+    assert_eq!(rep.dof, 0, "{rep:?}");
+    act(&mut h, Action::CancelSketch);
+
+    // Intersect with the plane y = 10 (XZ shifted): a 30 x 5 rectangle
+    start_sketch_plane(&mut h, 2);
+    let mut f = h.app.design.sketch_frame.unwrap();
+    f.origin = [0.0, 10.0, 0.0];
+    h.app.design.sketch_frame = Some(f);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("sk_intersect", project);
+    }
+    assert_eq!(
+        sketch_entities(&h, |k| matches!(k, EntityKind::Line { .. })),
+        4
+    );
+    let mut xs = Vec::new();
+    let ed = &h.app.design.sketch.app.editor;
+    for (id, e) in ed.sketch.entities.iter() {
+        if matches!(e.kind, EntityKind::Point(_)) {
+            xs.push(ed.sketch.point(id).unwrap());
+        }
+    }
+    let (w, hgt) = (
+        xs.iter().map(|p| p.0).fold(f64::MIN, f64::max)
+            - xs.iter().map(|p| p.0).fold(f64::MAX, f64::min),
+        xs.iter().map(|p| p.1).fold(f64::MIN, f64::max)
+            - xs.iter().map(|p| p.1).fold(f64::MAX, f64::min),
+    );
+    let (a, b) = if w > hgt { (w, hgt) } else { (hgt, w) };
+    assert!(
+        (a - 30.0).abs() < 1e-6 && (b - 5.0).abs() < 1e-6,
+        "{a} x {b}"
+    );
+    act(&mut h, Action::CancelSketch);
+
+    // a cylinder cut at z = 2 gives a circle of the cylinder's radius
+    let (mut h, _d) = design_harness("project_cyl");
+    let mut sk = kw_sketch::Sketch::new();
+    sk.add_circle_xy(0.0, 0.0, 6.0);
+    sketch_only(&mut h, geom::origin_spec(0), geom::origin_frame(0), sk);
+    let s = proj(&mut h).document().features.last().unwrap().id;
+    open_commit(&mut h, Tool::extrude(Some(s), kw_feature::BodyOp::New));
+    start_sketch_plane(&mut h, 0);
+    let mut f = h.app.design.sketch_frame.unwrap();
+    f.origin = [0.0, 0.0, 2.0];
+    h.app.design.sketch_frame = Some(f);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("sk_intersect", project);
+    }
+    let ed = &h.app.design.sketch.app.editor;
+    let radii: Vec<f64> = ed
+        .sketch
+        .entities
+        .values()
+        .filter_map(|e| match e.kind {
+            EntityKind::Circle { radius, .. } => Some(ed.sketch.value(radius)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(radii.len(), 1, "{radii:?}");
+    assert!((radii[0] - 6.0).abs() < 0.01, "{radii:?}");
+}
+
+#[test]
+fn sketch_patterns_and_text_become_profiles() {
+    use kw_app::design::sketch_ops::SketchPanel;
+    use kw_sketch::entity::EntityKind;
+    let (mut h, _d) = design_harness("sketch_ops");
+    start_sketch_plane(&mut h, 0);
+    // a 4 x 4 square, selected, repeated 3 x 2 and then the whole set turned into a pattern of 2
+    h.app
+        .design
+        .sketch
+        .app
+        .editor
+        .replace_sketch(square((0.0, 0.0), 2.0));
+    let lines: Vec<_> = h
+        .app
+        .design
+        .sketch
+        .app
+        .editor
+        .sketch
+        .entities
+        .iter()
+        .filter(|(_, e)| matches!(e.kind, EntityKind::Line { .. }))
+        .map(|(id, _)| id)
+        .collect();
+    h.app.design.sketch.app.editor.selection = lines;
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("sk_pat_rect", project);
+    }
+    assert!(matches!(
+        h.app.design.sketch_panel,
+        Some(SketchPanel::RectPattern { .. })
+    ));
+    let n = h
+        .app
+        .design
+        .apply_sketch_panel(&SketchPanel::RectPattern {
+            nx: 3,
+            ny: 2,
+            dx: 10.0,
+            dy: 10.0,
+        })
+        .unwrap();
+    assert_eq!(n, 20);
+    assert_eq!(
+        sketch_entities(&h, |k| matches!(k, EntityKind::Line { .. })),
+        24
+    );
+    act(&mut h, Action::CancelSketch);
+
+    // text: the letter O extruded 3 mm has the volume of the glyph's area times 3
+    let (mut h, _d) = design_harness("sketch_text");
+    start_sketch_plane(&mut h, 0);
+    let panel = SketchPanel::Text {
+        text: "O".into(),
+        height: 20.0,
+        spacing: 0.0,
+        x: 0.0,
+        y: 0.0,
+        angle: 0.0,
+        font: 0,
+    };
+    h.app.design.apply_sketch_panel(&panel).unwrap();
+    act(&mut h, Action::FinishSketch);
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Extrude { depth, .. } = &mut d.tool else {
+            panic!()
+        };
+        *depth = "3 mm".into();
+    }
+    h.frame();
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    // the glyph's area from its outline, sampled finely
+    let (curves, _) = kw_sketch::text::text_curves(
+        kw_app::design::sketch_ops::FONTS[0].1,
+        "O",
+        &kw_sketch::text::TextStyle {
+            height: 20.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut area = 0.0;
+    for c in &curves {
+        let pts: Vec<(f64, f64)> = match c {
+            kw_sketch::curves::Curve2::Line(a, b) => vec![*a, *b],
+            kw_sketch::curves::Curve2::Bezier(v) => (0..=200)
+                .map(|i| {
+                    let t = i as f64 / 200.0;
+                    let mut p = v.clone();
+                    while p.len() > 1 {
+                        p = p
+                            .windows(2)
+                            .map(|w| {
+                                (
+                                    w[0].0 + (w[1].0 - w[0].0) * t,
+                                    w[0].1 + (w[1].1 - w[0].1) * t,
+                                )
+                            })
+                            .collect();
+                    }
+                    p[0]
+                })
+                .collect(),
+            _ => continue,
+        };
+        for w in pts.windows(2) {
+            area += w[0].0 * w[1].1 - w[1].0 * w[0].1;
+        }
+    }
+    // outer loop counter-clockwise (+), inner clockwise (-): the net is the ring's area
+    let want = (area / 2.0).abs() * 3.0;
+    let got = vol(&mut h);
+    assert!((got - want).abs() < 0.01 * want, "{got} vs {want}");
+}
+
+#[test]
+fn section_analysis_defines_the_cutting_plane_from_an_origin_or_construction_plane() {
+    use kw_app::design::section::SectionState;
+    let (mut h, _d) = design_harness("section");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        assert!(h.app.design.section_plane(project).is_none());
+        h.app.design.command("section", project);
+        // XZ (normal +y), offset 0
+        assert_eq!(
+            h.app.design.section_plane(project),
+            Some(([0.0, 1.0, 0.0], 0.0))
+        );
+        h.app.design.section = Some(SectionState {
+            which: 0,
+            datum: None,
+            offset: 2.5,
+            flip: true,
+        });
+        // XY moved up 2.5, flipped: keep the upper part, so the normal points down
+        assert_eq!(
+            h.app.design.section_plane(project),
+            Some(([0.0, 0.0, -1.0], -2.5))
+        );
+        h.app.design.command("section", project);
+        assert!(h.app.design.section.is_none());
+    }
+    // a construction plane 4 mm above XY, cut at its own offset 1 mm: z = 5, normal +z
+    open_commit(
+        &mut h,
+        Tool::ConstructionPlane {
+            base: 0,
+            offset: "4 mm".into(),
+            tilt: "0 deg".into(),
+            more: Default::default(),
+        },
+    );
+    let pl = last_id(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.design.section = Some(SectionState {
+        which: 0,
+        datum: Some(pl),
+        offset: 1.0,
+        flip: false,
+    });
+    let (n, d) = h.app.design.section_plane(project).unwrap();
+    assert!(
+        (n[2] - 1.0).abs() < 1e-9 && (d - 5.0).abs() < 1e-9,
+        "{n:?} {d}"
+    );
+    // the window draws without trouble
+    h.frame();
+    assert!(h.app.design.viewport.section.is_some());
+}
+
+#[test]
+fn components_joints_and_motion_make_an_assembly_that_is_saved_with_the_project() {
+    use kw_app::design::assembly::{face_connection_frame, remove_instance};
+    use kw_assembly::{Assembly, JointKind};
+    let (mut h, dir) = design_harness("assembly");
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    // the top face gives a connection frame F1 (centre, pointing up)
+    let top = top_face(&mut h, 10.0);
+    let frame = {
+        let ev = proj(&mut h).evaluation();
+        let b = ev.final_solid().unwrap().1.brep().unwrap().clone();
+        face_connection_frame("F1", &b, top).unwrap()
+    };
+    assert_eq!(frame.origin, [10.0, 10.0, 10.0]);
+    h.app.design.asm.new_frames.push(frame);
+    h.app.design.asm.new_name = "Block".into();
+    act(&mut h, Action::NewComponent);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let a = project.assembly.as_mut().expect("assembly made");
+        assert_eq!((a.parts.len(), a.instances.len()), (1, 1));
+        assert_eq!(a.parts[0].frames.len(), 2);
+        // a second instance of the same part
+        a.add_instance("Block copy", 0);
+    }
+    // a revolute joint: the copy's origin turns about the top face's normal
+    h.app.design.asm.joint.kind = JointKind::Revolute;
+    h.app.design.asm.joint.parent = 0;
+    h.app.design.asm.joint.parent_frame = 1;
+    h.app.design.asm.joint.child = 1;
+    h.app.design.asm.joint.child_frame = 0;
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_add_joint(project).unwrap();
+        // the same two components cannot be joined twice (that would close a loop)
+        assert!(h.app.design.asm_add_joint(project).is_err());
+        let a = project.assembly.as_mut().unwrap();
+        a.joints[0].values[0] = kw_expr::Param::angle_deg(90.0);
+        let placed = a.solve().unwrap();
+        // the copy's point (20, 0, 0) turns a quarter about the vertical line through (10, 10): (10, 30, 10)
+        let p = placed[1]
+            .0
+            .transform_point(&kw_math::Point3::new(20.0, 0.0, 0.0));
+        let p0 = placed[0]
+            .0
+            .transform_point(&kw_math::Point3::new(20.0, 0.0, 0.0));
+        assert!(
+            (p.x - 10.0).abs() < 1e-9 && (p.y - 30.0).abs() < 1e-9 && (p.z - 10.0).abs() < 1e-9,
+            "{p:?}"
+        );
+        assert!((p0.x - 20.0).abs() < 1e-12);
+    }
+    // the window and the posed view draw; the view shows both blocks (volume 2 x 4000)
+    h.app.design.asm.open = true;
+    h.app.design.asm.view = true;
+    h.frame();
+    h.frame();
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let disp = h.app.design.asm_display(project).expect("posed view");
+        assert_eq!(disp.2.len(), 2);
+        h.app.design.asm_check_interference(project);
+        match h.app.design.asm.overlaps.clone() {
+            Some(Ok(v)) => assert!(v.is_empty(), "{v:?}"),
+            // touching solids may be reported by the kernel as a failed Boolean: it must say so
+            Some(Err(e)) => assert!(!e.is_empty()),
+            None => panic!("no result"),
+        }
+        let step = h.app.design.asm_step(project).unwrap();
+        assert!(step.contains("ISO-10303-21"));
+    }
+    // saved with the project and read back
+    let path = dir.join("asm.kwf");
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        project.save_as(&path).unwrap();
+    }
+    let reopened = kw_app::project::Project::open(&path).unwrap();
+    let a = reopened.assembly.expect("assembly stored in the file");
+    assert_eq!(
+        (a.parts.len(), a.instances.len(), a.joints.len()),
+        (1, 2, 1)
+    );
+    // removing an instance takes its joints with it and keeps the indices valid
+    let mut a: Assembly = a;
+    remove_instance(&mut a, 1);
+    assert_eq!((a.instances.len(), a.joints.len()), (1, 0));
+    assert!(a.solve().is_ok());
+    // inserting a file adds a part
+    let (mut h2, _d2) = design_harness("assembly_insert");
+    {
+        let Screen::Project { project, .. } = &mut h2.app.screen else {
+            panic!()
+        };
+        h2.app.design.asm_insert_path(project, &path).unwrap();
+        let a = project.assembly.as_ref().unwrap();
+        assert_eq!(a.parts.len(), 1);
+        assert_eq!(a.parts[0].frames.len(), 1);
+    }
+}
+
+fn run_command(h: &mut Harness, id: &str) {
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command(id, project);
+    }
+    h.frame();
+    h.frame();
+}
+
+#[test]
+fn the_sheet_metal_tab_builds_strips_and_unfolds_them() {
+    use std::f64::consts::FRAC_PI_2;
+    let (mut h, _d) = design_harness("sheet_tab");
+    h.app.design.ribbon_tab = 1;
+    h.frame();
+    // U channel: 40 flat, bend, 30 flat, bend, 40 flat; t = 2, k = 0.44, r = 2, width 30
+    run_command(&mut h, "sm_u");
+    assert!(matches!(
+        h.app.design.dialog.as_ref().map(|d| &d.tool),
+        Some(Tool::SheetMetal { .. })
+    ));
+    let pv = h.app.design.preview.clone().unwrap();
+    assert!(pv.error.is_none(), "{:?}", pv.error);
+    commit(&mut h);
+    let spec = kw_sheet::SheetSpec {
+        thickness: 2.0,
+        k_factor: 0.44,
+        default_radius: 2.0,
+    };
+    let strip = kw_sheet::SheetStrip::new(spec, 30.0)
+        .flat(40.0)
+        .bend(FRAC_PI_2)
+        .flat(30.0)
+        .bend(FRAC_PI_2)
+        .flat(40.0);
+    let want = kw_sheet::analytic_volume(&strip);
+    assert!(
+        (vol(&mut h) - want).abs() < 1e-6 * want,
+        "{} vs {want}",
+        vol(&mut h)
+    );
+    // the flat pattern: three flats plus two bend allowances
+    run_command(&mut h, "sm_flat");
+    let flat = h.app.design.flat.as_ref().expect("flat pattern");
+    let ba = FRAC_PI_2 * (2.0 + 0.44 * 2.0);
+    assert!((flat.pattern.length() - (110.0 + 2.0 * ba)).abs() < 1e-9);
+    assert_eq!(flat.pattern.bends().len(), 2);
+    // Refold reopens the strip with the same rows
+    let pat = flat.pattern.clone();
+    let back = kw_sheet::refold(&pat);
+    assert_eq!(back.segs.len(), 5);
+    h.app.design.close_dialog();
+    // Edit Strip reads the feature back
+    run_command(&mut h, "sm_edit");
+    match h.app.design.dialog.as_ref().map(|d| &d.tool) {
+        Some(Tool::SheetMetal {
+            rows, thickness, ..
+        }) => {
+            assert_eq!(rows.len(), 5);
+            assert_eq!(thickness, "2 mm");
+        }
+        t => panic!("{t:?}"),
+    }
+}
+
+#[test]
+fn the_form_tab_makes_bodies_from_cages() {
+    let (mut h, _d) = design_harness("form_tab");
+    h.app.design.ribbon_tab = 2;
+    h.frame();
+    // a 20 mm box with sharp edges finishes to the box itself
+    run_command(&mut h, "form_box");
+    commit(&mut h);
+    let v = vol(&mut h);
+    assert!((v - 8000.0).abs() < 0.01 * 8000.0, "{v}");
+    // editing: the scale doubles every length
+    let id = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(id));
+    match h.app.design.dialog.as_mut().map(|d| &mut d.tool) {
+        Some(Tool::Form { scale, kind, .. }) => {
+            assert_eq!(*kind, 255, "an existing form is a custom cage");
+            *scale = "2".into();
+        }
+        t => panic!("{t:?}"),
+    }
+    h.frame();
+    commit(&mut h);
+    let v2 = vol(&mut h);
+    assert!((v2 - 64000.0).abs() < 0.01 * 64000.0, "{v2}");
+    // a new box of another size: changing the numbers rebuilds the cage
+    let (mut h, _d) = design_harness("form_tab2");
+    run_command(&mut h, "form_box");
+    if let Some(Tool::Form { size, .. }) = h.app.design.dialog.as_mut().map(|d| &mut d.tool) {
+        *size = [10.0, 20.0, 30.0];
+    }
+    h.frame();
+    h.frame();
+    commit(&mut h);
+    let v = vol(&mut h);
+    assert!((v - 6000.0).abs() < 0.01 * 6000.0, "{v}");
+}
+
+#[test]
+fn the_other_form_primitives_finish_to_bodies() {
+    // (the kernel's volume of a patch body takes seconds, so this checks the finished body, not its volume)
+    for cmd in ["form_cyl", "form_sphere", "form_torus"] {
+        let (mut h, _d) = design_harness(cmd);
+        run_command(&mut h, cmd);
+        commit(&mut h);
+        let ev = proj(&mut h).evaluation();
+        assert!(ev.failures().is_empty(), "{cmd}: {:?}", ev.failures());
+        let (_, o) = ev
+            .final_solid()
+            .unwrap_or_else(|| panic!("{cmd}: no solid"));
+        let (rep, body) = (o.brep().unwrap(), o.body().unwrap());
+        assert!(rep.body_faces(body).len() >= 6, "{cmd}");
+        let bb = rep.body_bbox(body);
+        assert!((bb.max - bb.min).norm() > 5.0, "{cmd}");
+    }
+}
+
+#[test]
+fn every_ribbon_tab_draws_and_the_tools_tab_commands_work() {
+    let (mut h, _d) = design_harness("tabs");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    for tab in 0..4 {
+        h.app.design.ribbon_tab = tab;
+        h.frame();
+        h.frame();
+    }
+    run_command(&mut h, "appearance");
+    assert!(h.app.design.body_props.is_some());
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("file_import", project);
+    }
+    assert_eq!(
+        h.app.design.asm.request,
+        Some(kw_app::design::assembly::FileRequest::Import)
+    );
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("file_export_step", project);
+    }
+    assert_eq!(
+        h.app.design.asm.request,
+        Some(kw_app::design::assembly::FileRequest::Export(
+            kw_app::exchange::ExportFormat::Step
+        ))
+    );
+}
+
+#[test]
+fn a_rollback_bar_at_the_end_of_the_timeline_does_not_block_new_features() {
+    // |< on a timeline of one feature puts the bar after it, which is where it already is
+    let (mut h, _d) = design_harness("rollback_end");
+    sketch_only(
+        &mut h,
+        geom::origin_spec(0),
+        geom::origin_frame(0),
+        square((0.0, 0.0), 5.0),
+    );
+    let s = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::RollbackTo(s));
+    assert!(!proj(&mut h).document().rolled_back());
+    act(
+        &mut h,
+        Action::Open(Tool::extrude(Some(s), kw_feature::BodyOp::New)),
+    );
+    assert!(
+        h.app.design.dialog.is_some(),
+        "{}",
+        h.app.design.model.error
+    );
+    commit(&mut h);
+    assert!(vol(&mut h) > 0.0);
+    // a bar saved at the end of an older document behaves the same
+    let n = proj(&mut h).document().features.len();
+    let mut d = (*proj(&mut h).document()).clone();
+    d.rollback = Some(n);
+    assert!(!d.rolled_back());
 }

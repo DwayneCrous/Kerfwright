@@ -34,6 +34,10 @@ pub enum Tool {
     Point,
     Line,
     Rectangle,
+    /// Rectangle from its centre outwards: click the centre, then a corner.
+    CenterRectangle,
+    /// Rectangle at any angle: click the two ends of one side, then a point for the width.
+    AlignedRectangle,
     Circle,
     Arc,
     Spline,
@@ -251,6 +255,8 @@ enum Pending {
     None,
     Line(EntityId),
     Rect(Snap),
+    /// Points picked so far for an aligned rectangle (one or two).
+    ARect(Vec<Snap>),
     Circle(EntityId),
     ArcCentre(EntityId),
     ArcStart(EntityId, EntityId),
@@ -889,6 +895,7 @@ impl Editor {
                 pt(a).into_iter().collect()
             }
             Pending::Rect(s) => vec![s.position()],
+            Pending::ARect(v) => v.iter().map(|s| s.position()).collect(),
             Pending::ArcStart(c, s) => pt(c).into_iter().chain(pt(s)).collect(),
             Pending::Spline(v) | Pending::FitSpline(v) => v.iter().filter_map(pt).collect(),
             Pending::Polygon(c) | Pending::Slot1(c) | Pending::Ellipse1(c) => {
@@ -978,6 +985,8 @@ impl Editor {
             }
             Tool::Line => self.click_line(p),
             Tool::Rectangle => self.click_rect(p),
+            Tool::CenterRectangle => self.click_center_rect(p),
+            Tool::AlignedRectangle => self.click_aligned_rect(p),
             Tool::Circle => self.click_circle(p),
             Tool::Arc => self.click_arc(p),
             Tool::Spline => {
@@ -1095,6 +1104,97 @@ impl Editor {
                 Ok(())
             }
         }
+    }
+
+    /// Centre rectangle: the centre point stays tied to the middle of both diagonals.
+    fn click_center_rect(&mut self, p: P2) -> Result<(), SketchError> {
+        let s = self.snap(p);
+        let Pending::Rect(centre) = self.pending.clone() else {
+            self.pending = Pending::Rect(s);
+            return Ok(());
+        };
+        let (c, q) = (centre.position(), s.position());
+        let (hx, hy) = ((q.0 - c.0).abs(), (q.1 - c.1).abs());
+        if hx < 1e-9 || hy < 1e-9 {
+            return Ok(());
+        }
+        self.checkpoint();
+        let pc = self.point_for(centre)?;
+        let p0 = self.sketch.add_point(c.0 - hx, c.1 - hy);
+        let p1 = self.sketch.add_point(c.0 + hx, c.1 - hy);
+        let p2 = self.sketch.add_point(c.0 + hx, c.1 + hy);
+        let p3 = self.sketch.add_point(c.0 - hx, c.1 + hy);
+        let l = [
+            self.sketch.add_line(p0, p1),
+            self.sketch.add_line(p1, p2),
+            self.sketch.add_line(p2, p3),
+            self.sketch.add_line(p3, p0),
+        ];
+        self.sketch.horizontal(l[0])?;
+        self.sketch.vertical(l[1])?;
+        self.sketch.horizontal(l[2])?;
+        self.sketch.vertical(l[3])?;
+        let d1 = self.sketch.add_line(p0, p2);
+        let d2 = self.sketch.add_line(p1, p3);
+        self.sketch.set_construction(d1, true);
+        self.sketch.set_construction(d2, true);
+        self.sketch.midpoint(pc, d1)?;
+        self.sketch.midpoint(pc, d2)?;
+        self.pending = Pending::None;
+        self.refresh_or_rollback();
+        Ok(())
+    }
+
+    /// The fourth and third corners of an aligned rectangle with side `a`–`b` and `w` the signed
+    /// distance of the third click from that side.
+    fn aligned_corners(a: P2, b: P2, q: P2) -> Option<(P2, P2)> {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let l = dx.hypot(dy);
+        if l < 1e-9 {
+            return None;
+        }
+        let (nx, ny) = (-dy / l, dx / l);
+        let w = (q.0 - a.0) * nx + (q.1 - a.1) * ny;
+        if w.abs() < 1e-9 {
+            return None;
+        }
+        Some(((b.0 + nx * w, b.1 + ny * w), (a.0 + nx * w, a.1 + ny * w)))
+    }
+
+    /// Aligned rectangle: one side, then the width; three perpendicular corners keep it rectangular.
+    fn click_aligned_rect(&mut self, p: P2) -> Result<(), SketchError> {
+        let s = self.snap(p);
+        let mut got = match std::mem::take(&mut self.pending) {
+            Pending::ARect(v) => v,
+            _ => Vec::new(),
+        };
+        got.push(s);
+        if got.len() < 3 {
+            self.pending = Pending::ARect(got);
+            return Ok(());
+        }
+        let (a, b) = (got[0].position(), got[1].position());
+        let Some((c, d)) = Self::aligned_corners(a, b, got[2].position()) else {
+            got.pop();
+            self.pending = Pending::ARect(got);
+            return Ok(());
+        };
+        self.checkpoint();
+        let pa = self.point_for(got[0])?;
+        let pb = self.point_for(got[1])?;
+        let pc = self.sketch.add_point(c.0, c.1);
+        let pd = self.sketch.add_point(d.0, d.1);
+        let l = [
+            self.sketch.add_line(pa, pb),
+            self.sketch.add_line(pb, pc),
+            self.sketch.add_line(pc, pd),
+            self.sketch.add_line(pd, pa),
+        ];
+        self.sketch.perpendicular(l[0], l[1])?;
+        self.sketch.perpendicular(l[1], l[2])?;
+        self.sketch.perpendicular(l[2], l[3])?;
+        self.refresh_or_rollback();
+        Ok(())
     }
 
     fn click_circle(&mut self, p: P2) -> Result<(), SketchError> {
@@ -1386,6 +1486,28 @@ impl Editor {
                 let a = first.position();
                 vec![vec![a, (q.0, a.1), q, (a.0, q.1), a]]
             }
+            (Tool::CenterRectangle, Pending::Rect(first)) => {
+                let c = first.position();
+                let (hx, hy) = ((q.0 - c.0).abs(), (q.1 - c.1).abs());
+                vec![vec![
+                    (c.0 - hx, c.1 - hy),
+                    (c.0 + hx, c.1 - hy),
+                    (c.0 + hx, c.1 + hy),
+                    (c.0 - hx, c.1 + hy),
+                    (c.0 - hx, c.1 - hy),
+                ]]
+            }
+            (Tool::AlignedRectangle, Pending::ARect(v)) => match v.as_slice() {
+                [a] => vec![vec![a.position(), q]],
+                [a, b] => {
+                    let (a, b) = (a.position(), b.position());
+                    match Self::aligned_corners(a, b, q) {
+                        Some((c, d)) => vec![vec![a, b, c, d, a]],
+                        None => vec![vec![a, b]],
+                    }
+                }
+                _ => Vec::new(),
+            },
             (Tool::Circle, Pending::Circle(c)) => pt(c)
                 .map(|c| vec![circle(c, dist(c, q))])
                 .unwrap_or_default(),
@@ -1950,5 +2072,145 @@ impl Editor {
 
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+}
+
+// ------------------------------------------------------------------------------------ bulk edits
+
+impl Editor {
+    /// Put ready-made curves (projected edges, a section, text) into the sketch; undoable. The new
+    /// curves become the selection. Returns how many were added.
+    pub fn insert_curves(&mut self, curves: &[crate::curves::Curve2], construction: bool) -> usize {
+        if curves.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let made = crate::curves::add_curves(&mut self.sketch, curves, construction);
+        self.selection = made.clone();
+        self.pending = Pending::None;
+        self.refresh();
+        made.len()
+    }
+
+    /// Lock the selected curves where they are (their points and sizes become constants for the
+    /// solver), as projected geometry is in Fusion. Undoable.
+    pub fn pin_selection(&mut self) {
+        self.checkpoint();
+        let mut vars = Vec::new();
+        for e in self.selection.clone() {
+            let mut all = vec![e];
+            all.extend(self.sketch.children(e));
+            for c in all {
+                match self.sketch.kind(c).cloned() {
+                    Ok(EntityKind::Point(p)) => vars.extend([p.x, p.y]),
+                    Ok(EntityKind::Circle { radius, .. }) => vars.push(radius),
+                    Ok(EntityKind::Ellipse { minor_radius, .. }) => vars.push(minor_radius),
+                    _ => {}
+                }
+            }
+        }
+        for v in vars {
+            self.sketch.set_fixed(v, true);
+        }
+        self.refresh();
+    }
+
+    /// The curves among the selection (points on their own are not patterned).
+    fn selected_curves(&self) -> Vec<EntityId> {
+        self.selection
+            .iter()
+            .copied()
+            .filter(|e| !matches!(self.sketch.kind(*e), Ok(EntityKind::Point(_))))
+            .collect()
+    }
+
+    /// Repeat the selected curves in a grid: `nx` columns `step_a` apart and `ny` rows `step_b` apart.
+    /// The counts include the original. Returns the number of curves added.
+    pub fn pattern_rect(
+        &mut self,
+        nx: usize,
+        ny: usize,
+        step_a: P2,
+        step_b: P2,
+    ) -> Result<usize, String> {
+        let es = self.selected_curves();
+        if es.is_empty() {
+            return Err("select the curves to repeat first".into());
+        }
+        if nx == 0 || ny == 0 || nx * ny > 2500 {
+            return Err("the pattern needs between 1 and 2500 instances".into());
+        }
+        self.checkpoint();
+        let mut all = Vec::new();
+        for j in 0..ny {
+            for i in 0..nx {
+                if i == 0 && j == 0 {
+                    continue;
+                }
+                let d = (
+                    step_a.0 * i as f64 + step_b.0 * j as f64,
+                    step_a.1 * i as f64 + step_b.1 * j as f64,
+                );
+                match crate::curves::copy_entities(&mut self.sketch, &es, &|p| {
+                    (p.0 + d.0, p.1 + d.1)
+                }) {
+                    Ok(v) => all.extend(v),
+                    Err(e) => {
+                        self.undo.pop();
+                        return Err(e.to_string());
+                    }
+                }
+            }
+        }
+        let n = all.len();
+        self.selection.extend(all);
+        self.pending = Pending::None;
+        self.refresh();
+        Ok(n)
+    }
+
+    /// Repeat the selected curves `count` times about `centre`, spread over `total_deg` (a full turn
+    /// spaces them evenly all the way round). The count includes the original.
+    pub fn pattern_circular(
+        &mut self,
+        centre: P2,
+        count: usize,
+        total_deg: f64,
+    ) -> Result<usize, String> {
+        let es = self.selected_curves();
+        if es.is_empty() {
+            return Err("select the curves to repeat first".into());
+        }
+        if count == 0 || count > 2500 {
+            return Err("the pattern needs between 1 and 2500 instances".into());
+        }
+        let full = (total_deg.abs() - 360.0).abs() < 1e-9;
+        let step = if count < 2 {
+            0.0
+        } else if full {
+            total_deg / count as f64
+        } else {
+            total_deg / (count - 1) as f64
+        };
+        self.checkpoint();
+        let mut all = Vec::new();
+        for k in 1..count {
+            let (s, c) = (step * k as f64).to_radians().sin_cos();
+            match crate::curves::copy_entities(&mut self.sketch, &es, &|p| {
+                let (x, y) = (p.0 - centre.0, p.1 - centre.1);
+                (centre.0 + x * c - y * s, centre.1 + x * s + y * c)
+            }) {
+                Ok(v) => all.extend(v),
+                Err(e) => {
+                    self.undo.pop();
+                    return Err(e.to_string());
+                }
+            }
+        }
+        let n = all.len();
+        self.selection.extend(all);
+        self.pending = Pending::None;
+        self.refresh();
+        Ok(n)
     }
 }

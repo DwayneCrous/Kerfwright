@@ -17,7 +17,225 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+/// Fill the area inside `polys` (even-odd: holes stay empty) with thin horizontal strips.
+fn fill_polys(painter: &egui::Painter, polys: &[Vec<egui::Pos2>], colour: Color32) {
+    let (mut y0, mut y1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for p in polys.iter().flatten() {
+        y0 = y0.min(p.y);
+        y1 = y1.max(p.y);
+    }
+    if !y0.is_finite() {
+        return;
+    }
+    let mut y = (y0 / 2.0).floor() * 2.0 + 1.0;
+    while y < y1 {
+        let mut xs: Vec<f32> = Vec::new();
+        for poly in polys {
+            let n = poly.len();
+            for i in 0..n {
+                let (a, b) = (poly[i], poly[(i + 1) % n]);
+                if (a.y <= y) != (b.y <= y) {
+                    xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+                }
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        for pair in xs.as_chunks::<2>().0 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(pos2(pair[0], y - 1.0), pos2(pair[1], y + 1.0)),
+                0.0,
+                colour,
+            );
+        }
+        y += 2.0;
+    }
+}
+
 impl DesignWorkspace {
+    /// The regions of the open Extrude dialog's sketch drawn on the sketch plane: chosen ones strongly, the
+    /// others faintly, the one under the pointer highlighted. Clicking one chooses it.
+    fn draw_regions(&self, ui: &Ui, painter: &egui::Painter, rect: egui::Rect, o3: [f64; 3]) {
+        let Some(rv) = self.region_view.as_ref().filter(|r| r.regions.len() > 1) else {
+            return;
+        };
+        let Some(Tool::Extrude { more, .. }) = self.dialog.as_ref().map(|d| &d.tool) else {
+            return;
+        };
+        let hover = ui
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|p| rect.contains(*p))
+            .and_then(|p| self.region_at(p));
+        let f = &rv.plane;
+        for r in &rv.regions {
+            let polys: Vec<Vec<egui::Pos2>> = r
+                .shapes
+                .iter()
+                .flatten()
+                .map(|contour| {
+                    contour
+                        .iter()
+                        .filter_map(|p| {
+                            let w = f.origin + f.x * p[0] + f.y * p[1];
+                            self.viewport
+                                .project([w.x + o3[0], w.y + o3[1], w.z + o3[2]])
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| v.len() >= 3)
+                .collect();
+            let chosen = more.regions.is_empty() || more.regions.contains(&r.signature);
+            let hot = hover.as_ref() == Some(&r.signature);
+            let colour = match (chosen, hot) {
+                (true, true) => Color32::from_rgba_unmultiplied(6, 150, 215, 150),
+                (true, false) => Color32::from_rgba_unmultiplied(6, 150, 215, 85),
+                (false, true) => Color32::from_rgba_unmultiplied(120, 120, 120, 120),
+                (false, false) => Color32::from_rgba_unmultiplied(120, 120, 120, 30),
+            };
+            fill_polys(painter, &polys, colour);
+            for poly in &polys {
+                painter.add(Shape::closed_line(
+                    poly.clone(),
+                    Stroke::new(
+                        if hot { 2.0 } else { 1.0 },
+                        if chosen {
+                            ACCENT
+                        } else {
+                            Color32::from_gray(130)
+                        },
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// The control cage of the Form dialog: its edges, creased edges thicker, the edited vertex marked.
+    fn draw_cage(&self, painter: &egui::Painter) {
+        let Some(Tool::Form {
+            cage,
+            scale,
+            vertex,
+            ..
+        }) = self.dialog.as_ref().map(|d| &d.tool)
+        else {
+            return;
+        };
+        let k = scale.trim().parse::<f64>().unwrap_or(1.0);
+        let at = |v: u32| {
+            let p = cage.verts.get(v as usize)?;
+            self.viewport.project([p[0] * k, p[1] * k, p[2] * k])
+        };
+        let creased = |a: u32, b: u32| {
+            cage.creases
+                .iter()
+                .any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
+        };
+        let colour = Color32::from_rgb(40, 150, 90);
+        for f in &cage.faces {
+            for i in 0..f.len() {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                if let (Some(pa), Some(pb)) = (at(a), at(b)) {
+                    painter.line_segment(
+                        [pa, pb],
+                        Stroke::new(if creased(a, b) { 2.2 } else { 1.0 }, colour),
+                    );
+                }
+            }
+        }
+        for v in 0..cage.verts.len() as u32 {
+            if let Some(p) = at(v) {
+                let on = v as usize == *vertex;
+                painter.circle_filled(
+                    p,
+                    if on { 5.0 } else { 2.5 },
+                    if on { ACCENT } else { colour },
+                );
+            }
+        }
+    }
+
+    /// Construction planes (quads), axes (long lines) and points (crosses) of the document.
+    fn draw_datums(&self, painter: &egui::Painter, ev: &Evaluation, project: &Project, size: f64) {
+        use kw_feature::Product;
+        let doc = project.document();
+        for f in &doc.features {
+            let kind = match f.spec {
+                FeatureSpec::DatumPlane(_) => 0,
+                FeatureSpec::DatumAxis(_) => 1,
+                FeatureSpec::DatumPoint(_) => 2,
+                _ => continue,
+            };
+            if f.suppressed || self.hidden_datums.contains(&f.id) {
+                continue;
+            }
+            let Some(Product::Datum(fr)) = ev.output(f.id).map(|o| &o.product) else {
+                continue;
+            };
+            let chosen = self.model.selected == Some(f.id);
+            let colour = if chosen {
+                ACCENT
+            } else {
+                Color32::from_rgb(214, 150, 40)
+            };
+            let at = |a: f64, b: f64, c: f64| {
+                let w = fr.origin + fr.x * a + fr.y * b + fr.z * c;
+                self.viewport.project([w.x, w.y, w.z])
+            };
+            match kind {
+                0 => {
+                    let pts: Vec<egui::Pos2> =
+                        [(-size, -size), (size, -size), (size, size), (-size, size)]
+                            .iter()
+                            .filter_map(|(u, v)| at(*u, *v, 0.0))
+                            .collect();
+                    if pts.len() == 4 {
+                        painter.add(Shape::convex_polygon(
+                            pts.clone(),
+                            colour.gamma_multiply(0.14),
+                            Stroke::new(1.0, colour),
+                        ));
+                        painter.text(
+                            pts[2] + vec2(-4.0, -4.0),
+                            egui::Align2::RIGHT_BOTTOM,
+                            &f.name,
+                            egui::FontId::proportional(11.0),
+                            colour,
+                        );
+                    }
+                }
+                1 => {
+                    if let (Some(a), Some(b)) =
+                        (at(0.0, 0.0, -size * 1.4), at(0.0, 0.0, size * 1.4))
+                    {
+                        painter.line_segment([a, b], Stroke::new(1.5, colour));
+                        painter.text(
+                            b,
+                            egui::Align2::LEFT_BOTTOM,
+                            &f.name,
+                            egui::FontId::proportional(11.0),
+                            colour,
+                        );
+                    }
+                }
+                _ => {
+                    if let Some(c) = at(0.0, 0.0, 0.0) {
+                        let stroke = Stroke::new(1.5, colour);
+                        painter.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], stroke);
+                        painter.line_segment([c + vec2(0.0, -5.0), c + vec2(0.0, 5.0)], stroke);
+                        painter.circle_stroke(c, 3.0, stroke);
+                        painter.text(
+                            c + vec2(7.0, -3.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            &f.name,
+                            egui::FontId::proportional(11.0),
+                            colour,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn overlay_ui(
         &mut self,
         ui: &mut Ui,
@@ -102,6 +320,12 @@ impl DesignWorkspace {
                 );
             }
         }
+        // ---- construction planes, axes and points
+        self.draw_datums(&painter, ev, project, s);
+        // ---- the cage of the Form being edited
+        self.draw_cage(&painter);
+        // ---- the regions of the Extrude dialog's sketch
+        self.draw_regions(ui, &painter, rect, o3);
         // ---- view cube
         let cube =
             egui::Rect::from_min_size(rect.right_top() + vec2(-100.0, 12.0), vec2(88.0, 88.0));
@@ -149,6 +373,11 @@ impl DesignWorkspace {
         self.extrude_handle(ui, ev, out);
         self.params_window(ui.ctx(), project);
         self.measure_window(ui.ctx(), project);
+        self.interference_window(ui.ctx());
+        self.section_window(ui.ctx(), project);
+        self.assembly_window(ui.ctx(), project);
+        self.flat_window(ui.ctx());
+        self.body_props_window(ui.ctx(), project);
     }
 
     /// The arrow that drags the Extrude distance.

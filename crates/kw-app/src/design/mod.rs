@@ -3,14 +3,22 @@
 //! a plane or a planar face, the view turns into the flat sketch canvas, *Finish Sketch* drops straight into
 //! the Extrude dialog with a live preview.
 
+pub mod assembly;
+pub mod bodyprops;
 pub mod browser;
+pub mod form;
 pub mod geom;
 pub mod measure;
 pub mod overlay;
 pub mod ribbon;
+pub mod section;
+pub mod sheetmetal;
+pub mod sketch_ops;
+pub mod sketch_project;
 pub mod timeline;
 pub mod tools;
 
+use crate::bodies::Bodies;
 use crate::chrome::theme;
 use crate::model::ModelWorkspace;
 use crate::project::Project;
@@ -32,10 +40,22 @@ pub enum Mode {
     Sketching,
 }
 
+/// The regions of the sketch the open Extrude dialog works on: where they are, for drawing and picking them.
+pub struct RegionView {
+    pub sketch: FeatureId,
+    /// Identifies the sketch geometry the regions were computed for.
+    pub key: u128,
+    pub plane: kw_math::Frame3,
+    pub loops: Vec<kw_feature::regions::SketchLoop>,
+    pub regions: Vec<kw_feature::regions::Region>,
+}
+
 /// The live preview of the open dialog.
 #[derive(Debug, Clone, Default)]
 pub struct Preview {
     pub key: String,
+    /// What the preview draws: the bodies of the document with the feature applied.
+    pub bodies: Option<Arc<Bodies>>,
     pub brep: Option<Arc<BRep>>,
     pub error: Option<String>,
 }
@@ -56,6 +76,14 @@ pub enum Action {
     CancelSketch,
     SketchOn(PlaneSpec, PlaneFrame),
     ToggleSketch(FeatureId),
+    /// Make the design a component of the assembly.
+    NewComponent,
+    /// The flat pattern of the sheet-metal part.
+    FlatPattern,
+    /// Edit the last feature of this kind (`FeatureSpec::kind_name`).
+    EditLastOf(&'static str),
+    /// The appearance window of the active (or first) body.
+    OpenAppearance,
 }
 
 pub struct DesignWorkspace {
@@ -77,8 +105,34 @@ pub struct DesignWorkspace {
     pub params_open: bool,
     /// The Measure window is open (picks are compared instead of used by a tool).
     pub measure_open: bool,
+    /// The Interference window is open.
+    pub interference_open: bool,
+    /// The flat pattern window (Sheet Metal ▸ Flat Pattern).
+    pub flat: Option<sheetmetal::FlatState>,
+    /// Which ribbon tab is shown (0 SOLID, 1 SHEET METAL, 2 FORM, 3 TOOLS).
+    pub ribbon_tab: usize,
+    /// The assembly window and the posed view.
+    pub asm: assembly::AssemblyUi,
+    /// The section plane (Section Analysis), when it is on.
+    pub section: Option<section::SectionState>,
     /// Index into `measure::MATERIALS`.
     pub material: usize,
+    /// The bodies drawn in the view (refreshed every frame), and the roots of the bodies hidden from it.
+    pub bodies: Option<Arc<Bodies>>,
+    pub hidden_bodies: HashSet<FeatureId>,
+    /// Construction planes, axes and points hidden from the view.
+    pub hidden_datums: HashSet<FeatureId>,
+    /// The plane of the sketch being edited, and the pattern / text panel open over it.
+    pub sketch_frame: Option<PlaneFrame>,
+    pub sketch_panel: Option<sketch_ops::SketchPanel>,
+    /// The body new features go to when no pick says otherwise (a body root).
+    pub active_body: Option<FeatureId>,
+    /// The body whose properties window (name, colour, material) is open.
+    pub body_props: Option<FeatureId>,
+    /// The body a sketch about to be started on a face belongs to.
+    pub next_sketch_base: Option<FeatureId>,
+    /// The regions of the Extrude dialog's sketch (only kept while there is more than one).
+    pub region_view: Option<RegionView>,
     pub actions: Vec<Action>,
     /// Timeline position of the viewport's last click (used for double-click handling).
     pub shaded: bool,
@@ -102,7 +156,21 @@ impl Default for DesignWorkspace {
             timeline: timeline::State::default(),
             params_open: false,
             measure_open: false,
+            interference_open: false,
+            flat: None,
+            ribbon_tab: 0,
+            asm: Default::default(),
+            section: None,
             material: 2,
+            bodies: None,
+            hidden_bodies: HashSet::new(),
+            hidden_datums: HashSet::new(),
+            sketch_frame: None,
+            sketch_panel: None,
+            active_body: None,
+            body_props: None,
+            next_sketch_base: None,
+            region_view: None,
             actions: Vec::new(),
             shaded: true,
         }
@@ -124,9 +192,12 @@ impl DesignWorkspace {
         &self.model.picks
     }
 
-    fn base_outputs(ev: &Evaluation) -> Option<(&Arc<BRep>, &kw_feature::NameMap)> {
-        let (_, o) = ev.final_solid()?;
-        Some((o.brep()?, &o.names))
+    /// The body the next feature works on: the one `active_body` names, else the last one.
+    pub(crate) fn target_index(&self) -> Option<usize> {
+        let b = self.bodies.as_ref()?;
+        self.active_body
+            .and_then(|r| b.index_of_root(r))
+            .or(Some(b.list.len().checked_sub(1)?))
     }
 
     // ------------------------------------------------------------------------------- sketching
@@ -134,20 +205,24 @@ impl DesignWorkspace {
     /// Enter the sketch mode on `plane` (frame `frame`): a flat canvas with the body's outline as reference.
     pub fn begin_sketch(&mut self, project: &mut Project, plane: PlaneSpec, frame: PlaneFrame) {
         self.sketch.begin_new_on(plane);
+        self.sketch.new_base = self.next_sketch_base.take();
         self.sketch.app.reference = Self::reference_geometry(project, &frame);
+        self.sketch_frame = Some(frame);
         self.enter_sketching();
     }
 
     /// The model's edges lying in the sketch plane, as faint reference lines.
     fn reference_geometry(project: &mut Project, frame: &PlaneFrame) -> Vec<Vec<(f64, f64)>> {
         let ev = project.evaluation();
-        match ev.final_solid().and_then(|(_, o)| o.brep().cloned()) {
-            Some(b) => geom::project_edges(&ModelScene::build(&b), frame),
+        let doc = project.document();
+        match Bodies::new(&doc, &ev, &HashSet::new()) {
+            Some(b) => geom::project_edges(&ModelScene::build(&b.brep), frame),
             None => Vec::new(),
         }
     }
 
     fn enter_sketching(&mut self) {
+        self.sketch_panel = None;
         self.mode = Mode::Sketching;
         self.tab = 2;
         self.dialog = None;
@@ -169,10 +244,11 @@ impl DesignWorkspace {
                     }),
                     _ => None,
                 };
-                self.sketch.app.reference = match frame {
-                    Some(f) => Self::reference_geometry(project, &f),
+                self.sketch.app.reference = match &frame {
+                    Some(f) => Self::reference_geometry(project, f),
                     None => Vec::new(),
                 };
+                self.sketch_frame = frame;
                 self.enter_sketching();
             }
             Err(e) => self.model.error = e,
@@ -210,7 +286,7 @@ impl DesignWorkspace {
 
     pub fn open_tool(&mut self, project: &mut Project, tool: Tool) {
         let doc = project.document();
-        if doc.rollback.is_some() {
+        if doc.rolled_back() {
             self.model.error =
                 "Roll the timeline forward to its end before adding features.".into();
             return;
@@ -242,7 +318,12 @@ impl DesignWorkspace {
             Tool::Combine {
                 target, tool: t, ..
             } => {
-                *target = last_tool_feature;
+                // the active body (else the last one) is the target; the tool is left to the user
+                let heads = doc.heads();
+                *target = self
+                    .active_body
+                    .and_then(|r| heads.iter().copied().find(|h| doc.body_root(*h) == r))
+                    .or(heads.last().copied());
                 *t = None;
             }
             Tool::Loft { sketches, .. } => {
@@ -270,7 +351,12 @@ impl DesignWorkspace {
                     *path = Some(ids[ids.len() - 1]);
                 }
             }
-            Tool::Extrude { sketch, .. } | Tool::Revolve { sketch, .. } if sketch.is_none() => {
+            Tool::Extrude { sketch, .. }
+            | Tool::Revolve { sketch, .. }
+            | Tool::Rib { sketch, .. }
+            | Tool::Pipe { path: sketch, .. }
+                if sketch.is_none() =>
+            {
                 let sel = self.model.selected.filter(|s| {
                     doc.get(*s)
                         .is_some_and(|f| matches!(f.spec, FeatureSpec::Sketch(_)))
@@ -318,18 +404,151 @@ impl DesignWorkspace {
         }
     }
 
-    /// Build the dialog's feature spec against the current document.
+    /// Build the dialog's feature spec against the current document. The picks decide which body it works
+    /// on (all picks must lie on one body); without picks it is the active body, else the last one.
     fn build_spec(&self, project: &mut Project, dlg: &Dialog) -> Result<FeatureSpec, String> {
         let doc = project.document();
         let ev = project.evaluation();
-        let base = Self::base_outputs(&ev);
+        let fallback;
+        let bodies: &Bodies = match &self.bodies {
+            Some(b) => b,
+            None => {
+                fallback = Bodies::new(&doc, &ev, &HashSet::new());
+                match &fallback {
+                    Some(b) => b,
+                    None => {
+                        let ctx = BuildCtx {
+                            doc: &doc,
+                            base: None,
+                            picks: &[],
+                            hole_plane: self.hole_plane.clone(),
+                        };
+                        return dlg.tool.spec(&ctx, dlg.editing.as_ref().map(|(_, s)| s));
+                    }
+                }
+            }
+        };
+        let mut picked_body: Option<usize> = None;
+        let mut local: Vec<Pick> = Vec::new();
+        for p in &self.model.picks {
+            if let Some((i, lp)) = bodies.origin(*p) {
+                if picked_body.is_some_and(|b| b != i) {
+                    return Err("pick faces and edges of one body only".into());
+                }
+                picked_body = Some(i);
+                local.push(lp);
+            }
+        }
+        let idx = picked_body
+            .or_else(|| self.target_index())
+            .unwrap_or(bodies.list.len() - 1);
+        let body = &bodies.list[idx];
         let ctx = BuildCtx {
             doc: &doc,
-            base,
-            picks: &self.model.picks,
+            base: body.output.brep().map(|b| (b, &body.output.names)),
+            picks: &local,
             hole_plane: self.hole_plane.clone(),
         };
-        dlg.tool.spec(&ctx, dlg.editing.as_ref().map(|(_, s)| s))
+        let orig = dlg.editing.as_ref().map(|(_, s)| s);
+        let mut spec = dlg.tool.spec(&ctx, orig)?;
+        // (Split Body always names its body: its two halves must both start from the same one)
+        if (bodies.list.len() > 1 || matches!(dlg.tool, Tool::SplitBody { .. }))
+            && spec.needs_body()
+        {
+            // several bodies: say which one the feature works on (an edited feature keeps its own, unless
+            // new picks name another)
+            match (orig, picked_body) {
+                (Some(o), None) => spec.set_base(o.explicit_base()),
+                _ => spec.set_base(Some(body.head)),
+            }
+        }
+        Ok(spec)
+    }
+
+    /// Recompute the regions of the Extrude dialog's sketch when it changed.
+    fn refresh_regions(&mut self, ev: &Evaluation) {
+        let sk = match &self.dialog {
+            Some(Dialog {
+                tool: Tool::Extrude {
+                    sketch: Some(s), ..
+                },
+                ..
+            }) => *s,
+            _ => {
+                self.region_view = None;
+                return;
+            }
+        };
+        let Some(o) = ev.output(sk) else {
+            self.region_view = None;
+            return;
+        };
+        let key = o.geom_hash;
+        if self
+            .region_view
+            .as_ref()
+            .is_some_and(|r| r.sketch == sk && r.key == key)
+        {
+            return;
+        }
+        let Some(kw_feature::Product::Sketch(sp)) = Some(&o.product) else {
+            self.region_view = None;
+            return;
+        };
+        let view = kw_feature::regions::sketch_loops(&sp.sketch, &sp.entities, sp.plane)
+            .ok()
+            .map(|loops| {
+                let regions = if loops.len() >= 2 {
+                    kw_feature::regions::regions(&loops)
+                } else {
+                    Vec::new()
+                };
+                RegionView {
+                    sketch: sk,
+                    key,
+                    plane: sp.plane,
+                    loops,
+                    regions,
+                }
+            });
+        self.region_view = view;
+    }
+
+    /// The signature of the sketch region under a screen position, if the position is over one.
+    fn region_at(&self, pos: egui::Pos2) -> Option<Vec<u32>> {
+        let rv = self.region_view.as_ref().filter(|r| r.regions.len() > 1)?;
+        let c = self.viewport.model()?.scene.center;
+        let (o, d) = self.viewport.ray(pos);
+        let (o, d) = (
+            kw_math::Vector3::new(o.x + c.x, o.y + c.y, o.z + c.z),
+            kw_math::Vector3::new(d.x, d.y, d.z),
+        );
+        let f = &rv.plane;
+        let denom = d.dot(&f.z);
+        if denom.abs() < 1e-9 {
+            return None;
+        }
+        let t = (f.origin.coords - o).dot(&f.z) / denom;
+        let hit = o + d * t - f.origin.coords;
+        let p = [hit.dot(&f.x), hit.dot(&f.y)];
+        let sig = kw_feature::regions::signature_at(&rv.loops, p);
+        rv.regions
+            .iter()
+            .find(|r| r.signature == sig)
+            .map(|r| r.signature.clone())
+    }
+
+    /// The features a dialog adds: one, except Split Body, which adds a feature per half.
+    fn specs_for(dlg: &Dialog, spec: FeatureSpec) -> Vec<FeatureSpec> {
+        match (&dlg.tool, &spec) {
+            (Tool::SplitBody { .. }, FeatureSpec::SplitBody(sb)) if dlg.editing.is_none() => {
+                let (mut a, mut b) = (sb.clone(), sb.clone());
+                a.keep = kw_feature::SplitSide::Positive;
+                b.keep = kw_feature::SplitSide::Negative;
+                vec![FeatureSpec::SplitBody(a), FeatureSpec::SplitBody(b)]
+            }
+            _ => vec![spec],
+        }
     }
 
     /// Recompute the preview when the dialog's inputs changed.
@@ -351,26 +570,43 @@ impl DesignWorkspace {
         }
         let mut pv = Preview {
             key,
+            bodies: None,
             brep: None,
             error: None,
         };
         match self.build_spec(project, &dlg) {
             Err(e) => pv.error = Some(e),
+            // a form is finished into a body only at OK: the surface fit takes seconds, the cage is drawn
+            Ok(_) if matches!(dlg.tool, Tool::Form { .. }) => {}
             Ok(spec) => {
                 let mut tmp = (*doc).clone();
-                let name = crate::model::unique_name(&doc, dlg.tool.name_base());
-                let added = match &dlg.editing {
-                    Some((id, _)) => tmp.replace_spec(*id, spec).map(|_| *id),
-                    None => tmp.add(&name, spec),
+                let added: Result<Vec<FeatureId>, kw_feature::TimelineError> = match &dlg.editing {
+                    Some((id, _)) => tmp.replace_spec(*id, spec).map(|_| vec![*id]),
+                    None => {
+                        let mut ids = Vec::new();
+                        let mut res = Ok(());
+                        for sp in Self::specs_for(&dlg, spec) {
+                            let name = crate::model::unique_name(&tmp, dlg.tool.name_base());
+                            match tmp.add(&name, sp) {
+                                Ok(id) => ids.push(id),
+                                Err(e) => {
+                                    res = Err(e);
+                                    break;
+                                }
+                            }
+                        }
+                        res.map(|_| ids)
+                    }
                 };
                 match added {
                     Err(e) => pv.error = Some(e.to_string()),
-                    Ok(id) => {
+                    Ok(ids) => {
                         let ev = project.engine.evaluate(&tmp);
-                        if let Some(e) = ev.error(id) {
+                        if let Some(e) = ids.iter().find_map(|id| ev.error(*id)) {
                             pv.error = Some(e.to_string());
-                        } else if let Some((_, o)) = ev.final_solid() {
-                            pv.brep = o.brep().cloned();
+                        } else if let Some(b) = Bodies::new(&tmp, &ev, &self.hidden_bodies) {
+                            pv.brep = Some(b.brep.clone());
+                            pv.bodies = Some(Arc::new(b));
                         }
                     }
                 }
@@ -390,15 +626,24 @@ impl DesignWorkspace {
                 return false;
             }
         };
-        let doc = project.document();
-        let name = crate::model::unique_name(&doc, dlg.tool.name_base());
+        let base_name = dlg.tool.name_base();
         let ok = match &dlg.editing {
             Some((id, _)) => {
                 let id = *id;
                 self.model
                     .edit(project, |d| d.replace_spec(id, spec).map(|_| id))
             }
-            None => self.model.edit(project, |d| d.add(&name, spec)),
+            None => {
+                let specs = Self::specs_for(&dlg, spec);
+                self.model.edit(project, |d| {
+                    let mut last = None;
+                    for sp in specs {
+                        let name = crate::model::unique_name(d, base_name);
+                        last = Some(d.add(&name, sp)?);
+                    }
+                    last.ok_or(kw_feature::TimelineError::BadIndex { index: 0, len: 0 })
+                })
+            }
         };
         match ok {
             Some(id) => {
@@ -427,6 +672,34 @@ impl DesignWorkspace {
         let actions = std::mem::take(&mut self.actions);
         for a in actions {
             match a {
+                Action::FlatPattern => {
+                    if let Err(e) = self.sheet_flat_pattern(project) {
+                        self.model.error = e;
+                    }
+                }
+                Action::EditLastOf(kind) => {
+                    let id = project
+                        .document()
+                        .features
+                        .iter()
+                        .rev()
+                        .find(|f| f.spec.kind_name() == kind)
+                        .map(|f| f.id);
+                    if let Some(id) = id {
+                        self.open_edit(project, id);
+                    }
+                }
+                Action::OpenAppearance => {
+                    let doc = project.document();
+                    self.body_props = self
+                        .active_body
+                        .or_else(|| crate::bodies::summaries(&doc).first().map(|b| b.root));
+                }
+                Action::NewComponent => {
+                    if let Err(e) = self.asm_new_component(project) {
+                        self.model.error = e;
+                    }
+                }
                 Action::Select(id) => self.model.selected = Some(id),
                 Action::Edit(id) => self.open_edit(project, id),
                 Action::Delete(id) => {
@@ -456,7 +729,7 @@ impl DesignWorkspace {
                 }
                 Action::Open(t) => self.open_tool(project, t),
                 Action::StartSketch => {
-                    if project.document().rollback.is_some() {
+                    if project.document().rolled_back() {
                         self.model.error =
                             "Roll the timeline forward to its end before adding features.".into();
                         continue;
@@ -501,6 +774,7 @@ impl DesignWorkspace {
                 self.sketch.app.canvas_ui(ui);
             });
             self.sketch.app.dialogs(ui.ctx());
+            self.sketch_panel_window(ui.ctx());
         } else {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
@@ -528,6 +802,7 @@ impl DesignWorkspace {
     ) {
         let ev = project.evaluation();
         let doc = project.document();
+        self.viewport.section = self.section_plane(project);
         self.update_preview(project);
         // While a tool is collecting picks (edges for Fillet / Chamfer, faces for Shell / Hole) the view must
         // show the body the picks refer to: the preview solid has other edges and faces, so picking on it
@@ -536,19 +811,32 @@ impl DesignWorkspace {
             .dialog
             .as_ref()
             .is_some_and(|d| d.tool.picks_edges() || d.tool.picks_faces());
+        self.bodies = Bodies::new(&doc, &ev, &self.hidden_bodies).map(Arc::new);
+        if self.active_body.is_some_and(|r| {
+            self.bodies
+                .as_ref()
+                .is_none_or(|b| b.index_of_root(r).is_none())
+        }) {
+            self.active_body = None;
+        }
+        self.refresh_regions(&ev);
         let preview = self.preview.as_ref().filter(|_| !collecting);
-        let (shown, base_key) = match preview.and_then(|p| p.brep.clone()) {
-            Some(b) => (Some(b), 0xB0B0_u128),
-            None => (ev.final_solid().and_then(|(_, o)| o.brep().cloned()), 0),
-        };
-        let geom_key = match (preview, ev.final_hashes()) {
-            (Some(p), _) if p.brep.is_some() => {
+        let preview_bodies = preview.and_then(|p| p.bodies.clone());
+        let shown: Option<Arc<Bodies>> = preview_bodies.clone().or_else(|| self.bodies.clone());
+        let geom_key = match (&preview_bodies, &shown) {
+            (Some(pb), _) => {
                 let mut h = kw_feature::Hasher128::new();
-                h.bytes(p.key.as_bytes());
+                h.bytes(preview.map(|p| p.key.as_bytes()).unwrap_or_default());
+                h.u128(pb.key);
                 h.finish()
             }
-            (_, Some(h)) => h.0 ^ h.1.rotate_left(1),
+            (None, Some(sb)) => sb.key,
             _ => 0,
+        };
+        let base_key = if preview_bodies.is_some() {
+            0xB0B0_u128
+        } else {
+            0
         };
         let segs = geom::sketch_segments(&ev, &doc, &self.hidden_sketches);
         let key = geom_key
@@ -571,14 +859,18 @@ impl DesignWorkspace {
         };
         self.viewport.wireframe = !self.shaded;
         let b = shown.clone();
+        // while the assembly is shown the view draws the posed components (nothing in it can be picked)
+        let asm_view = self.asm_display(project);
+        let key = asm_view.as_ref().map_or(key, |a| a.0);
         let out = self.viewport.show_with(
             ui,
             rs,
             key,
             move || {
-                let mut m = match &b {
-                    Some(b) => ModelScene::build(b),
-                    None => ModelScene::empty(),
+                let mut m = match (&asm_view, &b) {
+                    (Some((_, rep, cols)), _) => ModelScene::build_coloured(rep, cols),
+                    (None, Some(b)) => ModelScene::build_coloured(&b.brep, &b.colours()),
+                    (None, None) => ModelScene::empty(),
                 };
                 m.add_segments(&segs);
                 m
@@ -587,7 +879,9 @@ impl DesignWorkspace {
             opts,
         );
         self.overlay_ui(ui, project, &ev, &out);
-        self.handle_clicks(ui, project, &ev, &out);
+        if !self.asm.view {
+            self.handle_clicks(ui, project, &ev, &out);
+        }
         // dialog
         if let Some(mut dlg) = self.dialog.take() {
             let picks = self.model.picks.clone();
@@ -596,7 +890,21 @@ impl DesignWorkspace {
                 .as_ref()
                 .and_then(|p| p.error.clone())
                 .or_else(|| (!self.model.error.is_empty()).then(|| self.model.error.clone()));
-            let (outcome, _) = tools::panel(ui.ctx(), &mut dlg, &doc, &picks, err.as_deref());
+            let infos: Vec<tools::RegionInfo> = self
+                .region_view
+                .as_ref()
+                .map(|r| {
+                    r.regions
+                        .iter()
+                        .map(|g| tools::RegionInfo {
+                            signature: g.signature.clone(),
+                            area: g.area,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (outcome, _) =
+                tools::panel(ui.ctx(), &mut dlg, &doc, &picks, &infos, err.as_deref());
             self.dialog = Some(dlg);
             match outcome {
                 Outcome::Ok => {
@@ -657,10 +965,22 @@ impl DesignWorkspace {
                         Some(Pick::Face(f)) => Some(*f),
                         _ => None,
                     };
-                    let brep = Self::base_outputs(ev);
-                    if let (Some(f), Some((b, names))) = (face, brep) {
-                        match (geom::face_frame(b, f), names.reference_to(b, f)) {
-                            (Some(frame), Some(r)) => {
+                    if let (Some(f), Some(bodies)) = (face, self.bodies.clone()) {
+                        let located = bodies.origin(Pick::Face(f));
+                        let brep = &bodies.brep;
+                        let reference = located.and_then(|(i, lp)| match lp {
+                            Pick::Face(of) => {
+                                let o = &bodies.list[i].output;
+                                o.names.reference_to(o.brep()?, of).map(|r| (i, r))
+                            }
+                            _ => None,
+                        });
+                        match (geom::face_frame(brep, f), reference) {
+                            (Some(frame), Some((i, r))) => {
+                                if bodies.list.len() > 1 {
+                                    self.next_sketch_base = Some(bodies.list[i].head);
+                                    self.active_body = Some(bodies.list[i].root);
+                                }
                                 self.actions
                                     .push(Action::SketchOn(PlaneSpec::Face(r), frame));
                                 return;
@@ -682,6 +1002,9 @@ impl DesignWorkspace {
                     }
                 }
                 Mode::Idle => {
+                    if self.try_toggle_region(out) {
+                        return;
+                    }
                     // tools that take picks, otherwise plain selection
                     let (edges, faces, hole) = self
                         .dialog
@@ -733,14 +1056,52 @@ impl DesignWorkspace {
         let _ = project;
     }
 
+    /// A click on a sketch region while the Extrude dialog is open chooses (or drops) that region.
+    fn try_toggle_region(&mut self, out: &crate::viewport::ViewOut) -> bool {
+        let Some(pos) = out.click_pos else {
+            return false;
+        };
+        let Some(Dialog {
+            tool: Tool::Extrude { more, .. },
+            ..
+        }) = &self.dialog
+        else {
+            return false;
+        };
+        if more.to_face {
+            return false; // clicks choose the face to stop at
+        }
+        let Some(sig) = self.region_at(pos) else {
+            return false;
+        };
+        if let Some(Dialog {
+            tool: Tool::Extrude { more, .. },
+            ..
+        }) = self.dialog.as_mut()
+        {
+            if let Some(i) = more.regions.iter().position(|r| *r == sig) {
+                more.regions.remove(i);
+            } else {
+                more.regions.push(sig);
+            }
+        }
+        true
+    }
+
     /// A click on a planar face for the Hole tool: remember the plane and put the click's position in the fields.
-    fn pick_hole_face(&mut self, ev: &Arc<Evaluation>, p: Pick, out: &crate::viewport::ViewOut) {
+    fn pick_hole_face(&mut self, _ev: &Arc<Evaluation>, p: Pick, out: &crate::viewport::ViewOut) {
         let Pick::Face(f) = p else { return };
-        let Some((brep, names)) = Self::base_outputs(ev) else {
+        let Some(bodies) = self.bodies.clone() else {
             return;
         };
-        let (Some(frame), Some(r)) = (geom::face_frame(brep, f), names.reference_to(brep, f))
-        else {
+        let reference = bodies.origin(p).and_then(|(i, lp)| match lp {
+            Pick::Face(of) => {
+                let o = &bodies.list[i].output;
+                o.names.reference_to(o.brep()?, of)
+            }
+            _ => None,
+        });
+        let (Some(frame), Some(r)) = (geom::face_frame(&bodies.brep, f), reference) else {
             self.model.error = "that face is not planar".into();
             return;
         };

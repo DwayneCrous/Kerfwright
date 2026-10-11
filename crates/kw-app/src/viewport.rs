@@ -177,24 +177,35 @@ impl ModelScene {
     }
 
     pub fn build(brep: &BRep) -> ModelScene {
+        ModelScene::build_coloured(brep, &[])
+    }
+
+    /// As [`ModelScene::build`], with the colour of body `i` (in the B-rep's body order) from `colours`.
+    pub fn build_coloured(brep: &BRep, colours: &[[u8; 3]]) -> ModelScene {
         let bodies: Vec<BodyId> = brep.bodies.keys().collect();
         let opts = TessOptions {
             chord_tol: 0.02,
             angle_tol: 0.2,
         };
-        let tess: Vec<Tessellation> = bodies
+        let tess_c: Vec<(Tessellation, [u8; 3])> = bodies
             .iter()
-            .filter_map(|b| tessellate_body(brep, *b, &opts).ok())
+            .enumerate()
+            .filter_map(|(i, b)| {
+                tessellate_body(brep, *b, &opts)
+                    .ok()
+                    .map(|t| (t, colours.get(i).copied().unwrap_or([196, 200, 208])))
+            })
             .collect();
-        let objects: Vec<SceneObject> = tess
+        let objects: Vec<SceneObject> = tess_c
             .iter()
-            .map(|t| SceneObject {
+            .map(|(t, c)| SceneObject {
                 tess: t,
                 transform: Isometry3::identity(),
-                color: [196, 200, 208],
+                color: *c,
             })
             .collect();
         let mut scene = Scene::build(&objects);
+        let tess: Vec<Tessellation> = tess_c.into_iter().map(|(t, _)| t).collect();
         if tess.is_empty() {
             scene.center = nalgebra::Vector3::zeros();
             scene.radius = 40.0;
@@ -319,6 +330,8 @@ pub struct Viewport3d {
     /// Draw edges only (to see toolpaths inside the material).
     pub wireframe: bool,
     pub show_edges: bool,
+    /// A section plane in world coordinates, `(unit normal, offset)`: what lies on the normal's side is cut.
+    pub section: Option<([f64; 3], f64)>,
     /// Picks drawn as selected besides the one passed to `show` (a multi-selection).
     pub extra_selected: Vec<Pick>,
     /// Reach, in pixels, of edge picking and hovering (0 = the exact pixel only).
@@ -343,6 +356,7 @@ impl Default for Viewport3d {
             camera: OrbitCamera::new(50.0, 1.5),
             wireframe: false,
             show_edges: true,
+            section: None,
             extra_selected: Vec::new(),
             edge_pick_px: 0,
             model: None,
@@ -573,6 +587,14 @@ impl Viewport3d {
         gpu.renderer.settings.show_mesh = !self.wireframe;
         gpu.renderer.settings.show_edges = self.show_edges;
         gpu.renderer.settings.background = crate::chrome::theme::VIEWPORT;
+        // the scene is centred on its middle: the plane moves with it
+        gpu.renderer.settings.section = match (&self.section, &self.model) {
+            (Some((n, d)), Some(m)) => {
+                let c = m.scene.center;
+                Some((*n, *d - (n[0] * c.x + n[1] * c.y + n[2] * c.z)))
+            }
+            _ => None,
+        };
         gpu.renderer.selected = highlight
             .and_then(|p| self.model.as_ref().map(|m| m.id_of(p)))
             .unwrap_or(0);

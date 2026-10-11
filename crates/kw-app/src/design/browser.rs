@@ -133,25 +133,101 @@ impl DesignWorkspace {
                         self.row_interactions(&resp, *id, *sup);
                     }
                 });
-                let bodies = ev
-                    .final_solid()
-                    .and_then(|(_, o)| o.brep().map(|b| b.bodies.len()))
-                    .unwrap_or(0);
+                let datums: Vec<(FeatureId, String, Icon, bool)> = doc
+                    .features
+                    .iter()
+                    .filter_map(|f| {
+                        let icon = match f.spec {
+                            FeatureSpec::DatumPlane(_) => Icon::Plane,
+                            FeatureSpec::DatumAxis(_) => Icon::Axis,
+                            FeatureSpec::DatumPoint(_) => Icon::PointDatum,
+                            _ => return None,
+                        };
+                        Some((f.id, f.name.clone(), icon, f.suppressed))
+                    })
+                    .collect();
+                if !datums.is_empty() {
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(format!("Construction ({})", datums.len())).size(12.0),
+                    )
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for (id, name, icon, sup) in &datums {
+                            let (resp, eye) = row(
+                                ui,
+                                *icon,
+                                name,
+                                self.model.selected == Some(*id),
+                                Some(!self.hidden_datums.contains(id)),
+                                ev.error(*id).is_some(),
+                                *sup,
+                            );
+                            if eye && !self.hidden_datums.remove(id) {
+                                self.hidden_datums.insert(*id);
+                            }
+                            self.row_interactions(&resp, *id, *sup);
+                        }
+                    });
+                }
+                let infos = crate::bodies::summaries(&doc);
                 egui::CollapsingHeader::new(
-                    egui::RichText::new(format!("Bodies ({bodies})")).size(12.0),
+                    egui::RichText::new(format!("Bodies ({})", infos.len())).size(12.0),
                 )
                 .default_open(true)
                 .show(ui, |ui| {
-                    for i in 0..bodies {
-                        row(
+                    for info in &infos {
+                        let hidden = self.hidden_bodies.contains(&info.root);
+                        let (resp, eye) = row(
                             ui,
                             Icon::Body,
-                            &format!("Body{}", i + 1),
+                            &info.name,
+                            self.active_body == Some(info.root),
+                            Some(!hidden),
                             false,
-                            None,
-                            false,
-                            false,
+                            hidden,
                         );
+                        // the body's colour next to its name
+                        let sw = egui::Rect::from_center_size(
+                            egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
+                            vec2(10.0, 10.0),
+                        );
+                        ui.painter().rect_filled(
+                            sw,
+                            2.0,
+                            egui::Color32::from_rgb(info.colour[0], info.colour[1], info.colour[2]),
+                        );
+                        if eye && !self.hidden_bodies.remove(&info.root) {
+                            self.hidden_bodies.insert(info.root);
+                        }
+                        if resp.clicked() {
+                            self.active_body = Some(info.root);
+                        }
+                        if resp.double_clicked() {
+                            self.body_props = Some(info.root);
+                        }
+                        let root = info.root;
+                        resp.context_menu(|ui| {
+                            if ui.button("Properties…").clicked() {
+                                self.body_props = Some(root);
+                                ui.close();
+                            }
+                            if ui.button("Make active").clicked() {
+                                self.active_body = Some(root);
+                                ui.close();
+                            }
+                            if ui.button("Isolate").clicked() {
+                                self.hidden_bodies = infos
+                                    .iter()
+                                    .map(|b| b.root)
+                                    .filter(|r| *r != root)
+                                    .collect();
+                                ui.close();
+                            }
+                            if ui.button("Show all").clicked() {
+                                self.hidden_bodies.clear();
+                                ui.close();
+                            }
+                        });
                     }
                 });
                 let features: Vec<(FeatureId, String, &'static str, bool)> = doc

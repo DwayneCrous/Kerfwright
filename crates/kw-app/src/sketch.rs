@@ -40,6 +40,8 @@ pub struct SketchWorkspace {
     pub editing: Editing,
     pub error: String,
     pub plane: NewPlane,
+    /// For a new sketch on a face: the body that face belongs to.
+    pub new_base: Option<FeatureId>,
     /// Variable values when an existing sketch was loaded: bindings of variables the user did not change
     /// are kept, those the user changed are dropped (the new value wins).
     loaded_vars: Vec<f64>,
@@ -54,6 +56,7 @@ impl Default for SketchWorkspace {
             editing: Editing::Nothing,
             error: String::new(),
             plane: NewPlane::Xy,
+            new_base: None,
             loaded_vars: Vec::new(),
         }
     }
@@ -114,13 +117,21 @@ impl SketchWorkspace {
             Editing::Nothing => return None,
             Editing::New(PlaneSpecKey(plane)) => {
                 let doc = project.document();
+                let new_base = self.new_base;
                 let name = (1..)
                     .map(|n| format!("Sketch {n}"))
                     .find(|n| doc.find_by_name(n).is_none())
                     .expect("a free name");
-                project
-                    .history
-                    .edit(|d| d.add(&name, FeatureSpec::Sketch(SketchSpec { plane, recipe })))
+                project.history.edit(|d| {
+                    d.add(
+                        &name,
+                        FeatureSpec::Sketch(SketchSpec {
+                            plane,
+                            recipe,
+                            base: new_base,
+                        }),
+                    )
+                })
             }
             Editing::Existing(id) => {
                 let doc = project.document();
@@ -142,10 +153,17 @@ impl SketchWorkspace {
                     })
                     .cloned()
                     .collect();
-                let plane = old.plane;
+                let (plane, old_base) = (old.plane, old.base);
                 project.history.edit(|d| {
-                    d.replace_spec(id, FeatureSpec::Sketch(SketchSpec { plane, recipe }))
-                        .map(|_| id)
+                    d.replace_spec(
+                        id,
+                        FeatureSpec::Sketch(SketchSpec {
+                            plane,
+                            recipe,
+                            base: old_base,
+                        }),
+                    )
+                    .map(|_| id)
                 })
             }
         };

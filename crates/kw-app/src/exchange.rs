@@ -6,7 +6,7 @@
 use crate::model::unique_name;
 use crate::project::Project;
 use kw_feature::{FeatureSpec, ImportFormat, ImportSpec};
-use kw_tess::{tessellate_body, TessOptions};
+use kw_tess::{tessellate_brep, TessOptions};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,17 +110,19 @@ pub fn export_file(
     path: &Path,
 ) -> Result<String, String> {
     let ev = project.evaluation();
-    let Some((_, out)) = ev.final_solid() else {
+    let doc = project.document();
+    // every body of the model goes into the file
+    let Some(bodies) = crate::bodies::Bodies::new(&doc, &ev, &std::collections::HashSet::new())
+    else {
         return Err("there is no solid to export yet".into());
     };
-    let (Some(brep), Some(body)) = (out.brep(), out.body()) else {
-        return Err("there is no solid to export yet".into());
-    };
+    let brep = &*bodies.brep;
+    let body_ids: Vec<kw_brep::BodyId> = brep.bodies.keys().collect();
     let name = project.name();
     let bytes: Vec<u8> = match format {
         ExportFormat::Step => kw_step::export(
             brep,
-            &[body],
+            &body_ids,
             &kw_step::ExportOptions {
                 product_name: name.clone(),
                 ..Default::default()
@@ -128,9 +130,8 @@ pub fn export_file(
         )
         .into_bytes(),
         _ => {
-            let tess = tessellate_body(
+            let tess = tessellate_brep(
                 brep,
-                body,
                 &TessOptions {
                     chord_tol: 0.01,
                     angle_tol: 0.15,

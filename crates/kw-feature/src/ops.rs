@@ -15,7 +15,10 @@ use kw_boolean::{boolean, BoolOptions, Op};
 use kw_brep::{BRep, BodyId, BuildResult, CopyOptions, EdgeId, EntityRef, FaceId, ShapeHistory};
 use kw_expr::{Dim, Param, Quantity};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
-use kw_model::{draft_faces, loft, offset_body, shell, sweep, SweepOptions};
+use kw_model::{
+    draft_faces, extrude, loft, offset_body, shell, sweep, Profile, ProfileLoop, SweepOptions,
+};
+use kw_nurbs::Curve3;
 use kw_nurbs::CurveGeom;
 use kw_sketch::{EntityKind, Solver};
 use std::collections::HashMap;
@@ -128,6 +131,17 @@ pub fn canonical_plane_frame(n: Vector3<f64>, p0: Point3<f64>) -> Frame3 {
     let y = n.cross(&x);
     let origin = Point3::from(n * n.dot(&p0.coords));
     std_frame(origin, x, y, n)
+}
+
+/// A point given by coordinates or by a datum point feature.
+fn point_src(p: &PointSrc, inp: &Inputs) -> Result<Point3<f64>, EvalError> {
+    match p {
+        PointSrc::Coords(c) => Ok(Point3::from(vec3(c)?)),
+        PointSrc::Datum(id) => match &inp.get(*id)?.product {
+            Product::Datum(f) => Ok(f.origin),
+            _ => Err(EvalError::Dependency(format!("{id} is not a point"))),
+        },
+    }
 }
 
 fn plane_frame(
@@ -411,20 +425,169 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
     let mut notes: Vec<Resolution> = Vec::new();
     match spec {
         FeatureSpec::Parameter { value, .. } => Ok(EvalOutput::param(lit(value)?)),
-        FeatureSpec::DatumPlane(d) => {
-            let base = plane_frame(&d.base, inp, &mut notes)?;
-            let off = length(&d.offset)?;
-            let tilt = angle(&d.tilt)?;
-            let t = Transform3::rotation(base.x, tilt);
-            let z = t.apply_vector(&base.z);
-            let y = t.apply_vector(&base.y);
-            let f = Frame3 {
-                origin: base.origin + z * off,
-                x: base.x,
-                y,
-                z,
+        FeatureSpec::DatumPlane(d) => match &d.mode {
+            PlaneMode::Offset => {
+                let base = plane_frame(&d.base, inp, &mut notes)?;
+                let off = length(&d.offset)?;
+                let tilt = angle(&d.tilt)?;
+                let t = Transform3::rotation(base.x, tilt);
+                let z = t.apply_vector(&base.z);
+                let y = t.apply_vector(&base.y);
+                let f = Frame3 {
+                    origin: base.origin + z * off,
+                    x: base.x,
+                    y,
+                    z,
+                };
+                Ok(EvalOutput::datum(f, notes))
+            }
+            PlaneMode::Midplane(other) => {
+                let a = plane_frame(&d.base, inp, &mut notes)?;
+                let b = plane_frame(other, inp, &mut notes)?;
+                if a.z.cross(&b.z).norm() > 1e-9 {
+                    return Err(EvalError::Kernel(
+                        "a midplane needs two parallel planes".into(),
+                    ));
+                }
+                let f = Frame3 {
+                    origin: Point3::from((a.origin.coords + b.origin.coords) * 0.5),
+                    ..a
+                };
+                // keep the point on the plane: move the origin onto it
+                let f = Frame3 {
+                    origin: f.origin - f.z * (f.origin - a.origin).dot(&f.z)
+                        + f.z * (((b.origin - a.origin).dot(&a.z)) * 0.5),
+                    ..f
+                };
+                Ok(EvalOutput::datum(f, notes))
+            }
+            PlaneMode::ThreePoints(pts) => {
+                let p0 = point_src(&pts[0], inp)?;
+                let p1 = point_src(&pts[1], inp)?;
+                let p2 = point_src(&pts[2], inp)?;
+                let (u, v) = (p1 - p0, p2 - p0);
+                let z = u.cross(&v);
+                if z.norm() < 1e-9 * (1.0 + u.norm() * v.norm()) {
+                    return Err(EvalError::Kernel("the three points lie on one line".into()));
+                }
+                let z = z.normalize();
+                let x = u.normalize();
+                Ok(EvalOutput::datum(
+                    Frame3 {
+                        origin: p0,
+                        x,
+                        y: z.cross(&x),
+                        z,
+                    },
+                    notes,
+                ))
+            }
+        },
+        FeatureSpec::DatumAxis(a) => {
+            let (origin, dir) = match &a.kind {
+                AxisKind::TwoPoints(pts) => {
+                    let (p0, p1) = (point_src(&pts[0], inp)?, point_src(&pts[1], inp)?);
+                    (p0, p1 - p0)
+                }
+                AxisKind::Edge(e) => {
+                    let b = body_of(inp, "an axis along an edge")?;
+                    let edges = resolve_edges(b, std::slice::from_ref(&**e), &mut notes)?;
+                    let rep = b.brep().unwrap();
+                    let ed = &rep.edges[edges[0]];
+                    match ed.curve.map(|c| &rep.curves[c]) {
+                        Some(CurveGeom::Line(l)) => (l.origin, l.dir),
+                        _ => {
+                            return Err(EvalError::Kernel(
+                                "an axis can only follow a straight edge".into(),
+                            ))
+                        }
+                    }
+                }
+                AxisKind::NormalToFace { face, at } => {
+                    let f = plane_frame(&PlaneSpec::Face(face.clone()), inp, &mut notes)?;
+                    (
+                        f.origin + f.x * length(&at[0])? + f.y * length(&at[1])?,
+                        f.z,
+                    )
+                }
+                AxisKind::PlanePlane(pp) => {
+                    let a = plane_frame(&pp.0, inp, &mut notes)?;
+                    let b = plane_frame(&pp.1, inp, &mut notes)?;
+                    let d = a.z.cross(&b.z);
+                    if d.norm() < 1e-9 {
+                        return Err(EvalError::Kernel(
+                            "the two planes are parallel: they have no common line".into(),
+                        ));
+                    }
+                    // a point on both planes: solve n1.p = d1, n2.p = d2, d.p = 0
+                    let (d1, d2) = (a.z.dot(&a.origin.coords), b.z.dot(&b.origin.coords));
+                    let m = kw_math::Matrix3::new(
+                        a.z.x, a.z.y, a.z.z, b.z.x, b.z.y, b.z.z, d.x, d.y, d.z,
+                    );
+                    let p = m
+                        .try_inverse()
+                        .ok_or_else(|| EvalError::Kernel("the planes do not meet".into()))?
+                        * Vector3::new(d1, d2, 0.0);
+                    (Point3::from(p), d)
+                }
             };
-            Ok(EvalOutput::datum(f, notes))
+            if dir.norm() < 1e-12 {
+                return Err(EvalError::Kernel("the axis has no direction".into()));
+            }
+            let z = dir.normalize();
+            let helper = if z.x.abs() < 0.9 {
+                Vector3::x()
+            } else {
+                Vector3::y()
+            };
+            let x = (helper - z * helper.dot(&z)).normalize();
+            Ok(EvalOutput::datum(
+                Frame3 {
+                    origin,
+                    x,
+                    y: z.cross(&x),
+                    z,
+                },
+                notes,
+            ))
+        }
+        FeatureSpec::DatumPoint(p) => {
+            let origin = match &p.kind {
+                PointKind::Coords(c) => Point3::from(vec3(c)?),
+                PointKind::EdgeMidpoint(e) => {
+                    let b = body_of(inp, "a point at an edge")?;
+                    let edges = resolve_edges(b, std::slice::from_ref(&**e), &mut notes)?;
+                    let rep = b.brep().unwrap();
+                    let ed = &rep.edges[edges[0]];
+                    match ed.curve.map(|c| &rep.curves[c]) {
+                        Some(c) => c.point_at((ed.param_range.0 + ed.param_range.1) / 2.0),
+                        None => return Err(EvalError::Kernel("that edge has no curve".into())),
+                    }
+                }
+                PointKind::AxisPlane { axis, plane } => {
+                    let a = match &inp.get(*axis)?.product {
+                        Product::Datum(f) => *f,
+                        _ => return Err(EvalError::Dependency(format!("{axis} is not an axis"))),
+                    };
+                    let pl = plane_frame(plane, inp, &mut notes)?;
+                    let denom = a.z.dot(&pl.z);
+                    if denom.abs() < 1e-9 {
+                        return Err(EvalError::Kernel(
+                            "the axis is parallel to the plane".into(),
+                        ));
+                    }
+                    a.origin + a.z * ((pl.origin - a.origin).dot(&pl.z) / denom)
+                }
+            };
+            Ok(EvalOutput::datum(
+                Frame3 {
+                    origin,
+                    x: Vector3::x(),
+                    y: Vector3::y(),
+                    z: Vector3::z(),
+                },
+                notes,
+            ))
         }
         FeatureSpec::Sketch(s) => {
             let plane = plane_frame(&s.plane, inp, &mut notes)?;
@@ -533,12 +696,43 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             let ext = &x.extent;
             let n = sk.plane.z;
             let dir = if x.flip { -n } else { n };
+            // the tool may start away from the sketch plane
+            let mut start = sk.plane;
+            if let Some(p) = &ext.start_offset {
+                start.origin += dir * length(p)?;
+            }
             let d1 = if ext.through_all {
                 // long enough to clear the whole body from wherever the sketch plane is
                 let b = body_of(inp, "a through-all extrude")?;
                 let bb = b.brep().unwrap().body_bbox(b.body().unwrap());
                 let centre = (bb.min.coords + bb.max.coords) * 0.5;
-                2.0 * (bb.max - bb.min).norm() + (sk.plane.origin.coords - centre).norm() + 1.0
+                2.0 * (bb.max - bb.min).norm() + (start.origin.coords - centre).norm() + 1.0
+            } else if let Some(face) = &ext.to_face {
+                // up to a planar face of the body
+                let b = body_of(inp, "an extrude up to a face")?;
+                let f = resolve_face(b, face, &mut notes)?;
+                let rep = b.brep().unwrap();
+                let fr = match &rep.surfaces[rep.faces[f].surface] {
+                    kw_nurbs::SurfaceGeom::Plane(p) => p.frame,
+                    _ => {
+                        return Err(EvalError::Kernel(
+                            "an extrude can only stop at a planar face".into(),
+                        ))
+                    }
+                };
+                let denom = dir.dot(&fr.z);
+                if denom.abs() < 1e-9 {
+                    return Err(EvalError::Kernel(
+                        "that face is parallel to the extrusion direction".into(),
+                    ));
+                }
+                let t = (fr.origin - start.origin).dot(&fr.z) / denom;
+                if !(t > 1e-9) {
+                    return Err(EvalError::Kernel(
+                        "that face lies behind the sketch plane (flip the direction)".into(),
+                    ));
+                }
+                t
             } else {
                 length(&x.depth)?
             };
@@ -571,8 +765,12 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                     "a taper cannot be combined with a second side".into(),
                 ));
             }
-            // a second side starts the tool that far behind the sketch plane
-            let mut plane = sk.plane;
+            let thin = match &ext.thin {
+                Some(t) => Some((length(&t.thickness)?, t.side)),
+                None => None,
+            };
+            // a second side starts the tool that far behind the start plane
+            let mut plane = start;
             plane.origin -= dir * d2;
             let gen = ToolGen {
                 tag: String::new(),
@@ -583,9 +781,96 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                     vector: dir * (d1 + d2),
                     symmetric: x.symmetric,
                     taper,
+                    regions: ext.regions.clone(),
+                    thin,
                 },
             };
             from_gens(id, inp, vec![gen], x.op, notes)
+        }
+        FeatureSpec::Rib(r) => {
+            let sk = inp.sketch(r.sketch)?;
+            let depth = length(&r.depth)?;
+            if !(depth > 0.0) {
+                return Err(EvalError::Kernel("the rib height must be positive".into()));
+            }
+            let n = sk.plane.z;
+            let dir = if r.flip { -n } else { n };
+            let gen = ToolGen {
+                tag: String::new(),
+                shape: ToolShape::Rib {
+                    plane: sk.plane,
+                    sketch: sk,
+                    sketch_id: r.sketch,
+                    vector: dir * depth,
+                    thickness: length(&r.thickness)?,
+                    symmetric: r.symmetric,
+                },
+            };
+            from_gens(id, inp, vec![gen], r.op, notes)
+        }
+        FeatureSpec::Pipe(pp) => {
+            let path = inp.sketch(pp.path)?;
+            let diameter = length(&pp.diameter)?;
+            let wall = length(&pp.wall)?;
+            if !(diameter > 0.0 && wall > 0.0) {
+                return Err(EvalError::Kernel(
+                    "the pipe diameter and wall must be positive".into(),
+                ));
+            }
+            let (curve, line) = match path_curve(&path) {
+                Ok(c) => (Some(c), None),
+                Err(e) => match path_line(&path) {
+                    Some(l) => (None, Some(l)),
+                    None => return Err(e),
+                },
+            };
+            let (p0, tangent) = match (&curve, &line) {
+                (Some(c), _) => {
+                    let (t0, _) = c.domain();
+                    (c.point_at(t0), c.derivative(t0))
+                }
+                (_, Some((a, b))) => (*a, b - a),
+                _ => unreachable!(),
+            };
+            let z = tangent.normalize();
+            let helper = if z.x.abs() < 0.9 {
+                Vector3::x()
+            } else {
+                Vector3::y()
+            };
+            let xv = (helper - z * helper.dot(&z)).normalize();
+            let frame = Frame3 {
+                origin: p0,
+                x: xv,
+                y: z.cross(&xv),
+                z,
+            };
+            let ro = diameter / 2.0;
+            let mut profile = Profile::new(frame, ProfileLoop::circle(&frame, ro));
+            if wall < ro - 1e-9 {
+                let flipped = Frame3 {
+                    origin: p0,
+                    x: xv,
+                    y: -frame.y,
+                    z: -z,
+                };
+                profile.holes.push(ProfileLoop::circle(&flipped, ro - wall));
+            }
+            let mut sess = Session::new(id, None);
+            let r = match (&curve, &line) {
+                (Some(c), _) => sweep(&mut sess.rep, &profile, c, &SweepOptions::default())
+                    .map_err(|e| kernel("pipe", e))?,
+                (_, Some((a, b))) => extrude(
+                    &mut sess.rep,
+                    &profile,
+                    b - a,
+                    &kw_model::ExtrudeOptions::default(),
+                )
+                .map_err(|e| kernel("pipe", e))?,
+                _ => unreachable!(),
+            };
+            sess.adopt(r);
+            finish_with_op(id, inp, sess, pp.op, notes)
         }
         FeatureSpec::Revolve(r) => {
             let sk = inp.sketch(r.sketch)?;
@@ -611,6 +896,24 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                     );
                     let w = |p: (f64, f64)| sk.plane.origin + sk.plane.x * p.0 + sk.plane.y * p.1;
                     (w(a), w(b) - w(a))
+                }
+                AxisSpec::Datum(a) => match &inp.get(*a)?.product {
+                    Product::Datum(f) => (f.origin, f.z),
+                    _ => return Err(EvalError::Dependency(format!("{a} is not an axis"))),
+                },
+                AxisSpec::Edge(e) => {
+                    let b = body_of(inp, "a revolve about an edge")?;
+                    let edges = resolve_edges(b, std::slice::from_ref(&**e), &mut notes)?;
+                    let rep = b.brep().unwrap();
+                    let ed = &rep.edges[edges[0]];
+                    match ed.curve.map(|c| &rep.curves[c]) {
+                        Some(CurveGeom::Line(l)) => (l.origin, l.dir),
+                        _ => {
+                            return Err(EvalError::Kernel(
+                                "a revolve can only turn about a straight edge".into(),
+                            ))
+                        }
+                    }
                 }
             };
             if axis.norm() < 1e-12 {
@@ -644,10 +947,22 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             let prof = inp.sketch(w.profile)?;
             let path = inp.sketch(w.path)?;
             let profile = sketch_profile_labeled(&prof.sketch, &prof.entities, prof.plane)?.profile;
-            let curve = path_curve(&path)?;
             let mut sess = Session::new(id, None);
-            let r = sweep(&mut sess.rep, &profile, &curve, &SweepOptions::default())
-                .map_err(|e| kernel("sweep", e))?;
+            let r = match path_curve(&path) {
+                Ok(curve) => sweep(&mut sess.rep, &profile, &curve, &SweepOptions::default())
+                    .map_err(|e| kernel("sweep", e))?,
+                // a straight path is an extrusion along it
+                Err(e) => match path_line(&path) {
+                    Some((a, b)) => extrude(
+                        &mut sess.rep,
+                        &profile,
+                        b - a,
+                        &kw_model::ExtrudeOptions::default(),
+                    )
+                    .map_err(|e| kernel("sweep", e))?,
+                    None => return Err(e),
+                },
+            };
             sess.adopt(r);
             finish_with_op(id, inp, sess, w.op, notes)
         }
@@ -734,6 +1049,47 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 .map_err(|e| kernel("draft", e))?;
             sess.adopt(r);
             sess.finish(None, notes)
+        }
+        FeatureSpec::Thread(t) => {
+            let b = body_of(inp, "thread")?;
+            let size = crate::threads::lookup(&t.designation).ok_or_else(|| {
+                EvalError::Kernel(format!("unknown thread size \"{}\"", t.designation))
+            })?;
+            let len = length(&t.length)?;
+            if !(len > 0.0) {
+                return Err(EvalError::Kernel(
+                    "the thread length must be positive".into(),
+                ));
+            }
+            let f = resolve_face(b, &t.face, &mut notes)?;
+            let rep = b.brep().unwrap();
+            let d = match &rep.surfaces[rep.faces[f].surface] {
+                kw_nurbs::SurfaceGeom::Cylinder(c) => 2.0 * c.radius,
+                _ => {
+                    return Err(EvalError::Kernel(
+                        "a thread goes on a cylindrical face (a hole wall or a pin)".into(),
+                    ))
+                }
+            };
+            let ok = if t.internal {
+                size.fits_hole(d)
+            } else {
+                size.fits_shaft(d)
+            };
+            if !ok {
+                return Err(EvalError::Kernel(format!(
+                    "{} needs a {} of about dia {:.2} mm; that face is dia {:.2} mm",
+                    size.designation,
+                    if t.internal { "hole" } else { "pin" },
+                    if t.internal {
+                        size.tap_drill
+                    } else {
+                        size.major
+                    },
+                    d
+                )));
+            }
+            copy_with(id, b, &CopyOptions::default(), notes)
         }
         FeatureSpec::Offset(o) => {
             let b = body_of(inp, "offset")?;
@@ -835,6 +1191,22 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                         }
                         gens.push(cyl(format!("p{k}-bore-"), d, depth));
                         gens.push(cyl(format!("p{k}-cb-"), cd, cdp));
+                    }
+                    HoleKind::Tapped {
+                        designation,
+                        thread_length,
+                    } => {
+                        let size = crate::threads::lookup(designation).ok_or_else(|| {
+                            EvalError::Kernel(format!("unknown thread size \"{designation}\""))
+                        })?;
+                        let tl = length(thread_length)?;
+                        if !(tl > 0.0) || (!h.through_all && tl > depth + 1e-9) {
+                            return Err(EvalError::Kernel(
+                                "the thread length must be positive and at most the hole depth"
+                                    .into(),
+                            ));
+                        }
+                        gens.push(cyl(format!("p{k}-"), size.tap_drill, depth));
                     }
                     HoleKind::Countersink {
                         diameter,
@@ -994,6 +1366,80 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 .collect();
             sess.finish(None, notes)
         }
+        FeatureSpec::MoveBody(m) => {
+            let b = body_of(inp, "move")?;
+            let delta = vec3(&m.delta)?;
+            let ang = angle(&m.angle)?;
+            let axis = match m.axis {
+                0 => Vector3::x(),
+                1 => Vector3::y(),
+                _ => Vector3::z(),
+            };
+            let t = Transform3::rotation(axis, ang).then(&Transform3::translation(delta));
+            copy_with(
+                id,
+                b,
+                &CopyOptions {
+                    transform: Some(t),
+                    ..Default::default()
+                },
+                notes,
+            )
+        }
+        FeatureSpec::ScaleBody(m) => {
+            let b = body_of(inp, "scale")?;
+            let k = number(&m.factor)?;
+            if !(k > 1e-6 && k.is_finite()) {
+                return Err(EvalError::Kernel(
+                    "the scale factor must be a positive number".into(),
+                ));
+            }
+            let c = Point3::from(vec3(&m.centre)?);
+            copy_with(
+                id,
+                b,
+                &CopyOptions {
+                    scale: Some((k, c)),
+                    ..Default::default()
+                },
+                notes,
+            )
+        }
+        FeatureSpec::SplitBody(sp) => {
+            let b = body_of(inp, "split")?;
+            let plane = plane_frame(&sp.plane, inp, &mut notes)?;
+            let bb = b.brep().unwrap().body_bbox(b.body().unwrap());
+            let size = 4.0 * (bb.max - bb.min).norm()
+                + (plane.origin.coords - (bb.min.coords + bb.max.coords) * 0.5).norm()
+                + 10.0;
+            let dir = match sp.keep {
+                SplitSide::Positive => plane.z,
+                SplitSide::Negative => -plane.z,
+            };
+            // the kept half-space: a huge slab standing on the plane
+            let mut sess = Session::new(id, Some(b));
+            let a = sess.input_body("split")?;
+            let slab = kw_model::extrude(
+                &mut sess.rep,
+                &kw_model::Profile::rectangle(plane, size, size),
+                dir * size,
+                &kw_model::ExtrudeOptions::default(),
+            )
+            .map_err(|e| kernel("split", e))?;
+            let r = boolean(
+                &mut sess.rep,
+                a,
+                slab.body,
+                Op::Intersect,
+                &BoolOptions::default(),
+            )
+            .map_err(|e| kernel("split", e))?;
+            sess.adopt(BuildResult {
+                body: r.body,
+                history: r.history,
+            });
+            sess.finish(None, notes)
+        }
         FeatureSpec::LinearPattern(p) => {
             let n = count(&p.count, "the pattern count")?;
             let step = vec3(&p.spacing)?;
@@ -1004,8 +1450,16 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
         }
         FeatureSpec::CircularPattern(p) => {
             let n = count(&p.count, "the pattern count")?;
-            let origin = Point3::from(vec3(&p.axis_origin)?);
-            let axis = Vector3::new(p.axis_dir[0], p.axis_dir[1], p.axis_dir[2]);
+            let (origin, axis) = match p.axis_feature {
+                Some(a) => match &inp.get(a)?.product {
+                    Product::Datum(f) => (f.origin, f.z),
+                    _ => return Err(EvalError::Dependency(format!("{a} is not an axis"))),
+                },
+                None => (
+                    Point3::from(vec3(&p.axis_origin)?),
+                    Vector3::new(p.axis_dir[0], p.axis_dir[1], p.axis_dir[2]),
+                ),
+            };
             if axis.norm() < 1e-12 {
                 return Err(EvalError::Kernel("the pattern axis has no length".into()));
             }
@@ -1031,6 +1485,14 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 MirrorPlane::Xy(o) => (Point3::new(0.0, 0.0, length(o)?), Vector3::z()),
                 MirrorPlane::Yz(o) => (Point3::new(length(o)?, 0.0, 0.0), Vector3::x()),
                 MirrorPlane::Xz(o) => (Point3::new(0.0, length(o)?, 0.0), Vector3::y()),
+                MirrorPlane::Datum(d) => match &inp.get(*d)?.product {
+                    Product::Datum(f) => (f.origin, f.z),
+                    _ => return Err(EvalError::Dependency(format!("{d} is not a plane"))),
+                },
+                MirrorPlane::Face(r) => {
+                    let f = plane_frame(&PlaneSpec::Face(r.clone()), inp, &mut notes)?;
+                    (f.origin, f.z)
+                }
             };
             pattern(
                 id,
@@ -1089,6 +1551,35 @@ fn body_of<'a>(inp: &Inputs<'a>, what: &str) -> Result<&'a Arc<EvalOutput>, Eval
     Ok(b)
 }
 
+/// A copy of the input body with its geometry moved or scaled; every face keeps its name.
+fn copy_with(
+    id: FeatureId,
+    b: &Arc<EvalOutput>,
+    opts: &CopyOptions,
+    notes: Vec<Resolution>,
+) -> Result<EvalOutput, EvalError> {
+    let (src, body) = (b.brep().unwrap(), b.body().unwrap());
+    let mut rep = BRep::new();
+    let (nb, map) = rep.copy_body_from(src, body, opts);
+    let mut names = NameMap::default();
+    for (n, e) in &b.names.by_name {
+        if let EntityRef::Face(f) = e {
+            if let Some(m) = map.faces.get(f) {
+                names.by_name.insert(n.clone(), EntityRef::Face(*m));
+            }
+        }
+    }
+    let _ = id;
+    Ok(EvalOutput::solid(
+        rep,
+        nb,
+        names,
+        ShapeHistory::default(),
+        None,
+        notes,
+    ))
+}
+
 /// Build every tool, apply them in turn, and remember them if they were added to a body.
 fn from_gens(
     id: FeatureId,
@@ -1145,6 +1636,21 @@ fn finish_with_op(
     let mut s2 = Session::new(id, Some(prev));
     s2.apply(built, tool_names, op)?;
     s2.finish(None, notes)
+}
+
+/// The end points of the first straight line of a path sketch (the path of a straight sweep or pipe).
+fn path_line(path: &SketchProduct) -> Option<(Point3<f64>, Point3<f64>)> {
+    for (_, e) in &path.sketch.entities {
+        if e.construction {
+            continue;
+        }
+        if let EntityKind::Line { p1, p2 } = &e.kind {
+            let w = |p: (f64, f64)| path.plane.origin + path.plane.x * p.0 + path.plane.y * p.1;
+            let (a, b) = (path.sketch.point(*p1).ok()?, path.sketch.point(*p2).ok()?);
+            return Some((w(a), w(b)));
+        }
+    }
+    None
 }
 
 fn path_curve(path: &SketchProduct) -> Result<CurveGeom, EvalError> {

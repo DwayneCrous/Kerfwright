@@ -157,6 +157,7 @@ fn build_body(rep: &mut BRep, b: &Body, place: &Frame3) -> Option<BodyId> {
             &CopyOptions {
                 transform: Some(to_world),
                 flip: false,
+                ..Default::default()
             },
         )
     };

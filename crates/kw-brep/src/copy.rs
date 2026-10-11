@@ -2,12 +2,18 @@
 
 use crate::ids::*;
 use crate::store::{BRep, CoedgeSpec};
+use kw_math::Point3;
 use kw_math::Transform3;
-use kw_nurbs::fit::{transform_curve, transform_surface};
+use kw_nurbs::fit::{
+    scale_curve, scale_param_factors, scale_pcurve, scale_surface, transform_curve,
+    transform_surface,
+};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct CopyOptions {
+    /// Uniform scale `(factor > 0, centre)`, applied before `transform`.
+    pub scale: Option<(f64, Point3<f64>)>,
     pub transform: Option<Transform3>,
     /// Reverse the orientation (swap inside and outside).
     pub flip: bool,
@@ -42,9 +48,13 @@ impl BRep {
                     let sf = &src.faces[face];
                     let surf = *surf_map.entry(sf.surface).or_insert_with(|| {
                         let g = &src.surfaces[sf.surface];
-                        let g = match &opts.transform {
-                            Some(t) => transform_surface(g, t),
+                        let g = match &opts.scale {
+                            Some((k, c)) => scale_surface(g, *k, c),
                             None => g.clone(),
+                        };
+                        let g = match &opts.transform {
+                            Some(t) => transform_surface(&g, t),
+                            None => g,
                         };
                         self.add_surface(g)
                     });
@@ -62,11 +72,15 @@ impl BRep {
                                     let vmap = |v: VertexId, this: &mut BRep, map: &mut CopyMap| {
                                         *map.vertices.entry(v).or_insert_with(|| {
                                             let mut p = src.vertices[v].point;
+                                            if let Some((k, c)) = &opts.scale {
+                                                p = c + (p - c) * *k;
+                                            }
                                             if let Some(t) = &opts.transform {
                                                 p = t.apply_point(&p);
                                             }
                                             let nv = this.add_vertex(p);
-                                            this.vertices[nv].tolerance = src.vertices[v].tolerance;
+                                            this.vertices[nv].tolerance = src.vertices[v].tolerance
+                                                * opts.scale.map_or(1.0, |(k, _)| k);
                                             nv
                                         })
                                     };
@@ -77,22 +91,37 @@ impl BRep {
                                     let curve = e.curve.map(|cid| {
                                         *curve_map.entry(cid).or_insert_with(|| {
                                             let g = &src.curves[cid];
-                                            let g = match &opts.transform {
-                                                Some(t) => transform_curve(g, t),
+                                            let g = match &opts.scale {
+                                                Some((k, c)) => scale_curve(g, *k, c),
                                                 None => g.clone(),
+                                            };
+                                            let g = match &opts.transform {
+                                                Some(t) => transform_curve(&g, t),
+                                                None => g,
                                             };
                                             self.add_curve(g)
                                         })
                                     });
                                     let ne = self.add_edge(vs, ve, curve, e.param_range);
-                                    self.edges[ne].tolerance = e.tolerance;
+                                    self.edges[ne].tolerance =
+                                        e.tolerance * opts.scale.map_or(1.0, |(k, _)| k);
                                     map.edges.insert(c.edge, ne);
                                     ne
                                 }
                             };
                             let pcurve = c.pcurve.map(|pid| {
-                                // pcurves are per-use: clone so later edits cannot alias
-                                self.add_curve(src.curves[pid].clone())
+                                // pcurves are per-use: clone so later edits cannot alias; a scale changes
+                                // the length parameters of planes, cylinders and cones
+                                let g = match &opts.scale {
+                                    Some((k, _)) => {
+                                        let (su, sv) =
+                                            scale_param_factors(&src.surfaces[sf.surface], *k);
+                                        scale_pcurve(&src.curves[pid], su, sv)
+                                            .unwrap_or_else(|| src.curves[pid].clone())
+                                    }
+                                    None => src.curves[pid].clone(),
+                                };
+                                self.add_curve(g)
                             });
                             uses.push(CoedgeSpec {
                                 edge,

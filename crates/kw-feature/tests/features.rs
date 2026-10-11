@@ -383,6 +383,7 @@ fn holes_of_three_kinds_and_patterns_and_mirror() {
                 count: Param::scalar(4.0),
                 total_angle: Param::angle_deg(360.0),
                 base: None,
+                axis_feature: None,
             }),
         )
         .unwrap();
@@ -403,6 +404,7 @@ fn holes_of_three_kinds_and_patterns_and_mirror() {
             count: Param::scalar(3.0),
             total_angle: Param::angle_deg(360.0),
             base: None,
+            axis_feature: None,
         }),
     )
     .unwrap();
@@ -437,6 +439,7 @@ fn combine_datum_planes_and_sketches_on_faces() {
                 target: a,
                 tool: b,
                 op: BodyOp::Join,
+                keep_tool: false,
             }),
         )
         .unwrap();
@@ -447,6 +450,7 @@ fn combine_datum_planes_and_sketches_on_faces() {
                 target: a,
                 tool: b,
                 op: BodyOp::Intersect,
+                keep_tool: false,
             }),
         )
         .unwrap();
@@ -463,6 +467,7 @@ fn combine_datum_planes_and_sketches_on_faces() {
                 base: PlaneSpec::Xy(mm(0.0)),
                 offset: mm(5.0),
                 tilt: Param::angle_deg(0.0),
+                mode: Default::default(),
             }),
         )
         .unwrap();
@@ -534,6 +539,7 @@ fn sweep_along_an_arc() {
             FeatureSpec::Sketch(SketchSpec {
                 plane: PlaneSpec::Xy(mm(0.0)),
                 recipe: SketchRecipe::from_sketch(&sk),
+                base: None,
             }),
         )
         .unwrap();
@@ -729,6 +735,7 @@ fn extrude_sketch(sk: kw_sketch::Sketch, depth: f64) -> (Document, FeatureId, Fe
             FeatureSpec::Sketch(SketchSpec {
                 plane: PlaneSpec::Xy(mm(0.0)),
                 recipe: SketchRecipe::from_sketch(&sk),
+                base: None,
             }),
         )
         .unwrap();
@@ -894,4 +901,187 @@ fn extrude_through_all_two_sided_and_taper() {
     d.replace_spec(id, spec).unwrap();
     let ev = eval(&d);
     assert!(ev.output(id).is_none() && !ev.failures().is_empty());
+}
+
+/// Scale a copy of `body` by `k` about `c` and check volume (k³), area (k²), centroid and validity.
+fn check_scaled(
+    rep: &kw_brep::BRep,
+    body: kw_brep::BodyId,
+    k: f64,
+    c: kw_math::Point3<f64>,
+    what: &str,
+) {
+    let mut out = kw_brep::BRep::new();
+    let (nb, _) = out.copy_body_from(
+        rep,
+        body,
+        &kw_brep::CopyOptions {
+            scale: Some((k, c)),
+            ..Default::default()
+        },
+    );
+    let rep_ok = out.validate();
+    assert!(rep_ok.is_ok(), "{what} x{k}: {:?}", rep_ok.errors);
+    let (a, b) = (
+        rep.mass_properties(body).unwrap(),
+        out.mass_properties(nb).unwrap(),
+    );
+    assert!(
+        (b.volume - a.volume * k.powi(3)).abs() < 1e-7 * a.volume * k.powi(3),
+        "{what} x{k}: volume {} vs {}",
+        b.volume,
+        a.volume * k.powi(3)
+    );
+    assert!(
+        (b.area - a.area * k * k).abs() < 1e-7 * a.area * k * k,
+        "{what} x{k}: area {} vs {}",
+        b.area,
+        a.area * k * k
+    );
+    let want = c + (a.centroid - c) * k;
+    assert!(
+        (b.centroid - want).norm() < 1e-7 * (1.0 + want.coords.norm()),
+        "{what} x{k}: centroid {:?} vs {want:?}",
+        b.centroid
+    );
+}
+
+#[test]
+fn scaling_a_body_scales_every_kind_of_face() {
+    use kw_math::{Frame3, Point3, Vector3};
+    use kw_model::{extrude, revolve, ExtrudeOptions, Profile, ProfileEdge, ProfileLoop};
+    let frame = Frame3 {
+        origin: Point3::new(1.0, 2.0, 3.0),
+        x: Vector3::x(),
+        y: Vector3::y(),
+        z: Vector3::z(),
+    };
+    let centres = [Point3::origin(), Point3::new(5.0, -3.0, 2.0)];
+    let mut cases: Vec<(String, kw_brep::BRep, kw_brep::BodyId)> = Vec::new();
+    // box (planes), cylinder (plane + cylinder)
+    {
+        let mut rep = kw_brep::BRep::new();
+        let r = extrude(
+            &mut rep,
+            &Profile::rectangle(frame, 12.0, 7.0),
+            Vector3::new(0.0, 0.0, 5.0),
+            &ExtrudeOptions::default(),
+        )
+        .unwrap();
+        cases.push(("box".into(), rep, r.body));
+        let mut rep = kw_brep::BRep::new();
+        let r = extrude(
+            &mut rep,
+            &Profile::disc(frame, 4.0),
+            Vector3::new(0.0, 0.0, 9.0),
+            &ExtrudeOptions::default(),
+        )
+        .unwrap();
+        cases.push(("cylinder".into(), rep, r.body));
+    }
+    // cone, sphere, torus by revolution about the z axis through the frame origin
+    let origin = Point3::new(1.0, 2.0, 3.0);
+    let p = |x: f64, z: f64| Point3::new(1.0 + x, 2.0, 3.0 + z);
+    {
+        // cone: triangle (0,0) (4,0) (0,6)
+        let mut rep = kw_brep::BRep::new();
+        let prof = Profile::new(
+            Frame3 {
+                origin,
+                x: Vector3::x(),
+                y: Vector3::z(),
+                z: -Vector3::y(),
+            },
+            ProfileLoop::polygon(&[p(0.0, 0.0), p(4.0, 0.0), p(0.0, 6.0)]),
+        );
+        if let Ok(r) = revolve(&mut rep, &prof, origin, Vector3::z(), std::f64::consts::TAU) {
+            cases.push(("cone".into(), rep, r.body));
+        }
+        // sphere: half disc of radius 3
+        let mut rep = kw_brep::BRep::new();
+        let f = Frame3 {
+            origin,
+            x: Vector3::x(),
+            y: Vector3::z(),
+            z: -Vector3::y(),
+        };
+        let outer = ProfileLoop::new(vec![
+            ProfileEdge::arc(
+                &f,
+                3.0,
+                -std::f64::consts::FRAC_PI_2,
+                std::f64::consts::FRAC_PI_2,
+            ),
+            ProfileEdge::line(p(0.0, 3.0), p(0.0, -3.0)),
+        ]);
+        let prof = Profile::new(f, outer);
+        if let Ok(r) = revolve(&mut rep, &prof, origin, Vector3::z(), std::f64::consts::TAU) {
+            cases.push(("sphere".into(), rep, r.body));
+        }
+        // torus: circle of radius 1.5 at distance 5 from the axis
+        let mut rep = kw_brep::BRep::new();
+        let cf = Frame3 {
+            origin: p(5.0, 0.0),
+            x: Vector3::x(),
+            y: Vector3::z(),
+            z: -Vector3::y(),
+        };
+        let prof = Profile::new(cf, ProfileLoop::circle(&cf, 1.5));
+        if let Ok(r) = revolve(&mut rep, &prof, origin, Vector3::z(), std::f64::consts::TAU) {
+            cases.push(("torus".into(), rep, r.body));
+        }
+    }
+    // filleted block (cylinder faces on a plane body) and a block with a drilled hole
+    {
+        let mut rep = kw_brep::BRep::new();
+        let r = extrude(
+            &mut rep,
+            &Profile::rectangle(frame, 20.0, 12.0),
+            Vector3::new(0.0, 0.0, 8.0),
+            &ExtrudeOptions::default(),
+        )
+        .unwrap();
+        let edge = rep
+            .edges
+            .iter()
+            .find(|(_, e)| {
+                let (a, b) = (rep.vertices[e.start].point, rep.vertices[e.end].point);
+                (a.z - 11.0).abs() < 1e-9 && (b.z - 11.0).abs() < 1e-9 && (a.x - b.x).abs() > 1.0
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+        let f = kw_blend::fillet(&mut rep, r.body, &[edge], 2.0).unwrap();
+        cases.push(("filleted block".into(), rep, f.body));
+        let mut rep = kw_brep::BRep::new();
+        let blk = extrude(
+            &mut rep,
+            &Profile::rectangle(frame, 20.0, 12.0),
+            Vector3::new(0.0, 0.0, 8.0),
+            &ExtrudeOptions::default(),
+        )
+        .unwrap();
+        let hole = extrude(
+            &mut rep,
+            &Profile::disc(
+                Frame3 {
+                    origin: Point3::new(1.0, 2.0, 2.0),
+                    ..frame
+                },
+                3.0,
+            ),
+            Vector3::new(0.0, 0.0, 12.0),
+            &ExtrudeOptions::default(),
+        )
+        .unwrap();
+        let r = kw_boolean::subtract(&mut rep, blk.body, hole.body).unwrap();
+        cases.push(("block with a hole".into(), rep, r.body));
+    }
+    assert!(cases.len() >= 5, "cases built: {}", cases.len());
+    for (what, rep, body) in &cases {
+        for c in centres {
+            for k in [0.5, 2.0, 3.7] {
+                check_scaled(rep, *body, k, c, what);
+            }
+        }
+    }
 }

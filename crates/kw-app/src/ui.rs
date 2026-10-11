@@ -100,6 +100,8 @@ pub struct KerfwrightApp {
     /// Save a screenshot of the window to this file after `screenshot_after` frames, then quit.
     pub screenshot: Option<(PathBuf, u64)>,
     themed: bool,
+    /// Hold the ribbon dropdown of this group open (screenshots).
+    pub force_menu: Option<String>,
 }
 
 impl Default for KerfwrightApp {
@@ -127,6 +129,7 @@ impl KerfwrightApp {
             pending: None,
             design: DesignWorkspace::default(),
             themed: false,
+            force_menu: None,
             ecad: EcadWorkspace::default(),
             cam: CamWorkspace::default(),
             fea: FeaWorkspace::default(),
@@ -287,6 +290,64 @@ impl KerfwrightApp {
                 });
                 app.zoom_to_fit();
             }
+            "regions" => {
+                self.design
+                    .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
+                let mut sk = rect(30.0, 20.0);
+                sk.add_circle_xy(30.0, 10.0, 8.0);
+                self.design.sketch.app.editor.replace_sketch(sk);
+                self.design.finish_sketch(project);
+                if let Some(crate::design::tools::Dialog {
+                    tool:
+                        Tool::Extrude {
+                            more, depth, op, ..
+                        },
+                    ..
+                }) = self.design.dialog.as_mut()
+                {
+                    *depth = "8 mm".into();
+                    *op = kw_feature::BodyOp::Join;
+                    more.thin = String::new();
+                }
+            }
+            "bodies" => {
+                // the demo block, a moved copy of it, a third body made by splitting a second copy
+                let _ = project.history.edit(|d| {
+                    let a = d.heads()[0];
+                    let spec = |dx: f64, copy: bool| {
+                        kw_feature::FeatureSpec::MoveBody(kw_feature::MoveBodySpec {
+                            base: Some(a),
+                            delta: [
+                                kw_expr::Param::length(dx),
+                                kw_expr::Param::length(0.0),
+                                kw_expr::Param::length(0.0),
+                            ],
+                            axis: 2,
+                            angle: kw_expr::Param::angle_deg(0.0),
+                            copy,
+                        })
+                    };
+                    let c1 = d.add("Copy", spec(45.0, true))?;
+                    d.set_appearance(
+                        c1,
+                        kw_feature::Appearance {
+                            name: Some("Bracket".into()),
+                            colour: Some([214, 96, 60]),
+                            material: None,
+                        },
+                    );
+                    d.set_appearance(
+                        a,
+                        kw_feature::Appearance {
+                            name: Some("Base plate".into()),
+                            colour: Some([96, 140, 200]),
+                            material: None,
+                        },
+                    );
+                    Ok::<_, kw_feature::TimelineError>(())
+                });
+                self.design.body_props = None;
+            }
             "shapes" => {
                 use kw_sketch::editor::{Input, Tool as T};
                 self.design
@@ -379,6 +440,124 @@ impl KerfwrightApp {
                         }
                     }
                 }
+            }
+            "construct" => {
+                use crate::design::tools::{PlaneInput, PointInput};
+                let pt = |x: &str, y: &str, z: &str| PointInput {
+                    datum: None,
+                    x: x.into(),
+                    y: y.into(),
+                    z: z.into(),
+                };
+                for tool in [
+                    Tool::Axis {
+                        mode: 0,
+                        pts: [
+                            pt("20 mm", "12.5 mm", "-5 mm"),
+                            pt("20 mm", "12.5 mm", "20 mm"),
+                        ],
+                        at_u: "0 mm".into(),
+                        at_v: "0 mm".into(),
+                        planes: Default::default(),
+                    },
+                    Tool::ConstructionPlane {
+                        base: 0,
+                        offset: "16 mm".into(),
+                        tilt: "0 deg".into(),
+                        more: Default::default(),
+                    },
+                    Tool::DatumPoint {
+                        mode: 0,
+                        coords: pt("30 mm", "6 mm", "16 mm"),
+                        axis: None,
+                        plane: PlaneInput::default(),
+                    },
+                ] {
+                    self.design.open_tool(project, tool);
+                    self.design.commit_dialog(project);
+                }
+            }
+            "section" => {
+                self.design.section = Some(crate::design::section::SectionState {
+                    which: 2,
+                    datum: None,
+                    offset: 12.5,
+                    // keep the back half: the camera looks into the cut
+                    flip: true,
+                });
+            }
+            "assembly" => {
+                if let Some((_, _, face)) = top_face(project) {
+                    let ev = project.evaluation();
+                    if let Some(rep) = ev.final_solid().and_then(|(_, o)| o.brep().cloned()) {
+                        if let Some(f) =
+                            crate::design::assembly::face_connection_frame("F1", &rep, face)
+                        {
+                            self.design.asm.new_frames.push(f);
+                        }
+                    }
+                }
+                self.design.asm.new_name = "Block".into();
+                if self.design.asm_new_component(project).is_ok() {
+                    if let Some(a) = project.assembly.as_mut() {
+                        a.add_instance("Block copy", 0);
+                    }
+                    self.design.asm.joint.kind = kw_assembly::JointKind::Revolute;
+                    self.design.asm.joint.parent_frame = 1;
+                    let _ = self.design.asm_add_joint(project);
+                    if let Some(j) = project.assembly.as_mut().and_then(|a| a.joints.first_mut()) {
+                        j.values[0] = kw_expr::Param::angle_deg(35.0);
+                    }
+                }
+                self.design.asm.open = true;
+                self.design.asm.view = true;
+            }
+            "sheet" => {
+                self.design.ribbon_tab = 1;
+                self.design
+                    .open_tool(project, crate::design::sheetmetal::preset("u"));
+                self.design.commit_dialog(project);
+                let _ = self.design.sheet_flat_pattern(project);
+            }
+            "form" => {
+                self.design.ribbon_tab = 2;
+                let (size, sides) = crate::design::form::defaults(1);
+                self.design.open_tool(
+                    project,
+                    Tool::Form {
+                        kind: 1,
+                        size,
+                        sides,
+                        cage: crate::design::form::primitive(1, size, sides),
+                        scale: "1".into(),
+                        tolerance: "0.2 mm".into(),
+                        vertex: 2,
+                        built: (1, size, sides),
+                    },
+                );
+            }
+            "tools" => self.design.ribbon_tab = 3,
+            "text" => {
+                self.design
+                    .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
+                let _ =
+                    self.design
+                        .apply_sketch_panel(&crate::design::sketch_ops::SketchPanel::Text {
+                            text: "Kerf".into(),
+                            height: 12.0,
+                            spacing: 0.05,
+                            x: 0.0,
+                            y: 0.0,
+                            angle: 0.0,
+                            font: 0,
+                        });
+                self.design.sketch.app.zoom_to_fit();
+            }
+            "project" => {
+                self.design
+                    .begin_sketch(project, geom::origin_spec(2), geom::origin_frame(2));
+                self.design.sketch_project(project, false);
+                self.design.sketch.app.zoom_to_fit();
             }
             "params" => {
                 self.design.model.add_parameter(project, "width", "30");
@@ -577,6 +756,80 @@ impl KerfwrightApp {
         }
     }
 
+    /// Dialogs the Design workspace asked for (inserting a component, exporting the assembly).
+    pub fn service_design_requests(&mut self) {
+        use crate::design::assembly::FileRequest;
+        let Some(req) = self.design.asm.request.take() else {
+            return;
+        };
+        match req {
+            FileRequest::Insert => {
+                let Some(path) = self.dialogs.open_file("Kerfwright project", &["kwf"]) else {
+                    return;
+                };
+                self.insert_component_path(&path);
+            }
+            FileRequest::Import => self.import_file_dialog(),
+            FileRequest::Export(f) => self.export_file_dialog(f),
+            FileRequest::ExportDxf => {
+                let Some(text) = self
+                    .design
+                    .flat
+                    .as_ref()
+                    .map(|f| kw_dxf::write(&f.pattern.to_dxf()))
+                else {
+                    return;
+                };
+                let name = self.project().map(|p| p.name()).unwrap_or_default();
+                let Some(path) =
+                    self.dialogs
+                        .save_file(&format!("{name}-flat.dxf"), "DXF", &["dxf"])
+                else {
+                    return;
+                };
+                self.message = match std::fs::write(&path, text) {
+                    Ok(()) => format!("wrote {}", path.display()),
+                    Err(e) => format!("export failed: {e}"),
+                };
+            }
+            FileRequest::ExportStep => {
+                let name = self.project().map(|p| p.name()).unwrap_or_default();
+                let Some(path) = self.dialogs.save_file(
+                    &format!("{name}-assembly.step"),
+                    "STEP",
+                    &["step", "stp"],
+                ) else {
+                    return;
+                };
+                self.export_assembly_path(&path);
+            }
+        }
+    }
+
+    pub fn insert_component_path(&mut self, path: &Path) {
+        let Screen::Project { project, .. } = &mut self.screen else {
+            return;
+        };
+        self.message = match self.design.asm_insert_path(project, path) {
+            Ok(_) => format!("inserted {}", path.display()),
+            Err(e) => format!("insert failed: {e}"),
+        };
+    }
+
+    pub fn export_assembly_path(&mut self, path: &Path) {
+        let Screen::Project { project, .. } = &mut self.screen else {
+            return;
+        };
+        self.message = match self
+            .design
+            .asm_step(project)
+            .and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()))
+        {
+            Ok(()) => format!("wrote {}", path.display()),
+            Err(e) => format!("export failed: {e}"),
+        };
+    }
+
     /// File ▸ Import: ask for a STEP / IGES file and add its solids to the project.
     pub fn import_file_dialog(&mut self) {
         let Some(path) = self
@@ -690,6 +943,11 @@ impl KerfwrightApp {
         if !self.themed {
             theme::apply(ui.ctx());
             self.themed = true;
+        }
+        if let Some(t) = &self.force_menu {
+            let t = t.clone();
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::new("force_open_menu"), t));
         }
         match &self.screen {
             Screen::Welcome => self.welcome_ui(ui),
@@ -1159,6 +1417,7 @@ impl KerfwrightApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| self.design.show(ui, project, rs));
+                self.service_design_requests();
             }
             Workspace::Cam => {
                 let (cam, dialogs) = (&mut self.cam, &mut self.dialogs);
