@@ -4207,3 +4207,27 @@ fn construction_lines_of_a_sketch_are_not_drawn_in_the_3d_view() {
     // the four sides only (no diagonals)
     assert_eq!(segs.len(), 4, "{}", segs.len());
 }
+
+#[test]
+fn the_seam_of_a_cylinder_is_not_drawn_as_an_edge() {
+    let (mut h, _d) = design_harness("seam");
+    let mut sk = kw_sketch::Sketch::new();
+    sk.add_circle_xy(0.0, 0.0, 6.0);
+    sketch_only(&mut h, geom::origin_spec(0), geom::origin_frame(0), sk);
+    let s = proj(&mut h).document().features.last().unwrap().id;
+    open_commit(&mut h, Tool::extrude(Some(s), kw_feature::BodyOp::New));
+    let ev = proj(&mut h).evaluation();
+    let rep = ev.final_solid().unwrap().1.brep().unwrap().clone();
+    // the B-rep has the two rims and the seam
+    let seams = rep
+        .edges
+        .keys()
+        .filter(|e| kw_app::viewport::is_seam(&rep, *e))
+        .count();
+    assert_eq!((rep.edges.len(), seams), (3, 1));
+    let scene = kw_app::viewport::ModelScene::build(&rep);
+    let mut ids: Vec<u32> = scene.scene.segments.iter().map(|s| s.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 2, "only the two rims are drawn");
+}

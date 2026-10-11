@@ -161,6 +161,26 @@ pub enum Pick {
     Edge(EdgeId),
 }
 
+/// A seam is the edge where a periodic face (a cylinder, a sphere) meets itself: it is a cut in the
+/// parametrisation, not a feature of the shape, so it is not drawn (nor picked).
+pub fn is_seam(brep: &BRep, edge: EdgeId) -> bool {
+    let ring = brep.radial_ring(edge);
+    let faces: Vec<FaceId> = ring
+        .iter()
+        .filter_map(|c| brep.coedges.get(*c))
+        .filter_map(|c| brep.loops.get(c.owner_loop))
+        .map(|l| l.face)
+        .collect();
+    faces.len() >= 2 && faces.iter().all(|f| *f == faces[0])
+}
+
+fn hide_seams(brep: &BRep, t: &mut Tessellation) {
+    let keys = t.edge_keys.clone();
+    t.edges
+        .ranges
+        .retain(|(ei, _, _)| keys.get(*ei as usize).is_none_or(|e| !is_seam(brep, *e)));
+}
+
 /// The model as drawn: tessellations of the bodies, their scene, and the lookup from pick ids to B-rep ids.
 pub struct ModelScene {
     pub scene: Scene,
@@ -191,9 +211,10 @@ impl ModelScene {
             .iter()
             .enumerate()
             .filter_map(|(i, b)| {
-                tessellate_body(brep, *b, &opts)
-                    .ok()
-                    .map(|t| (t, colours.get(i).copied().unwrap_or([196, 200, 208])))
+                tessellate_body(brep, *b, &opts).ok().map(|mut t| {
+                    hide_seams(brep, &mut t);
+                    (t, colours.get(i).copied().unwrap_or([196, 200, 208]))
+                })
             })
             .collect();
         let objects: Vec<SceneObject> = tess_c
