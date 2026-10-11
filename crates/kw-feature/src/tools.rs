@@ -228,6 +228,9 @@ impl ToolGen {
         // every kernel result of the build, in order, with the entity labels its face roles refer to; the
         // last one is the tool, the earlier ones are the intermediate solids it was made from
         let mut steps: Vec<(kw_brep::BuildResult, Vec<Vec<u32>>)> = Vec::new();
+        // separate pieces of one tool (chosen regions that do not overlap): they become one body once the
+        // faces are named, without a Boolean (pieces that touch only at a corner cannot be united by one)
+        let mut pieces: Vec<BodyId> = Vec::new();
         match &self.shape {
             ToolShape::Extrude {
                 sketch,
@@ -241,8 +244,16 @@ impl ToolGen {
             } => {
                 sketch_id = *sid;
                 extrude_steps(
-                    &mut rep, sketch, *plane, *vector, *symmetric, *taper, regions, *thin,
+                    &mut rep,
+                    sketch,
+                    *plane,
+                    *vector,
+                    *symmetric,
+                    *taper,
+                    regions,
+                    *thin,
                     &mut steps,
+                    &mut pieces,
                 )?;
             }
             ToolShape::Rib {
@@ -336,11 +347,18 @@ impl ToolGen {
             let n = namer.name_result(&rep, res.body, &res.history, &named, &origin);
             named.extend(n);
         }
-        let result = steps
+        let mut result = steps
             .into_iter()
             .last()
             .map(|(r, _)| r)
             .ok_or_else(|| EvalError::Kernel("the tool has no shape".into()))?;
+        if pieces.len() > 1 {
+            rep.merge_bodies(pieces[0], &pieces[1..]);
+            result = kw_brep::BuildResult {
+                body: pieces[0],
+                history: ShapeHistory::default(),
+            };
+        }
         let names = named
             .into_iter()
             .filter_map(|(k, v)| match k {
@@ -402,6 +420,7 @@ fn extrude_steps(
     regions: &[RegionPick],
     thin: Option<(f64, ThinSide)>,
     steps: &mut Vec<(kw_brep::BuildResult, Vec<Vec<u32>>)>,
+    pieces: &mut Vec<BodyId>,
 ) -> Result<(), EvalError> {
     let kernel = |what: &str, e: &dyn std::fmt::Display| EvalError::Kernel(format!("{what}: {e}"));
     let opts = ExtrudeOptions { symmetric };
@@ -475,6 +494,11 @@ fn extrude_steps(
                 })?;
             body = drafted.body;
             steps.push((drafted, Vec::new()));
+        }
+        if thin.is_none() {
+            // pieces of the outline do not overlap: collected, and made one body after naming
+            pieces.push(body);
+            continue;
         }
         total = Some(match total {
             None => body,

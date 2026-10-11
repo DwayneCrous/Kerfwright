@@ -654,3 +654,84 @@ fn revolve_about_a_body_edge_straight_sweep_and_pipe() {
         .unwrap();
     assert!((vol(&eval(&d), rod) - PI * 9.0 * 12.0).abs() < 1e-6);
 }
+
+#[test]
+fn regions_that_touch_only_at_a_point_extrude_together() {
+    // two squares meeting at one corner, and the opposite quarters of a circle cut by two lines
+    let mut sk = rect_sketch(0.0, 0.0, 10.0, 10.0);
+    let more = rect_sketch(10.0, 10.0, 10.0, 10.0);
+    let _ = more;
+    let pts: Vec<_> = [(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)]
+        .iter()
+        .map(|q| sk.add_point(q.0, q.1))
+        .collect();
+    // the corner (10, 10) of the first square is a separate point entity: join by position
+    for i in 0..4 {
+        sk.add_line(pts[i], pts[(i + 1) % 4]);
+    }
+    let mut doc = Document::new();
+    let s = sketch_of(&mut doc, "S", xy(), sk);
+    let ev = eval(&doc);
+    let sp = sketch_product(&ev, s);
+    let sr = sketch_regions(&sp.sketch, &sp.entities, sp.plane);
+    assert_eq!(sr.regions.len(), 2);
+    let run = |picks: Vec<RegionPick>| {
+        let mut d = doc.clone();
+        let e = extrude_with(
+            &mut d,
+            "E",
+            s,
+            3.0,
+            BodyOp::New,
+            ExtrudeExtent {
+                regions: picks,
+                ..Default::default()
+            },
+        );
+        let ev = eval(&d);
+        let o = ev
+            .output(e)
+            .unwrap_or_else(|| panic!("{:?}", ev.failures()));
+        let t = kw_tess::tessellate_body(
+            o.brep().unwrap(),
+            o.body().unwrap(),
+            &kw_tess::TessOptions {
+                chord_tol: 0.01,
+                angle_tol: 0.1,
+            },
+        )
+        .expect("tessellates");
+        assert_eq!(t.mesh.indices.len() % 3, 0);
+        vol(&ev, e)
+    };
+    let both: Vec<RegionPick> = sr.regions.iter().map(|r| r.pick.clone()).collect();
+    assert!((run(both) - 600.0).abs() < 1e-6);
+    assert!((run(vec![sr.regions[0].pick.clone()]) - 300.0).abs() < 1e-6);
+    // opposite quarters of a circle cut by a cross of two lines
+    let mut sk = kw_sketch::Sketch::new();
+    sk.add_circle_xy(0.0, 0.0, 10.0);
+    sk.add_line_xy(-12.0, 0.0, 12.0, 0.0);
+    sk.add_line_xy(0.0, -12.0, 0.0, 12.0);
+    let mut doc = Document::new();
+    let s = sketch_of(&mut doc, "S", xy(), sk);
+    let ev = eval(&doc);
+    let sp = sketch_product(&ev, s);
+    let sr = sketch_regions(&sp.sketch, &sp.entities, sp.plane);
+    assert_eq!(sr.regions.len(), 4);
+    let a = sr.region_at([5.0, 5.0]).unwrap();
+    let b = sr.region_at([-5.0, -5.0]).unwrap();
+    let mut d = doc.clone();
+    let e = extrude_with(
+        &mut d,
+        "E",
+        s,
+        3.0,
+        BodyOp::New,
+        ExtrudeExtent {
+            regions: vec![sr.regions[a].pick.clone(), sr.regions[b].pick.clone()],
+            ..Default::default()
+        },
+    );
+    let ev = eval(&d);
+    assert!((vol(&ev, e) - 2.0 * 0.25 * PI * 100.0 * 3.0).abs() < 1e-6);
+}

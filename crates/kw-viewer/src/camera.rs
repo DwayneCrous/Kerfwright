@@ -45,11 +45,14 @@ impl OrbitCamera {
         self.update_clip(r);
     }
 
+    /// Set the clip planes so that the whole scene (a sphere of `scene_radius` about the origin, where the
+    /// scenes are centred) lies between them wherever the camera has been panned or zoomed to; planes tied
+    /// to the orbit target alone cut the model once the target leaves it.
     pub fn update_clip(&mut self, scene_radius: f64) {
-        self.near = (self.distance - scene_radius * 1.5)
-            .max(self.distance * 0.01)
-            .max(1e-4);
-        self.far = self.distance + scene_radius * 3.0;
+        let r = scene_radius.max(1e-6);
+        let to_scene = self.eye().norm();
+        self.near = (to_scene - 1.25 * r).max(0.002 * r).max(1e-4);
+        self.far = (to_scene + 1.25 * r).max(self.near * 2.0);
     }
 
     pub fn eye(&self) -> Vector3<f64> {
@@ -158,5 +161,32 @@ mod tests {
         let cam = OrbitCamera::new(3.0, 1.5);
         let (px, py) = cam.project(&cam.target, 1200.0, 800.0).unwrap();
         assert!((px - 599.5).abs() < 1e-6 && (py - 399.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    /// A model of radius `r` about the origin stays between the clip planes however the camera is panned,
+    /// zoomed or orbited (the planes used to follow the orbit target and cut the model once it left it).
+    #[test]
+    fn the_scene_stays_between_the_clip_planes_after_panning_and_zooming() {
+        let r = 25.0;
+        let mut cam = OrbitCamera::new(r, 1.5);
+        for step in 0..60 {
+            cam.pan(37.0 * (step % 5) as f64 - 60.0, 21.0, 600.0);
+            cam.zoom(if step % 3 == 0 { 2.0 } else { -1.0 });
+            cam.orbit(13.0, -5.0);
+            cam.update_clip(r);
+            let dc = cam.eye().norm();
+            assert!(
+                cam.near <= (dc - r).max(0.002 * r) + 1e-9,
+                "near {} at distance {dc}",
+                cam.near
+            );
+            assert!(cam.far >= dc + r, "far {} at distance {dc}", cam.far);
+            assert!(cam.near > 0.0 && cam.far > cam.near);
+        }
     }
 }
