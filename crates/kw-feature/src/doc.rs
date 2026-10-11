@@ -440,6 +440,51 @@ impl Document {
         Ok(id)
     }
 
+    /// Everything that reads `id`, directly or through other features, in timeline order.
+    pub fn all_dependents_of(&self, id: FeatureId) -> Vec<FeatureId> {
+        let mut found: Vec<FeatureId> = Vec::new();
+        let mut frontier = vec![id];
+        while let Some(cur) = frontier.pop() {
+            for d in self.dependents_of(cur) {
+                if !found.contains(&d) {
+                    found.push(d);
+                    frontier.push(d);
+                }
+            }
+        }
+        found.sort_by_key(|f| self.index_of(*f));
+        found
+    }
+
+    /// Remove a feature together with everything that depends on it (the sketch an extrude was made
+    /// from takes the extrude and the fillets on it along). Returns what was removed, in timeline order.
+    pub fn remove_with_dependents(&mut self, id: FeatureId) -> Result<Vec<Feature>, TimelineError> {
+        let first = self.index_of(id).ok_or(TimelineError::UnknownFeature(id))?;
+        let mut doomed = self.all_dependents_of(id);
+        doomed.push(id);
+        let mut c = self.clone();
+        let mut removed = Vec::new();
+        let mut kept = Vec::new();
+        for f in c.features.drain(..) {
+            if doomed.contains(&f.id) {
+                removed.push(f);
+            } else {
+                kept.push(f);
+            }
+        }
+        c.features = kept;
+        if let Some(r) = c.rollback.as_mut() {
+            let before = self.features[..(*r).min(self.features.len())]
+                .iter()
+                .filter(|f| doomed.contains(&f.id))
+                .count();
+            *r -= before;
+        }
+        let _ = first;
+        self.checked(c)?;
+        Ok(removed)
+    }
+
     /// Remove a feature that nothing depends on.
     pub fn remove(&mut self, id: FeatureId) -> Result<Feature, TimelineError> {
         let i = self.index_of(id).ok_or(TimelineError::UnknownFeature(id))?;

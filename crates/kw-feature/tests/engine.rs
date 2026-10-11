@@ -341,3 +341,55 @@ fn subd_feature_finishes_a_cage_and_scales_with_a_parameter() {
     let v2 = o2.brep().unwrap().volume(o2.body().unwrap()).unwrap();
     assert!((v2 / v1 - 8.0).abs() < 1e-3, "{v1} {v2}");
 }
+
+#[test]
+fn removing_with_dependents_takes_the_whole_chain_and_keeps_unrelated_features() {
+    use kw_feature::*;
+    // sketch -> extrude -> hole, plus a separate parameter that nothing reads
+    let mut doc = Document::new();
+    let p = doc.add_parameter("unrelated", mm(3.0)).unwrap();
+    let s = doc
+        .add_rect_sketch(
+            "S",
+            PlaneSpec::Xy(mm(0.0)),
+            mm(0.0),
+            mm(0.0),
+            mm(20.0),
+            mm(20.0),
+        )
+        .unwrap();
+    let e = doc.add_extrude("E", s, mm(10.0), BodyOp::New).unwrap();
+    let h = doc
+        .add(
+            "H",
+            FeatureSpec::Hole(HoleSpec {
+                plane: PlaneSpec::Xy(mm(10.0)),
+                points: vec![[mm(10.0), mm(10.0)]],
+                kind: HoleKind::Simple { diameter: mm(4.0) },
+                depth: mm(5.0),
+                through_all: false,
+                base: None,
+            }),
+        )
+        .unwrap();
+    assert_eq!(doc.all_dependents_of(s), vec![e, h]);
+    assert_eq!(doc.all_dependents_of(e), vec![h]);
+    // the strict removal still refuses
+    assert!(doc.remove(s).is_err());
+    // deleting the middle step takes the hole, not the sketch
+    let mut d2 = doc.clone();
+    let gone = d2.remove_with_dependents(e).unwrap();
+    assert_eq!(gone.iter().map(|f| f.id).collect::<Vec<_>>(), vec![e, h]);
+    assert_eq!(
+        d2.features.iter().map(|f| f.id).collect::<Vec<_>>(),
+        vec![p, s]
+    );
+    // deleting the sketch takes everything built on it
+    let gone = doc.remove_with_dependents(s).unwrap();
+    assert_eq!(gone.len(), 3);
+    assert_eq!(
+        doc.features.iter().map(|f| f.id).collect::<Vec<_>>(),
+        vec![p]
+    );
+    assert!(Engine::with_threads(1).evaluate(&doc).is_clean());
+}

@@ -107,6 +107,8 @@ pub struct DesignWorkspace {
     pub measure_open: bool,
     /// The Interference window is open.
     pub interference_open: bool,
+    /// For every feature, how many others depend on it (what deleting it takes along).
+    pub dep_counts: std::collections::HashMap<FeatureId, usize>,
     /// The flat pattern window (Sheet Metal ▸ Flat Pattern).
     pub flat: Option<sheetmetal::FlatState>,
     /// Which ribbon tab is shown (0 SOLID, 1 SHEET METAL, 2 FORM, 3 TOOLS).
@@ -157,6 +159,7 @@ impl Default for DesignWorkspace {
             params_open: false,
             measure_open: false,
             interference_open: false,
+            dep_counts: Default::default(),
             flat: None,
             ribbon_tab: 0,
             asm: Default::default(),
@@ -703,13 +706,25 @@ impl DesignWorkspace {
                 Action::Select(id) => self.model.selected = Some(id),
                 Action::Edit(id) => self.open_edit(project, id),
                 Action::Delete(id) => {
-                    if self
-                        .model
-                        .edit(project, |d| d.remove(id).map(|_| ()))
-                        .is_some()
-                        && self.model.selected == Some(id)
-                    {
-                        self.model.selected = None;
+                    // the feature and everything that depends on it go together (one undo step)
+                    let removed = self.model.edit(project, |d| d.remove_with_dependents(id));
+                    if let Some(removed) = removed {
+                        if self
+                            .model
+                            .selected
+                            .is_some_and(|s| removed.iter().any(|f| f.id == s))
+                        {
+                            self.model.selected = None;
+                        }
+                        self.status = match removed.len() {
+                            0 | 1 => String::new(),
+                            n => format!(
+                                "Deleted {} and the {} step{} that depended on it.",
+                                removed[0].name,
+                                n - 1,
+                                if n == 2 { "" } else { "s" }
+                            ),
+                        };
                     }
                 }
                 Action::Suppress(id, s) => {
@@ -760,6 +775,14 @@ impl DesignWorkspace {
         project: &mut Project,
         rs: Option<&eframe::egui_wgpu::RenderState>,
     ) {
+        {
+            let doc = project.document();
+            self.dep_counts = doc
+                .features
+                .iter()
+                .map(|f| (f.id, doc.all_dependents_of(f.id).len()))
+                .collect();
+        }
         // ---- bottom: timeline (always), left: browser
         self.timeline_ui(ui, project);
         egui::Panel::left("design_browser")

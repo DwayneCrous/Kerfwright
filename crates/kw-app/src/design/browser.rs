@@ -288,7 +288,13 @@ impl DesignWorkspace {
                 self.actions.push(Action::RollbackTo(id));
                 ui.close();
             }
-            if ui.button("Delete").clicked() {
+            let n = self.dep_counts.get(&id).copied().unwrap_or(0);
+            let label = match n {
+                0 => "Delete".to_string(),
+                1 => "Delete (and 1 dependent step)".to_string(),
+                n => format!("Delete (and {n} dependent steps)"),
+            };
+            if ui.button(label).clicked() {
                 self.actions.push(Action::Delete(id));
                 ui.close();
             }

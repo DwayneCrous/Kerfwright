@@ -1298,9 +1298,23 @@ fn the_timeline_reorders_rolls_back_suppresses_and_edits_in_place() {
         "editing a sketch does not open Extrude"
     );
     assert!((vol(&mut h) - 9600.0).abs() < 1e-6);
-    // deleting a sketch that has a dependent is refused
+    // deleting a sketch takes the steps that depend on it along, and one Undo brings them all back
+    let n = proj(&mut h).document().features.len();
+    assert!(n >= 2);
     act(&mut h, Action::Delete(sk));
-    assert!(!h.app.design.model.error.is_empty());
+    let doc = proj(&mut h).document();
+    assert!(doc.get(sk).is_none() && doc.features.len() < n);
+    assert!(doc
+        .features
+        .iter()
+        .all(|f| !matches!(f.spec, kw_feature::FeatureSpec::Extrude(_))));
+    assert!(
+        h.app.design.status.contains("depended"),
+        "{}",
+        h.app.design.status
+    );
+    proj(&mut h).history.undo();
+    assert_eq!(proj(&mut h).document().features.len(), n);
 }
 
 #[test]
