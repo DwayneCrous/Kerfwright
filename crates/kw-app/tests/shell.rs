@@ -1514,3 +1514,85 @@ fn the_view_cube_and_camera_animation_and_plane_overlay_work() {
         "a plane is under the pointer"
     );
 }
+
+#[test]
+fn a_profile_drawn_with_snaps_extrudes_to_the_exact_solid() {
+    use kw_sketch::editor::{Input, Tool as SkTool};
+    use kw_sketch::{ConstraintKind, EntityKind};
+    let (mut h, _d) = design_harness("snap_flow");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    {
+        let ed = &mut h.app.design.sketch.app.editor;
+        assert!(
+            ed.snaps.midpoints && ed.snaps.polar.is_some(),
+            "Fusion snaps are the default"
+        );
+        ed.set_tool(SkTool::Line);
+        ed.handle(Input::Click((0.05, 0.05))); // origin
+        ed.handle(Input::Click((30.0, 0.1))); // horizontal inference
+        ed.handle(Input::Click((15.2, 14.9))); // 135 degrees from there
+        ed.handle(Input::Click((0.04, 0.06))); // back onto the first point
+        ed.handle(Input::Escape);
+        let sk = &ed.sketch;
+        let count =
+            |f: fn(&ConstraintKind) -> bool| sk.constraints.values().filter(|c| f(&c.kind)).count();
+        assert_eq!(
+            count(|k| matches!(k, ConstraintKind::Fix(_))),
+            1,
+            "the origin point is fixed"
+        );
+        assert_eq!(count(|k| matches!(k, ConstraintKind::Horizontal(_))), 1);
+        assert_eq!(
+            sk.entities
+                .values()
+                .filter(|e| matches!(e.kind, EntityKind::Line { .. }))
+                .count(),
+            3
+        );
+    }
+    // the exact triangle the snaps produced: origin, (30, 0), and the point on the 135 degree ray
+    let pts: Vec<(f64, f64)> = {
+        let sk = &h.app.design.sketch.app.editor.sketch;
+        let mut v: Vec<_> = sk
+            .entities
+            .iter()
+            .filter(|(_, e)| matches!(e.kind, EntityKind::Point(_)))
+            .filter_map(|(id, _)| sk.point(id).ok())
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    };
+    assert_eq!(pts.len(), 3, "{pts:?}");
+    let (a, b, c) = (
+        pts.iter()
+            .find(|p| p.0.abs() < 1e-9 && p.1.abs() < 1e-9)
+            .copied()
+            .expect("origin"),
+        pts.iter()
+            .find(|p| (p.0 - 30.0).abs() < 1e-9)
+            .copied()
+            .expect("B"),
+        pts.iter().find(|p| p.1 > 1.0).copied().expect("apex"),
+    );
+    assert!(b.1.abs() < 1e-9, "B is level with the origin");
+    // C lies on the 135 degree ray from B
+    let (dx, dy) = (c.0 - b.0, c.1 - b.1);
+    assert!((dy.atan2(dx).to_degrees() - 135.0).abs() < 1e-6, "{c:?}");
+    let area = 0.5 * ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs();
+    act(&mut h, Action::FinishSketch);
+    let Some(d) = h.app.design.dialog.as_mut() else {
+        panic!("Extrude dialog")
+    };
+    let Tool::Extrude { depth, .. } = &mut d.tool else {
+        panic!()
+    };
+    *depth = "4 mm".into();
+    h.frame();
+    commit(&mut h);
+    let v = vol(&mut h);
+    assert!((v - area * 4.0).abs() < 1e-6, "{v} vs {}", area * 4.0);
+}

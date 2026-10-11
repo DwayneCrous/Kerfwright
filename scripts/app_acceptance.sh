@@ -28,6 +28,9 @@ shot design_idle --demo
 shot design_pick_plane --design-demo pick
 shot design_sketch_on_plane --design-demo sketch
 shot design_extrude_preview --design-demo extrude
+shot design_snap --design-demo snap
+shot design_snap_midpoint --design-demo snap-mid
+shot design_snap_intersection --design-demo snap-cross
 shot design_sketch_on_face --design-demo face
 shot design_cut_through_face --design-demo faceextrude
 shot design_hole_dialog --design-demo hole

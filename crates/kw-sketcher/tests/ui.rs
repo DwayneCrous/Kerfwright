@@ -2,7 +2,7 @@
 //! `egui::Context::run_ui`, so the real panel, canvas and shortcut code paths execute.
 
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
-use kw_sketch::editor::Tool;
+use kw_sketch::editor::{Ray, Snap, Tool};
 use kw_sketch::{EntityKind, SketchStatus};
 use kw_sketcher::SketcherApp;
 
@@ -298,4 +298,140 @@ fn dxf_export_then_import_through_the_app() {
     assert!(fresh
         .open_dxf("/nonexistent/definitely/missing.dxf")
         .is_err());
+}
+
+impl Harness {
+    fn click_with(&mut self, p: (f64, f64), modifiers: Modifiers) {
+        let at = self.screen(p);
+        self.frame_with(vec![Event::PointerMoved(at)], modifiers);
+        for pressed in [true, false] {
+            self.frame_with(
+                vec![Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                }],
+                modifiers,
+            );
+        }
+        self.frame_with(vec![], modifiers);
+    }
+
+    fn hover(&mut self, p: (f64, f64), frames: usize) {
+        let at = self.screen(p);
+        self.frame(vec![Event::PointerMoved(at)]);
+        for _ in 0..frames {
+            self.frame(vec![]);
+        }
+    }
+}
+
+#[test]
+fn resting_on_a_point_acquires_it_and_offers_an_alignment() {
+    let mut h = Harness::new(SketcherApp::default());
+    let a = h.app.editor.sketch.add_point(0.0, 10.0);
+    h.app.editor.refresh();
+    h.key(Key::L, Modifiers::NONE);
+    // passing over the point is not enough ...
+    h.hover((0.0, 10.0), 3);
+    assert!(h.app.editor.acquired_points().is_empty());
+    // ... resting on it is
+    h.hover((0.0, 10.0), 30);
+    assert_eq!(h.app.editor.acquired_points(), vec![(0.0, 10.0)]);
+    let _ = a;
+    // moving away keeps it; the cursor level with it now snaps onto the dashed line
+    h.hover((14.0, 10.03), 2);
+    let w = h.app.editor.cursor;
+    let snap = h.app.editor.snap(w);
+    assert!(
+        matches!(snap, Snap::Track(q, Ray::Horizontal { anchor: false, .. }, None) if (q.1 - 10.0).abs() < 1e-9),
+        "{snap:?}"
+    );
+    // clicking places the point exactly on that line; the memory is cleared
+    h.click((14.0, 10.03));
+    assert!(h.app.editor.sketch.entities.keys().any(|id| h
+        .app
+        .editor
+        .sketch
+        .point(id)
+        .is_ok_and(|p| (p.1 - 10.0).abs() < 1e-12 && p.0 > 5.0)));
+    assert!(h.app.editor.acquired_points().is_empty());
+}
+
+#[test]
+fn alt_places_exactly_where_the_pointer_is() {
+    let mut h = Harness::new(SketcherApp::default());
+    h.key(Key::P, Modifiers::NONE);
+    let target = (3.37, 2.21);
+    h.click_with(target, Modifiers::ALT);
+    h.click((13.37, 7.21));
+    let pts: Vec<(f64, f64)> = h
+        .app
+        .editor
+        .sketch
+        .entities
+        .keys()
+        .filter_map(|id| h.app.editor.sketch.point(id).ok())
+        .collect();
+    assert_eq!(pts.len(), 2, "{pts:?}");
+    let off_grid = |p: &(f64, f64)| {
+        let step = h.app.view.grid_step(24.0);
+        ((p.0 / step).round() * step - p.0).abs() > 1e-6
+    };
+    let raw: Vec<&(f64, f64)> = pts.iter().filter(|p| off_grid(p)).collect();
+    let snapped: Vec<&(f64, f64)> = pts.iter().filter(|p| !off_grid(p)).collect();
+    assert_eq!((raw.len(), snapped.len()), (1, 1), "{pts:?}");
+    assert!((raw[0].0 - target.0).hypot(raw[0].1 - target.1) < 0.05);
+}
+
+#[test]
+fn every_snap_marker_draws_and_the_snaps_palette_renders() {
+    let mut app = SketcherApp::default();
+    {
+        let sk = &mut app.editor.sketch;
+        sk.add_line_xy(2.0, 1.0, 10.0, 9.0);
+        sk.add_line_xy(0.0, 12.0, 20.0, 2.0);
+        sk.add_circle_xy(30.0, 10.0, 5.0);
+        sk.add_point(-20.0, 5.0);
+    }
+    app.editor.refresh();
+    let mut h = Harness::new(app);
+    h.key(Key::L, Modifiers::NONE);
+    let probes = [
+        ((-0.05, 0.05), "Origin"),
+        ((6.05, 5.05), "Midpoint"),
+        ((8.7, 7.65), "Intersection"),
+        ((-20.0, 5.05), "Point"),
+        ((34.95, 10.05), "Point or curve"),
+        ((17.3, -12.1), "grid or free"),
+    ];
+    for (p, what) in probes {
+        h.app.demo_cursor = Some(p);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let s = h.app.editor.snap(p);
+        match what {
+            "Origin" => assert!(matches!(s, Snap::Origin), "{s:?}"),
+            "Midpoint" => assert!(matches!(s, Snap::Midpoint(..)), "{s:?}"),
+            "Intersection" => assert!(matches!(s, Snap::Intersection(..)), "{s:?}"),
+            "Point" => assert!(matches!(s, Snap::Point(..)), "{s:?}"),
+            _ => {}
+        }
+    }
+    // drawing a line from the origin: the 30 degree ray appears as a tracking snap
+    h.click((0.0, 0.0));
+    let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+    let probe = (15.0 * c, 15.0 * s + 0.1);
+    h.app.demo_cursor = Some(probe);
+    h.frame(vec![]);
+    assert!(matches!(
+        h.app.editor.snap(probe),
+        Snap::Track(_, Ray::Angle { .. }, _)
+    ));
+    // the palette is part of the inspector
+    h.app.demo_cursor = None;
+    for _ in 0..3 {
+        h.frame(vec![]);
+    }
 }

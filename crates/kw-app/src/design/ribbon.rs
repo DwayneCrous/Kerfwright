@@ -347,6 +347,11 @@ impl DesignWorkspace {
                 }
             });
         });
+        rb::group(ui, "SNAPS", |ui| {
+            ui.menu_button("Snaps  v", |ui| self.sketch.app.snaps_ui(ui))
+                .response
+                .on_hover_text("What the cursor snaps to; hold Alt to ignore snaps");
+        });
         rb::group(ui, "FINISH", |ui| {
             if rb::button(
                 ui,

@@ -55,20 +55,180 @@ pub enum Input {
     Delete,
 }
 
+/// One inference line behind a [`Snap::Track`]: where it starts and what it means.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ray {
+    /// Horizontal through `from`. `anchor`: from the start of the line being drawn (the line gets a
+    /// horizontal constraint); otherwise an alignment with an acquired point (geometry only).
+    Horizontal {
+        from: P2,
+        anchor: bool,
+    },
+    Vertical {
+        from: P2,
+        anchor: bool,
+    },
+    /// A multiple of the polar angle step (degrees, counter-clockwise from +x).
+    Angle {
+        from: P2,
+        deg: f64,
+    },
+    Parallel {
+        from: P2,
+        line: EntityId,
+    },
+    Perpendicular {
+        from: P2,
+        line: EntityId,
+    },
+}
+
+impl Ray {
+    pub fn from(&self) -> P2 {
+        match *self {
+            Ray::Horizontal { from, .. }
+            | Ray::Vertical { from, .. }
+            | Ray::Angle { from, .. }
+            | Ray::Parallel { from, .. }
+            | Ray::Perpendicular { from, .. } => from,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Snap {
     Point(EntityId, P2),
     OnCurve(EntityId, P2),
+    /// The sketch origin (a fixed point is made there when the snap is used).
+    Origin,
+    Midpoint(EntityId, P2),
+    Intersection(EntityId, EntityId, P2),
+    /// On one inference line, or at the crossing of two.
+    Track(P2, Ray, Option<Ray>),
+    Grid(P2),
     Free(P2),
 }
 
 impl Snap {
     pub fn position(&self) -> P2 {
         match self {
-            Snap::Point(_, p) | Snap::OnCurve(_, p) | Snap::Free(p) => *p,
+            Snap::Point(_, p)
+            | Snap::OnCurve(_, p)
+            | Snap::Midpoint(_, p)
+            | Snap::Intersection(_, _, p)
+            | Snap::Track(p, ..)
+            | Snap::Grid(p)
+            | Snap::Free(p) => *p,
+            Snap::Origin => (0.0, 0.0),
+        }
+    }
+
+    /// Short name for status text and tooltips.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Snap::Point(..) => "Point",
+            Snap::OnCurve(..) => "On curve",
+            Snap::Origin => "Origin",
+            Snap::Midpoint(..) => "Midpoint",
+            Snap::Intersection(..) => "Intersection",
+            Snap::Track(_, r, r2) => {
+                let a = ray_name(r);
+                match r2 {
+                    Some(_) => "Aligned",
+                    None => a,
+                }
+            }
+            Snap::Grid(_) => "Grid",
+            Snap::Free(_) => "",
+        }
+    }
+
+    /// The inference lines to draw for this snap: `(start, end, ray)`.
+    pub fn track_lines(&self) -> Vec<(P2, P2, Ray)> {
+        match self {
+            Snap::Track(p, r1, r2) => [Some(*r1), *r2]
+                .into_iter()
+                .flatten()
+                .map(|r| (r.from(), *p, r))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 }
+
+fn ray_name(r: &Ray) -> &'static str {
+    match r {
+        Ray::Horizontal { anchor: true, .. } => "Horizontal",
+        Ray::Vertical { anchor: true, .. } => "Vertical",
+        Ray::Horizontal { .. } | Ray::Vertical { .. } => "Aligned",
+        Ray::Angle { .. } => "Angle",
+        Ray::Parallel { .. } => "Parallel",
+        Ray::Perpendicular { .. } => "Perpendicular",
+    }
+}
+
+/// Which snaps and inferences are active.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapSettings {
+    pub points: bool,
+    pub origin: bool,
+    pub midpoints: bool,
+    pub intersections: bool,
+    pub on_curve: bool,
+    /// Horizontal / vertical inference of a line's end within 2 degrees.
+    pub infer_hv: bool,
+    /// Dashed alignment with acquired points and horizontal / vertical from the line start (pixel tolerance).
+    pub tracking: bool,
+    /// Snap the direction of a line to multiples of this many degrees.
+    pub polar: Option<f64>,
+    /// Infer parallel / perpendicular to existing lines.
+    pub parallel_perp: bool,
+    pub grid: bool,
+    pub grid_step: f64,
+}
+
+impl Default for SnapSettings {
+    /// The behaviour of the first editor: points, on-curve and the 2 degree horizontal / vertical inference.
+    fn default() -> Self {
+        Self {
+            points: true,
+            origin: false,
+            midpoints: false,
+            intersections: false,
+            on_curve: true,
+            infer_hv: true,
+            tracking: false,
+            polar: None,
+            parallel_perp: false,
+            grid: false,
+            grid_step: 1.0,
+        }
+    }
+}
+
+impl SnapSettings {
+    /// Everything on, as in Fusion 360.
+    pub fn fusion() -> Self {
+        Self {
+            points: true,
+            origin: true,
+            midpoints: true,
+            intersections: true,
+            on_curve: true,
+            infer_hv: true,
+            tracking: true,
+            polar: Some(15.0),
+            parallel_perp: true,
+            grid: true,
+            grid_step: 1.0,
+        }
+    }
+}
+
+/// Largest angular error for a direction snap (polar, parallel, perpendicular), degrees.
+const DIRECTION_SNAP_DEG: f64 = 3.0;
+/// Most points that can be acquired for alignment at once.
+const MAX_ACQUIRED: usize = 3;
 
 #[derive(Debug, Clone, Default)]
 enum Pending {
@@ -111,6 +271,11 @@ pub struct Editor {
     /// Dimension created by the last command (the UI may open a value editor).
     pub last_dimension: Option<ConstraintId>,
     pub cursor: P2,
+    pub snaps: SnapSettings,
+    /// Snapping is switched off for the current action (Alt held).
+    pub suspend_snaps: bool,
+    /// Points the cursor has dwelt on; their horizontal / vertical lines are offered as alignments.
+    acquired: Vec<EntityId>,
     solver: Solver,
     undo: Vec<Sketch>,
     redo: Vec<Sketch>,
@@ -147,6 +312,9 @@ impl Editor {
             report: None,
             last_dimension: None,
             cursor: (0.0, 0.0),
+            snaps: SnapSettings::default(),
+            suspend_snaps: false,
+            acquired: Vec::new(),
             solver: Solver::default(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -158,6 +326,7 @@ impl Editor {
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.pending = Pending::None;
+        self.acquired.clear();
         self.status.clear();
     }
 
@@ -254,28 +423,304 @@ impl Editor {
 
     // ------------------------------------------------------------- snapping
 
+    /// Remember a point for alignment (the UI calls this when the cursor has rested on it).
+    pub fn acquire(&mut self, point: EntityId) {
+        if self.acquired.contains(&point)
+            || !matches!(self.sketch.kind(point), Ok(EntityKind::Point(_)))
+        {
+            return;
+        }
+        if self.acquired.len() == MAX_ACQUIRED {
+            self.acquired.remove(0);
+        }
+        self.acquired.push(point);
+    }
+
+    pub fn acquired_points(&self) -> Vec<P2> {
+        self.acquired
+            .iter()
+            .filter_map(|e| self.sketch.point(*e).ok())
+            .collect()
+    }
+
+    /// Where a click at `p` lands, in order of preference: existing point, origin, midpoint of a line,
+    /// crossing of two curves, a curve, inference lines, grid node.
     pub fn snap(&self, p: P2) -> Snap {
-        let mut best: Option<(f64, EntityId, P2)> = None;
-        for (id, e) in &self.sketch.entities {
-            if let EntityKind::Point(_) = e.kind {
-                let q = self.sketch.point(id).unwrap();
-                let d = dist(p, q);
-                if d <= self.tolerance && best.is_none_or(|(bd, _, _)| d < bd) {
-                    best = Some((d, id, q));
+        if self.suspend_snaps {
+            return Snap::Free(p);
+        }
+        let cfg = self.snaps;
+        let sk = &self.sketch;
+        if cfg.points {
+            let mut best: Option<(f64, EntityId, P2)> = None;
+            for (id, e) in &sk.entities {
+                if let EntityKind::Point(_) = e.kind {
+                    let q = sk.point(id).unwrap();
+                    let d = dist(p, q);
+                    if d <= self.tolerance && best.is_none_or(|(bd, _, _)| d < bd) {
+                        best = Some((d, id, q));
+                    }
+                }
+            }
+            if let Some((_, id, q)) = best {
+                return Snap::Point(id, q);
+            }
+        }
+        if cfg.origin && dist(p, (0.0, 0.0)) <= self.tolerance {
+            return Snap::Origin;
+        }
+        if cfg.midpoints {
+            let mut best: Option<(f64, EntityId, P2)> = None;
+            for (id, e) in &sk.entities {
+                if let EntityKind::Line { p1, p2 } = e.kind {
+                    let (Ok(a), Ok(b)) = (sk.point(p1), sk.point(p2)) else {
+                        continue;
+                    };
+                    let m = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                    let d = dist(p, m);
+                    if d <= self.tolerance && best.is_none_or(|(bd, _, _)| d < bd) {
+                        best = Some((d, id, m));
+                    }
+                }
+            }
+            if let Some((_, id, m)) = best {
+                return Snap::Midpoint(id, m);
+            }
+        }
+        if cfg.intersections {
+            let near: Vec<EntityId> = sk
+                .entities
+                .iter()
+                .filter(|(_, e)| !matches!(e.kind, EntityKind::Point(_)))
+                .filter(|(id, _)| {
+                    geom::distance_to(sk, *id, p).is_ok_and(|d| d <= 3.0 * self.tolerance)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            let mut best: Option<(f64, EntityId, EntityId, P2)> = None;
+            for (i, &a) in near.iter().enumerate() {
+                for &b in &near[i + 1..] {
+                    let Ok(xs) = geom::intersections(sk, a, b) else {
+                        continue;
+                    };
+                    for q in xs {
+                        let d = dist(p, q);
+                        if d <= self.tolerance && best.is_none_or(|(bd, ..)| d < bd) {
+                            best = Some((d, a, b, q));
+                        }
+                    }
+                }
+            }
+            if let Some((_, a, b, q)) = best {
+                return Snap::Intersection(a, b, q);
+            }
+        }
+        if cfg.on_curve {
+            if let Some(c) = geom::pick(sk, p, self.tolerance) {
+                if !matches!(sk.kind(c), Ok(EntityKind::Point(_))) {
+                    if let Ok(q) = closest_point(sk, c, p) {
+                        return Snap::OnCurve(c, q);
+                    }
                 }
             }
         }
-        if let Some((_, id, q)) = best {
-            return Snap::Point(id, q);
+        if let Some(t) = self.track(p) {
+            return t;
         }
-        if let Some(c) = geom::pick(&self.sketch, p, self.tolerance) {
-            if !matches!(self.sketch.kind(c), Ok(EntityKind::Point(_))) {
-                if let Ok(q) = closest_point(&self.sketch, c, p) {
-                    return Snap::OnCurve(c, q);
-                }
-            }
+        if cfg.grid && cfg.grid_step > 0.0 {
+            let g = cfg.grid_step;
+            return Snap::Grid(((p.0 / g).round() * g, (p.1 / g).round() * g));
         }
         Snap::Free(p)
+    }
+
+    /// Start of the line being drawn, if any.
+    fn line_anchor(&self) -> Option<P2> {
+        match &self.pending {
+            Pending::Line(a) => self.sketch.point(*a).ok(),
+            _ => None,
+        }
+    }
+
+    /// Inference lines near `p`: directions from the start of the line being drawn and alignments with
+    /// acquired points. The nearest wins; a second one that crosses it close to the cursor gives a
+    /// two-line snap at the crossing.
+    fn track(&self, p: P2) -> Option<Snap> {
+        struct Cand {
+            ray: Ray,
+            from: P2,
+            dir: P2,
+            d: f64,
+            anchor: bool,
+        }
+        let cfg = self.snaps;
+        let mut cands: Vec<Cand> = Vec::new();
+        if let Some(a) = self.line_anchor() {
+            let (dx, dy) = (p.0 - a.0, p.1 - a.1);
+            let len = dx.hypot(dy);
+            let pixel_mode = cfg.tracking || cfg.polar.is_some() || cfg.parallel_perp;
+            if len > 1e-9 && (cfg.infer_hv || pixel_mode) {
+                let theta = dy.atan2(dx);
+                // error of the direction `phi` against the cursor direction, as angle and distance
+                let miss = |phi: f64| {
+                    let mut e = (theta - phi).rem_euclid(std::f64::consts::TAU);
+                    if e > std::f64::consts::PI {
+                        e -= std::f64::consts::TAU;
+                    }
+                    (e.abs(), len * e.sin().abs())
+                };
+                let ok = |ang: f64, d: f64, cap_deg: f64| {
+                    ang.to_degrees() <= cap_deg && (!pixel_mode || d <= self.tolerance)
+                };
+                let hv_cap = if pixel_mode { DIRECTION_SNAP_DEG } else { 2.0 };
+                for (k, horizontal) in [
+                    (0.0, true),
+                    (std::f64::consts::PI, true),
+                    (1.0, false),
+                    (-1.0, false),
+                ] {
+                    let phi = if horizontal {
+                        k
+                    } else {
+                        k * std::f64::consts::FRAC_PI_2
+                    };
+                    let (ang, d) = miss(phi);
+                    if ok(ang, d, hv_cap) {
+                        let dir = (phi.cos(), phi.sin());
+                        let ray = if horizontal {
+                            Ray::Horizontal {
+                                from: a,
+                                anchor: true,
+                            }
+                        } else {
+                            Ray::Vertical {
+                                from: a,
+                                anchor: true,
+                            }
+                        };
+                        cands.push(Cand {
+                            ray,
+                            from: a,
+                            dir,
+                            d,
+                            anchor: true,
+                        });
+                    }
+                }
+                if let Some(step) = cfg.polar.filter(|s| *s > 0.0) {
+                    let step = step.to_radians();
+                    let k = (theta / step).round();
+                    let phi = k * step;
+                    let deg = phi.to_degrees().rem_euclid(360.0);
+                    let on_axis = (deg / 90.0 - (deg / 90.0).round()).abs() < 1e-9;
+                    let (ang, d) = miss(phi);
+                    if !on_axis && ok(ang, d, DIRECTION_SNAP_DEG) {
+                        cands.push(Cand {
+                            ray: Ray::Angle { from: a, deg },
+                            from: a,
+                            dir: (phi.cos(), phi.sin()),
+                            d,
+                            anchor: true,
+                        });
+                    }
+                }
+                if cfg.parallel_perp {
+                    for (id, e) in &self.sketch.entities {
+                        let EntityKind::Line { p1, p2 } = e.kind else {
+                            continue;
+                        };
+                        let (Ok(u), Ok(v)) = (self.sketch.point(p1), self.sketch.point(p2)) else {
+                            continue;
+                        };
+                        if dist(u, a) < 1e-9 || dist(v, a) < 1e-9 {
+                            continue; // a line meeting the start gives nothing to be parallel to
+                        }
+                        let phi = (v.1 - u.1).atan2(v.0 - u.0);
+                        use std::f64::consts::{FRAC_PI_2, PI};
+                        for (phi, perp) in [
+                            (phi, false),
+                            (phi + PI, false),
+                            (phi + FRAC_PI_2, true),
+                            (phi - FRAC_PI_2, true),
+                        ] {
+                            let (ang, d) = miss(phi);
+                            if ok(ang, d, DIRECTION_SNAP_DEG) {
+                                let ray = if perp {
+                                    Ray::Perpendicular { from: a, line: id }
+                                } else {
+                                    Ray::Parallel { from: a, line: id }
+                                };
+                                cands.push(Cand {
+                                    ray,
+                                    from: a,
+                                    dir: (phi.cos(), phi.sin()),
+                                    d,
+                                    anchor: true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if cfg.tracking {
+            for q in self.acquired_points() {
+                if (p.1 - q.1).abs() <= self.tolerance {
+                    cands.push(Cand {
+                        ray: Ray::Horizontal {
+                            from: q,
+                            anchor: false,
+                        },
+                        from: q,
+                        dir: (1.0, 0.0),
+                        d: (p.1 - q.1).abs(),
+                        anchor: false,
+                    });
+                }
+                if (p.0 - q.0).abs() <= self.tolerance {
+                    cands.push(Cand {
+                        ray: Ray::Vertical {
+                            from: q,
+                            anchor: false,
+                        },
+                        from: q,
+                        dir: (0.0, 1.0),
+                        d: (p.0 - q.0).abs(),
+                        anchor: false,
+                    });
+                }
+            }
+        }
+        // stable: nearest first, anchor rays before alignments on ties
+        cands.sort_by(|a, b| {
+            a.d.partial_cmp(&b.d)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.anchor.cmp(&a.anchor))
+        });
+        let first = cands.first()?;
+        let along = |c: &Cand| {
+            let t = (p.0 - c.from.0) * c.dir.0 + (p.1 - c.from.1) * c.dir.1;
+            (c.from.0 + t * c.dir.0, c.from.1 + t * c.dir.1)
+        };
+        for second in cands.iter().skip(1) {
+            if first.anchor && second.anchor {
+                continue;
+            }
+            let det = first.dir.0 * second.dir.1 - first.dir.1 * second.dir.0;
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            let (rx, ry) = (second.from.0 - first.from.0, second.from.1 - first.from.1);
+            let t = (rx * second.dir.1 - ry * second.dir.0) / det;
+            let x = (
+                first.from.0 + t * first.dir.0,
+                first.from.1 + t * first.dir.1,
+            );
+            if dist(x, p) <= 2.0 * self.tolerance {
+                return Some(Snap::Track(x, first.ray, Some(second.ray)));
+            }
+        }
+        Some(Snap::Track(along(first), first.ray, None))
     }
 
     fn point_for(&mut self, s: Snap) -> Result<EntityId, SketchError> {
@@ -286,8 +731,67 @@ impl Editor {
                 self.sketch.point_on(p, curve)?;
                 Ok(p)
             }
-            Snap::Free(q) => Ok(self.sketch.add_point(q.0, q.1)),
+            Snap::Origin => {
+                let existing = self
+                    .sketch
+                    .entities
+                    .iter()
+                    .filter(|(_, e)| matches!(e.kind, EntityKind::Point(_)))
+                    .map(|(id, _)| id)
+                    .find(|id| {
+                        self.sketch
+                            .point(*id)
+                            .is_ok_and(|q| dist(q, (0.0, 0.0)) < 1e-9)
+                    });
+                match existing {
+                    Some(id) => Ok(id),
+                    None => {
+                        let p = self.sketch.add_point(0.0, 0.0);
+                        self.sketch.fix(p)?;
+                        Ok(p)
+                    }
+                }
+            }
+            Snap::Midpoint(line, q) => {
+                let p = self.sketch.add_point(q.0, q.1);
+                self.sketch.midpoint(p, line)?;
+                Ok(p)
+            }
+            Snap::Intersection(a, b, q) => {
+                let p = self.sketch.add_point(q.0, q.1);
+                self.sketch.point_on(p, a)?;
+                self.sketch.point_on(p, b)?;
+                Ok(p)
+            }
+            Snap::Track(q, ..) | Snap::Grid(q) | Snap::Free(q) => {
+                Ok(self.sketch.add_point(q.0, q.1))
+            }
         }
+    }
+
+    /// Constraints implied by the inference lines a line's end snapped to.
+    fn constrain_to_rays(&mut self, line: EntityId, s: Snap) -> Result<(), SketchError> {
+        let Snap::Track(_, r1, r2) = s else {
+            return Ok(());
+        };
+        for r in [Some(r1), r2].into_iter().flatten() {
+            match r {
+                Ray::Horizontal { anchor: true, .. } => {
+                    self.sketch.horizontal(line)?;
+                }
+                Ray::Vertical { anchor: true, .. } => {
+                    self.sketch.vertical(line)?;
+                }
+                Ray::Parallel { line: l, .. } => {
+                    self.sketch.parallel(line, l)?;
+                }
+                Ray::Perpendicular { line: l, .. } => {
+                    self.sketch.perpendicular(line, l)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- input
@@ -297,6 +801,7 @@ impl Editor {
             Input::Move(p) => self.cursor = p,
             Input::Escape => {
                 self.pending = Pending::None;
+                self.acquired.clear();
                 self.selection.clear();
                 self.status.clear();
             }
@@ -308,6 +813,7 @@ impl Editor {
                     self.status = format!("{e}");
                     self.pending = Pending::None;
                 }
+                self.acquired.clear();
             }
         }
     }
@@ -464,41 +970,13 @@ impl Editor {
         match self.pending.clone() {
             Pending::Line(from) => {
                 self.checkpoint();
-                let a = self.sketch.point(from)?;
-                let (mut q, mut snapped) = (s.position(), !matches!(s, Snap::Free(_)));
-                // horizontal / vertical inference for free end points
-                let (dx, dy) = (q.0 - a.0, q.1 - a.1);
-                let tan2 = (2.0_f64).to_radians().tan();
-                let mut infer = None;
-                if !snapped && dx.abs() > 1e-12 && dy.abs() <= tan2 * dx.abs() {
-                    q.1 = a.1;
-                    infer = Some(true);
-                } else if !snapped && dy.abs() > 1e-12 && dx.abs() <= tan2 * dy.abs() {
-                    q.0 = a.0;
-                    infer = Some(false);
-                }
-                if infer.is_some() {
-                    snapped = false;
-                }
-                let end = match s {
-                    Snap::Free(_) => self.sketch.add_point(q.0, q.1),
-                    other => self.point_for(other)?,
-                };
+                let end = self.point_for(s)?;
                 if end == from {
                     self.undo.pop();
                     return Ok(());
                 }
                 let line = self.sketch.add_line(from, end);
-                match infer {
-                    Some(true) => {
-                        self.sketch.horizontal(line)?;
-                    }
-                    Some(false) => {
-                        self.sketch.vertical(line)?;
-                    }
-                    None => {}
-                }
-                let _ = snapped;
+                self.constrain_to_rays(line, s)?;
                 self.pending = Pending::Line(end);
                 self.refresh_or_rollback();
                 Ok(())
@@ -525,6 +1003,9 @@ impl Editor {
                 let p1 = self.sketch.add_point(b.0, a.1);
                 let p2 = match s {
                     Snap::Point(id, _) => id,
+                    Snap::Origin | Snap::Midpoint(..) | Snap::Intersection(..) => {
+                        self.point_for(s)?
+                    }
                     _ => self.sketch.add_point(b.0, b.1),
                 };
                 let p3 = self.sketch.add_point(a.0, b.1);

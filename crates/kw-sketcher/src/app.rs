@@ -1,7 +1,9 @@
 use crate::view::View;
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use kw_dxf::{export_sketch, import_sketch, parse, write, ImportOptions};
-use kw_sketch::editor::{ConstraintTool, Editor, EntityState, Input, Snap, Tool};
+use kw_sketch::editor::{
+    ConstraintTool, Editor, EntityState, Input, Ray, Snap, SnapSettings, Tool,
+};
 use kw_sketch::{geom, ConstraintId, ConstraintKind, EntityId, EntityKind, Sketch, SketchStatus};
 
 type P2 = (f64, f64);
@@ -92,14 +94,38 @@ pub struct SketcherApp {
     dim_edit: Option<(ConstraintId, String)>,
     /// A drag of sketch geometry is in progress.
     grabbing: bool,
+    /// Treat the pointer as resting here (sketch coordinates) when it is not over the canvas;
+    /// used by screenshots and tests.
+    pub demo_cursor: Option<P2>,
+    /// The point under the pointer and since when (seconds); resting on it acquires it for alignment.
+    dwell: Option<(EntityId, f64)>,
 }
+
+/// How long the pointer must rest on a point before it is offered for alignment, seconds.
+const DWELL_SECONDS: f64 = 0.3;
+
+/// Polar angle steps offered in the Snaps palette.
+const POLAR_STEPS: &[Option<f64>] = &[
+    None,
+    Some(5.0),
+    Some(10.0),
+    Some(15.0),
+    Some(22.5),
+    Some(30.0),
+    Some(45.0),
+    Some(90.0),
+];
 
 impl Default for SketcherApp {
     fn default() -> Self {
         Self {
             embedded: false,
             reference: Vec::new(),
-            editor: Editor::default(),
+            editor: {
+                let mut e = Editor::default();
+                e.snaps = SnapSettings::fusion();
+                e
+            },
             view: View::default(),
             exit_after_frames: None,
             frames: 0,
@@ -111,6 +137,8 @@ impl Default for SketcherApp {
             file_msg: String::new(),
             dim_edit: None,
             grabbing: false,
+            demo_cursor: None,
+            dwell: None,
         }
     }
 }
@@ -246,7 +274,7 @@ impl SketcherApp {
                 }
             });
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut self.show_grid, "Grid");
+                ui.menu_button("Snaps", |ui| self.snaps_ui(ui));
                 if ui.button("Zoom to fit   F").clicked() {
                     self.first_frame = true;
                     ui.close();
@@ -308,6 +336,10 @@ impl SketcherApp {
     }
 
     pub fn inspector(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Snaps")
+            .default_open(true)
+            .show(ui, |ui| self.snaps_ui(ui));
+        ui.separator();
         ui.heading("Solver");
         match &self.editor.report {
             None => {
@@ -614,10 +646,13 @@ impl SketcherApp {
         // ---- editor input
         self.editor.multi_select = ui.input(|i| i.modifiers.command || i.modifiers.shift);
         self.editor.tolerance = 8.0 / self.view.scale;
+        self.editor.snaps.grid_step = self.view.grid_step(24.0);
+        self.editor.suspend_snaps = ui.input(|i| i.modifiers.alt);
         if let Some(pos) = response.hover_pos().or(response.interact_pointer_pos()) {
             let w = self.view.to_world(rect, pos);
             self.editor.handle(Input::Move(w));
         }
+        self.update_dwell(ui, response.hover_pos(), rect);
         let select = self.editor.tool == Tool::Select;
         if response.drag_started_by(PointerButton::Primary) && select {
             // grab where the button went down, not where egui's drag threshold fired
@@ -661,6 +696,69 @@ impl SketcherApp {
         }
 
         self.paint(&painter, rect, response.hover_pos());
+    }
+
+    /// Resting the pointer on a point acquires it: its horizontal and vertical lines then offer alignments.
+    fn update_dwell(&mut self, ui: &egui::Ui, hover: Option<Pos2>, rect: Rect) {
+        let target = hover
+            .filter(|_| self.editor.tool != Tool::Select && !self.editor.suspend_snaps)
+            .and_then(|pos| {
+                let w = self.view.to_world(rect, pos);
+                let sk = &self.editor.sketch;
+                sk.entities
+                    .iter()
+                    .filter(|(_, e)| matches!(e.kind, EntityKind::Point(_)))
+                    .filter_map(|(id, _)| {
+                        let q = sk.point(id).ok()?;
+                        let d = (q.0 - w.0).hypot(q.1 - w.1);
+                        (d <= self.editor.tolerance).then_some((d, id))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, id)| id)
+            });
+        let now = ui.input(|i| i.time);
+        match (target, self.dwell) {
+            (Some(id), Some((cur, since))) if id == cur => {
+                if now - since >= DWELL_SECONDS {
+                    self.editor.acquire(id);
+                } else {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(60));
+                }
+            }
+            (Some(id), _) => {
+                self.dwell = Some((id, now));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(60));
+            }
+            (None, _) => self.dwell = None,
+        }
+    }
+
+    /// The Snaps palette: what the cursor snaps to and infers.
+    pub fn snaps_ui(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.show_grid, "Show grid");
+        let s = &mut self.editor.snaps;
+        ui.checkbox(&mut s.grid, "Snap to grid");
+        ui.checkbox(&mut s.points, "Points");
+        ui.checkbox(&mut s.origin, "Origin");
+        ui.checkbox(&mut s.midpoints, "Midpoints");
+        ui.checkbox(&mut s.intersections, "Intersections");
+        ui.checkbox(&mut s.on_curve, "On curves");
+        ui.checkbox(&mut s.tracking, "Tracking lines");
+        ui.checkbox(&mut s.parallel_perp, "Parallel / perpendicular");
+        let label = |v: Option<f64>| match v {
+            None => "Off".to_string(),
+            Some(d) => format!("{d}°"),
+        };
+        egui::ComboBox::from_label("Angle step")
+            .selected_text(label(s.polar))
+            .show_ui(ui, |ui| {
+                for v in POLAR_STEPS {
+                    ui.selectable_value(&mut s.polar, *v, label(*v));
+                }
+            });
+        ui.weak("Hold Alt to ignore snaps");
     }
 
     fn paint(&self, painter: &egui::Painter, rect: Rect, hover: Option<Pos2>) {
@@ -809,45 +907,152 @@ impl SketcherApp {
             );
         }
 
-        // rubber band + snap marker
+        // rubber band, inference lines and the snap marker
+        let hover = self.demo_cursor.map(|w| v.to_screen(rect, w)).or(hover);
         if self.editor.tool != Tool::Select {
+            let pt = |p: P2| v.to_screen(rect, p);
+            for q in self.editor.acquired_points() {
+                let c = pt(q);
+                let st = Stroke::new(1.5, TRACK_BLUE);
+                painter.line_segment([c - Vec2::new(5.0, 0.0), c + Vec2::new(5.0, 0.0)], st);
+                painter.line_segment([c - Vec2::new(0.0, 5.0), c + Vec2::new(0.0, 5.0)], st);
+            }
             if let Some(pos) = hover {
-                let cursor = self.editor.snap(v.to_world(rect, pos));
-                let a = self.editor.anchors();
+                let cursor = if self.editor.suspend_snaps {
+                    Snap::Free(v.to_world(rect, pos))
+                } else {
+                    self.editor.snap(v.to_world(rect, pos))
+                };
+                let anchors = self.editor.anchors();
                 let rub = Stroke::new(1.0, Color32::from_gray(150));
-                if let Some(last) = a.last() {
+                let sp = pt(cursor.position());
+                for (from, to, ray) in cursor.track_lines() {
+                    // run the dashed line a little past the snapped point
+                    let (a, b) = (pt(from), pt(to));
+                    let dir = (b - a).normalized();
+                    let end = if dir.is_finite() { b + dir * 24.0 } else { b };
                     painter.extend(Shape::dashed_line(
-                        &[
-                            v.to_screen(rect, *last),
-                            v.to_screen(rect, cursor.position()),
-                        ],
-                        rub,
+                        &[a, end],
+                        Stroke::new(1.25, ray_color(&ray)),
+                        6.0,
                         4.0,
-                        3.0,
                     ));
                 }
-                for p in &a {
-                    painter.circle_stroke(v.to_screen(rect, *p), 4.0, rub);
+                if let Some(last) = anchors.last() {
+                    painter.extend(Shape::dashed_line(&[pt(*last), sp], rub, 4.0, 3.0));
                 }
-                let sp = v.to_screen(rect, cursor.position());
+                for p in &anchors {
+                    painter.circle_stroke(pt(*p), 4.0, rub);
+                }
+                let mark = Stroke::new(1.75, SNAP_MARK);
                 match cursor {
                     Snap::Point(..) => {
                         painter.rect_stroke(
                             Rect::from_center_size(sp, Vec2::splat(11.0)),
                             0.0,
-                            Stroke::new(1.5, Color32::YELLOW),
+                            mark,
                             egui::StrokeKind::Middle,
                         );
                     }
+                    Snap::Origin => {
+                        painter.circle_stroke(sp, 6.0, mark);
+                        painter.line_segment(
+                            [sp - Vec2::new(9.0, 0.0), sp + Vec2::new(9.0, 0.0)],
+                            mark,
+                        );
+                        painter.line_segment(
+                            [sp - Vec2::new(0.0, 9.0), sp + Vec2::new(0.0, 9.0)],
+                            mark,
+                        );
+                    }
+                    Snap::Midpoint(..) => {
+                        painter.add(Shape::closed_line(
+                            vec![
+                                sp + Vec2::new(0.0, -7.0),
+                                sp + Vec2::new(6.5, 5.0),
+                                sp + Vec2::new(-6.5, 5.0),
+                            ],
+                            mark,
+                        ));
+                    }
+                    Snap::Intersection(..) => {
+                        painter.line_segment(
+                            [sp + Vec2::new(-6.0, -6.0), sp + Vec2::new(6.0, 6.0)],
+                            mark,
+                        );
+                        painter.line_segment(
+                            [sp + Vec2::new(-6.0, 6.0), sp + Vec2::new(6.0, -6.0)],
+                            mark,
+                        );
+                    }
                     Snap::OnCurve(..) => {
-                        painter.circle_stroke(sp, 6.0, Stroke::new(1.5, Color32::YELLOW));
+                        painter.circle_stroke(sp, 6.0, mark);
+                    }
+                    Snap::Track(_, ray, _) => {
+                        painter.circle_filled(sp, 3.5, ray_color(&ray));
+                        painter.circle_stroke(sp, 6.0, Stroke::new(1.0, ray_color(&ray)));
+                    }
+                    Snap::Grid(_) => {
+                        painter.circle_filled(sp, 2.5, TRACK_BLUE);
                     }
                     Snap::Free(_) => {
                         painter.circle_filled(sp, 2.0, Color32::from_gray(180));
                     }
                 }
+                // what the cursor is on, and the length / angle of the line being drawn
+                let mut text = Vec::new();
+                if let (Some(last), Tool::Line) = (anchors.last(), self.editor.tool) {
+                    let q = cursor.position();
+                    let (dx, dy) = (q.0 - last.0, q.1 - last.1);
+                    let len = dx.hypot(dy);
+                    if len > 1e-9 {
+                        text.push(format!(
+                            "{len:.3}  {:.1}°",
+                            dy.atan2(dx).to_degrees().rem_euclid(360.0)
+                        ));
+                    }
+                }
+                let name = cursor.name();
+                if !name.is_empty() {
+                    text.push(name.to_string());
+                }
+                if !text.is_empty() {
+                    let galley = painter.layout_no_wrap(
+                        text.join("   "),
+                        egui::FontId::proportional(12.0),
+                        if ctx_dark {
+                            Color32::from_gray(235)
+                        } else {
+                            Color32::from_gray(40)
+                        },
+                    );
+                    let at = sp + Vec2::new(14.0, 12.0);
+                    let r = Rect::from_min_size(at, galley.size()).expand(3.0);
+                    painter.rect_filled(
+                        r,
+                        3.0,
+                        if ctx_dark {
+                            Color32::from_black_alpha(190)
+                        } else {
+                            Color32::from_white_alpha(225)
+                        },
+                    );
+                    painter.galley(at, galley, Color32::PLACEHOLDER);
+                }
             }
         }
+    }
+}
+
+const SNAP_MARK: Color32 = Color32::from_rgb(235, 150, 0);
+const TRACK_BLUE: Color32 = Color32::from_rgb(40, 130, 230);
+
+/// Colour of an inference line: alignments blue, angles orange, parallel / perpendicular green.
+fn ray_color(r: &Ray) -> Color32 {
+    match r {
+        Ray::Horizontal { .. } | Ray::Vertical { .. } => TRACK_BLUE,
+        Ray::Angle { .. } => Color32::from_rgb(235, 130, 20),
+        Ray::Parallel { .. } | Ray::Perpendicular { .. } => Color32::from_rgb(40, 160, 90),
     }
 }
 

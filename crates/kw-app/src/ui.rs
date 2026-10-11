@@ -257,6 +257,32 @@ impl KerfwrightApp {
                     self.design.finish_sketch(project);
                 }
             }
+            "snap" | "snap-mid" | "snap-cross" | "snap-origin" | "snap-point" => {
+                self.design
+                    .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
+                let app = &mut self.design.sketch.app;
+                let mut sk = rect(30.0, 20.0);
+                let far = sk.add_point(40.0, 12.0);
+                // a diagonal across the rectangle crossing the loose point's level
+                sk.add_line_xy(5.0, 18.0, 20.0, -2.0);
+                app.editor.replace_sketch(sk);
+                app.editor.set_tool(kw_sketch::editor::Tool::Line);
+                app.demo_cursor = Some(match what {
+                    "snap-mid" => (15.0, 0.1),
+                    "snap-cross" => (18.55, 0.05),
+                    "snap-origin" => (0.1, 0.1),
+                    "snap-point" => (30.05, 20.05),
+                    _ => {
+                        // start on the middle of the bottom edge, remember the loose point, hover
+                        // where the 60 degree ray from the start crosses the level of that point
+                        app.editor
+                            .handle(kw_sketch::editor::Input::Click((15.0, 0.02)));
+                        app.editor.acquire(far);
+                        (15.0 + 12.0 / 60f64.to_radians().tan(), 12.05)
+                    }
+                });
+                app.zoom_to_fit();
+            }
             "face" | "faceextrude" => {
                 if let Some((frame, reference, _)) = top_face(project) {
                     self.design.begin_sketch(
