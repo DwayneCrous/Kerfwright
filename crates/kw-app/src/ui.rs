@@ -244,7 +244,7 @@ impl KerfwrightApp {
         };
         match what {
             "pick" => self.design.actions.push(Action::StartSketch),
-            "sketch" | "extrude" => {
+            "sketch" | "extrude" | "sketch-done" => {
                 self.design
                     .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));
                 self.design
@@ -253,8 +253,12 @@ impl KerfwrightApp {
                     .editor
                     .replace_sketch(rect(30.0, 20.0));
                 self.design.sketch.app.zoom_to_fit();
-                if what == "extrude" {
+                if what == "extrude" || what == "sketch-done" {
                     self.design.finish_sketch(project);
+                }
+                if what == "sketch-done" {
+                    // Cancel the Extrude dialog: the sketch stays, un-extruded
+                    self.design.close_dialog();
                 }
             }
             "snap" | "snap-mid" | "snap-cross" | "snap-origin" | "snap-point" => {

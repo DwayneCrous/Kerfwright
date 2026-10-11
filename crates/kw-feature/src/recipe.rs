@@ -9,6 +9,23 @@ use kw_sketch::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+impl EntityKindRec {
+    /// Entities this one is built from.
+    fn deps(&self) -> Vec<u32> {
+        match self {
+            EntityKindRec::Point { .. } => vec![],
+            EntityKindRec::Line { p1, p2 } => vec![*p1, *p2],
+            EntityKindRec::Circle { center, .. } => vec![*center],
+            EntityKindRec::Arc { center, start, end } => vec![*center, *start, *end],
+            EntityKindRec::Ellipse {
+                center, major_end, ..
+            } => vec![*center, *major_end],
+            EntityKindRec::Spline { control, .. } => control.clone(),
+            EntityKindRec::FitSpline { points } => points.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EntityKindRec {
     /// Coordinates are variables `x` and `y`.
@@ -137,16 +154,41 @@ fn is_pos(b: TangentBranch) -> bool {
 impl SketchRecipe {
     /// Record a sketch. Entity labels are the entities' positions in the sketch's slot order.
     pub fn from_sketch(sk: &Sketch) -> SketchRecipe {
-        let ids: Vec<EntityId> = sk.entities.keys().collect();
+        // Dependencies first: a freed slot that is reused can hold a line while its end points sit in
+        // later slots, so the slot order alone is not always a valid build order.
+        let ids: Vec<EntityId> = {
+            fn visit(
+                sk: &Sketch,
+                e: EntityId,
+                seen: &mut std::collections::HashSet<EntityId>,
+                out: &mut Vec<EntityId>,
+            ) {
+                if !seen.insert(e) {
+                    return;
+                }
+                for d in sk.children(e) {
+                    if d != e && sk.entities.contains_key(d) {
+                        visit(sk, d, seen, out);
+                    }
+                }
+                out.push(e);
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::with_capacity(sk.entities.len());
+            for e in sk.entities.keys() {
+                visit(sk, e, &mut seen, &mut out);
+            }
+            out
+        };
         let idx: HashMap<EntityId, u32> = ids
             .iter()
             .enumerate()
             .map(|(i, e)| (*e, i as u32))
             .collect();
         let ix = |e: &EntityId| idx[e];
-        let entities = sk
-            .entities
-            .values()
+        let entities = ids
+            .iter()
+            .map(|id| &sk.entities[*id])
             .map(|e| EntityRec {
                 construction: e.construction,
                 kind: match &e.kind {
@@ -279,16 +321,52 @@ impl SketchRecipe {
         let mut sk = Sketch::new();
         sk.vars.values = self.vars.clone();
         sk.vars.fixed = self.fixed.clone();
-        let mut ids: Vec<EntityId> = Vec::with_capacity(self.entities.len());
-        for (i, e) in self.entities.iter().enumerate() {
-            let get = |ids: &Vec<EntityId>, k: u32| -> Result<EntityId, RecipeError> {
-                if (k as usize) < i {
-                    Ok(ids[k as usize])
-                } else {
-                    Err(RecipeError(format!(
-                        "entity {i} refers to entity {k}, which does not come before it"
-                    )))
+        // Entities are built dependencies first, whatever order they are listed in (files written before
+        // the recorder sorted them can list a line ahead of its end points).
+        let n = self.entities.len();
+        let mut order: Vec<usize> = Vec::with_capacity(n);
+        let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
+        for start in 0..n {
+            let mut stack = vec![(start, false)];
+            while let Some((i, expanded)) = stack.pop() {
+                if expanded {
+                    state[i] = 2;
+                    order.push(i);
+                    continue;
                 }
+                if state[i] == 2 {
+                    continue;
+                }
+                if state[i] == 1 {
+                    return Err(RecipeError(format!("entity {i} depends on itself")));
+                }
+                state[i] = 1;
+                stack.push((i, true));
+                for k in self.entities[i].kind.deps() {
+                    let k = k as usize;
+                    if k >= n {
+                        return Err(RecipeError(format!(
+                            "entity {i} refers to entity {k}, which does not exist"
+                        )));
+                    }
+                    if state[k] == 1 {
+                        return Err(RecipeError(format!("entity {i} depends on itself")));
+                    }
+                    if state[k] == 0 {
+                        stack.push((k, false));
+                    }
+                }
+            }
+        }
+        let mut made: Vec<Option<EntityId>> = vec![None; n];
+        for &i in &order {
+            let e = &self.entities[i];
+            let get = |made: &Vec<Option<EntityId>>, k: u32| -> Result<EntityId, RecipeError> {
+                made.get(k as usize).copied().flatten().ok_or_else(|| {
+                    RecipeError(format!(
+                        "entity {i} refers to entity {k}, which does not come before it"
+                    ))
+                })
             };
             let kind = match &e.kind {
                 EntityKindRec::Point { x, y } => EntityKind::Point(PointVars {
@@ -296,46 +374,50 @@ impl SketchRecipe {
                     y: var(*y)?,
                 }),
                 EntityKindRec::Line { p1, p2 } => EntityKind::Line {
-                    p1: get(&ids, *p1)?,
-                    p2: get(&ids, *p2)?,
+                    p1: get(&made, *p1)?,
+                    p2: get(&made, *p2)?,
                 },
                 EntityKindRec::Circle { center, radius } => EntityKind::Circle {
-                    center: get(&ids, *center)?,
+                    center: get(&made, *center)?,
                     radius: var(*radius)?,
                 },
                 EntityKindRec::Arc { center, start, end } => EntityKind::Arc {
-                    center: get(&ids, *center)?,
-                    start: get(&ids, *start)?,
-                    end: get(&ids, *end)?,
+                    center: get(&made, *center)?,
+                    start: get(&made, *start)?,
+                    end: get(&made, *end)?,
                 },
                 EntityKindRec::Ellipse {
                     center,
                     major_end,
                     minor_radius,
                 } => EntityKind::Ellipse {
-                    center: get(&ids, *center)?,
-                    major_end: get(&ids, *major_end)?,
+                    center: get(&made, *center)?,
+                    major_end: get(&made, *major_end)?,
                     minor_radius: var(*minor_radius)?,
                 },
                 EntityKindRec::Spline { degree, control } => EntityKind::Spline {
                     degree: *degree as usize,
                     control: control
                         .iter()
-                        .map(|k| get(&ids, *k))
+                        .map(|k| get(&made, *k))
                         .collect::<Result<_, _>>()?,
                 },
                 EntityKindRec::FitSpline { points } => EntityKind::FitSpline {
                     points: points
                         .iter()
-                        .map(|k| get(&ids, *k))
+                        .map(|k| get(&made, *k))
                         .collect::<Result<_, _>>()?,
                 },
             };
-            ids.push(sk.entities.insert(Entity {
+            made[i] = Some(sk.entities.insert(Entity {
                 kind,
                 construction: e.construction,
             }));
         }
+        let ids: Vec<EntityId> = made
+            .into_iter()
+            .map(|m| m.expect("every entity built"))
+            .collect();
         let ne = ids.len();
         let ent = |k: u32| -> Result<EntityId, RecipeError> {
             if (k as usize) < ne {

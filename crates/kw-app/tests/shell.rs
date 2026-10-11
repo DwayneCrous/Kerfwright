@@ -1596,3 +1596,76 @@ fn a_profile_drawn_with_snaps_extrudes_to_the_exact_solid() {
     let v = vol(&mut h);
     assert!((v - area * 4.0).abs() < 1e-6, "{v} vs {}", area * 4.0);
 }
+
+#[test]
+fn a_sketch_edited_with_deletions_still_saves_shows_and_reopens() {
+    use kw_sketch::editor::{Input, Tool as SkTool};
+    let (mut h, _d) = design_harness("sketch_after_delete");
+    act(&mut h, Action::StartSketch);
+    act(
+        &mut h,
+        Action::SketchOn(geom::origin_spec(0), geom::origin_frame(0)),
+    );
+    {
+        let ed = &mut h.app.design.sketch.app.editor;
+        // a stray point is placed first, the rectangle is drawn, then the stray point is deleted: its
+        // low slot is free again and the next line (between corners that already exist) takes it
+        ed.set_tool(SkTool::Point);
+        ed.handle(Input::Click((50.0, 50.0)));
+        ed.set_tool(SkTool::Rectangle);
+        ed.handle(Input::Click((0.0, 0.0)));
+        ed.handle(Input::Click((30.0, 20.0)));
+        ed.set_tool(SkTool::Select);
+        ed.handle(Input::Click((50.0, 50.0)));
+        assert_eq!(ed.selection.len(), 1);
+        ed.delete_selection();
+        // a line between two corners that are still there lands in a freed, lower slot
+        ed.set_tool(SkTool::Line);
+        ed.handle(Input::Click((30.0, 0.0)));
+        ed.handle(Input::Click((0.0, 20.0)));
+        ed.handle(Input::Escape);
+        let sk = &ed.sketch;
+        let slot: std::collections::HashMap<_, _> = sk
+            .entities
+            .keys()
+            .enumerate()
+            .map(|(i, k)| (k, i))
+            .collect();
+        let reversed = sk.entities.iter().any(|(id, e)| match e.kind {
+            kw_sketch::EntityKind::Line { p1, p2 } => {
+                slot[&id] < slot[&p1] || slot[&id] < slot[&p2]
+            }
+            _ => false,
+        });
+        let layout: Vec<String> = sk
+            .entities
+            .values()
+            .map(|e| format!("{:?}", e.kind).chars().take(8).collect())
+            .collect();
+        assert!(reversed, "the setup must reproduce slot reuse: {layout:?}");
+    }
+    act(&mut h, Action::FinishSketch);
+    // the sketch is a healthy feature: it evaluates and can be opened again
+    let id = proj(&mut h).document().features[0].id;
+    let ev = proj(&mut h).evaluation();
+    assert!(
+        ev.error(id).is_none(),
+        "the saved sketch must evaluate: {:?}",
+        ev.error(id)
+    );
+    // leaving the Extrude dialog keeps the sketch, and it is drawn in the 3-D view
+    h.app.design.close_dialog();
+    h.frame();
+    let doc = proj(&mut h).document();
+    let ev = proj(&mut h).evaluation();
+    let segs = geom::sketch_segments(&ev, &doc, &h.app.design.hidden_sketches);
+    assert!(segs.len() >= 3, "the finished sketch is visible: {segs:?}");
+    act(&mut h, Action::Edit(id));
+    assert_eq!(
+        h.app.design.mode,
+        Mode::Sketching,
+        "{}",
+        h.app.design.model.error
+    );
+    assert!(h.app.design.sketch.app.editor.sketch.entities.len() >= 5);
+}

@@ -2,6 +2,7 @@
 //! geometry says, and names its faces.
 
 use kw_expr::Param;
+use kw_feature::recipe::{EntityKindRec, EntityRec};
 use kw_feature::*;
 use std::f64::consts::PI;
 
@@ -558,4 +559,71 @@ fn sweep_along_an_arc() {
     let v = vol(&ev, sw);
     let expect = 16.0 * std::f64::consts::FRAC_PI_2 * 20.0;
     assert!((v - expect).abs() / expect < 1e-3, "{v} vs {expect}");
+}
+
+/// A freed slot that is reused puts a line ahead of its end points in slot order; the recipe must still
+/// rebuild, and recipes written in that order by older versions must still load.
+#[test]
+fn a_sketch_with_reused_slots_records_and_rebuilds() {
+    let mut sk = kw_sketch::Sketch::new();
+    // slots 0..: a scratch line (point, point, line), then the real corners
+    let tmp = sk.add_line_xy(100.0, 100.0, 101.0, 100.0);
+    let corners: Vec<_> = [(0.0, 0.0), (30.0, 0.0), (30.0, 20.0), (0.0, 20.0)]
+        .iter()
+        .map(|p| sk.add_point(p.0, p.1))
+        .collect();
+    let (t1, t2) = sk.line_points(tmp).unwrap();
+    sk.remove_entity(t1); // frees the three lowest slots (the line goes with its end point)
+    sk.remove_entity(t2);
+    for i in 0..4 {
+        sk.add_line(corners[i], corners[(i + 1) % 4]); // the lines land in the freed low slots
+    }
+    let first_line = sk
+        .entities
+        .iter()
+        .position(|(_, e)| matches!(e.kind, kw_sketch::EntityKind::Line { .. }))
+        .unwrap();
+    let first_corner = sk
+        .entities
+        .iter()
+        .position(|(_, e)| matches!(e.kind, kw_sketch::EntityKind::Point(_)))
+        .unwrap();
+    assert!(
+        first_line < first_corner,
+        "the setup must reproduce slot reuse"
+    );
+
+    let rec = SketchRecipe::from_sketch(&sk);
+    let (back, ids) = rec.to_sketch().expect("recipe in dependency order");
+    assert_eq!(ids.len(), sk.entities.len());
+    assert_eq!(back.entities.len(), sk.entities.len());
+
+    // a recipe in the old, wrong order (a line listed before its end points) still loads
+    let mut old = rec.clone();
+    old.entities = vec![
+        EntityRec {
+            construction: false,
+            kind: EntityKindRec::Line { p1: 1, p2: 2 },
+        },
+        EntityRec {
+            construction: false,
+            kind: EntityKindRec::Point { x: 0, y: 1 },
+        },
+        EntityRec {
+            construction: false,
+            kind: EntityKindRec::Point { x: 2, y: 3 },
+        },
+    ];
+    old.vars = vec![1.0, 2.0, 4.0, 6.0];
+    old.fixed = vec![false; 4];
+    old.constraints.clear();
+    let (sk2, ids) = old.to_sketch().expect("forward references are resolved");
+    let (a, b) = sk2.line_points(ids[0]).unwrap();
+    assert_eq!(sk2.point(a).unwrap(), (1.0, 2.0));
+    assert_eq!(sk2.point(b).unwrap(), (4.0, 6.0));
+    // a cycle or a dangling reference is still an error
+    old.entities[1].kind = EntityKindRec::Line { p1: 0, p2: 2 };
+    assert!(old.to_sketch().is_err());
+    old.entities[1].kind = EntityKindRec::Line { p1: 9, p2: 2 };
+    assert!(old.to_sketch().is_err());
 }
