@@ -97,6 +97,8 @@ pub struct KerfwrightApp {
     pub exit_after_frames: Option<u64>,
     /// Set when the user confirmed quitting; the window may close.
     pub quit_ok: bool,
+    /// Quitting was confirmed in the unsaved-changes dialog: close the window on the next chance.
+    pub close_now: bool,
     /// Save a screenshot of the window to this file after `screenshot_after` frames, then quit.
     pub screenshot: Option<(PathBuf, u64)>,
     themed: bool,
@@ -140,6 +142,7 @@ impl KerfwrightApp {
             frames: 0,
             exit_after_frames: None,
             quit_ok: false,
+            close_now: false,
             screenshot: None,
         }
     }
@@ -732,7 +735,10 @@ impl KerfwrightApp {
                 let _ = self.open_path(&p);
             }
             Pending::OpenDemo => self.open_demo(),
-            Pending::Quit => self.quit_ok = true,
+            Pending::Quit => {
+                self.quit_ok = true;
+                self.close_now = true;
+            }
         }
     }
 
@@ -954,6 +960,11 @@ impl KerfwrightApp {
             Screen::Project { .. } => self.project_ui(ui, rs),
         }
         self.pending_ui(ui.ctx());
+        if self.close_now {
+            // the answer to “save before quitting?” was given: close, no second click on the button
+            self.close_now = false;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.screenshot_step(ui.ctx());
         if let Some(n) = self.exit_after_frames {
             if self.frames >= n {

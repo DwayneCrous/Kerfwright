@@ -186,6 +186,10 @@ fn unsaved_changes_are_asked_about_before_closing_opening_or_quitting() {
     assert_eq!(h.app.pending, Some(Pending::Quit));
     h.app.resolve_pending(true);
     assert!(h.app.quit_ok);
+    // the window is told to close by itself (no second click on the close button)
+    assert!(h.app.close_now);
+    h.frame();
+    assert!(!h.app.close_now, "the close command was sent");
     let reopened = kw_app::project::Project::open(&dir.join("Doc.kwf")).unwrap();
     assert_eq!(reopened.document().len(), 1);
 }
