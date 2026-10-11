@@ -73,6 +73,8 @@ fn constraint_label(k: &ConstraintKind) -> &'static str {
 }
 
 pub struct SketcherApp {
+    /// Inside another application: no "New" / demo entries (the host owns the document).
+    pub embedded: bool,
     pub editor: Editor,
     pub view: View,
     /// Quit after this many frames (smoke test).
@@ -93,6 +95,7 @@ pub struct SketcherApp {
 impl Default for SketcherApp {
     fn default() -> Self {
         Self {
+            embedded: false,
             editor: Editor::default(),
             view: View::default(),
             exit_after_frames: None,
@@ -129,6 +132,11 @@ impl SketcherApp {
         let c = sk.add_point(20.0, 12.0);
         sk.add_circle(c, 5.0);
         self.editor.replace_sketch(sk);
+        self.first_frame = true;
+    }
+
+    /// Fit the sketch to the canvas on the next frame.
+    pub fn zoom_to_fit(&mut self) {
         self.first_frame = true;
     }
 
@@ -193,8 +201,8 @@ impl SketcherApp {
 
     fn menu(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("New").clicked() {
+            ui.menu_button(if self.embedded { "DXF" } else { "File" }, |ui| {
+                if !self.embedded && ui.button("New").clicked() {
                     self.editor.replace_sketch(Sketch::new());
                     ui.close();
                 }
@@ -202,7 +210,7 @@ impl SketcherApp {
                     self.file_open = true;
                     ui.close();
                 }
-                if ui.button("Load demo").clicked() {
+                if !self.embedded && ui.button("Load demo").clicked() {
                     self.load_demo();
                     ui.close();
                 }

@@ -643,7 +643,7 @@ impl Frame {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let (Some(vb), Some(ib)) = (&self.vertices, &self.opaque_idx) {
+            if let (Some(vb), Some(ib), true) = (&self.vertices, &self.opaque_idx, self.n_opaque > 0) {
                 pass.set_pipeline(&self.opaque);
                 pass.set_bind_group(0, &self.bg0, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
@@ -685,7 +685,7 @@ impl Frame {
                 multiview_mask: None,
             });
             if o.oit {
-                if let (Some(vb), Some(ib)) = (&self.vertices, &self.trans_idx) {
+                if let (Some(vb), Some(ib), true) = (&self.vertices, &self.trans_idx, self.n_trans > 0) {
                     pass.set_pipeline(&self.oit);
                     pass.set_bind_group(0, &self.bg0, &[]);
                     pass.set_vertex_buffer(0, vb.slice(..));
@@ -765,7 +765,7 @@ impl Frame {
                 multiview_mask: None,
             });
             if o.edges {
-                if let Some(sb) = &self.segments {
+                if let (Some(sb), true) = (&self.segments, self.n_seg > 0) {
                     pass.set_pipeline(&self.edge);
                     pass.set_bind_group(0, &self.bg0, &[]);
                     pass.set_vertex_buffer(0, sb.slice(..));

@@ -26,6 +26,8 @@ pub struct RenderSettings {
     pub ambient: f32,
     pub line_px: f32,
     pub show_edges: bool,
+    /// Draw the shaded faces (off = wireframe of the edges only).
+    pub show_mesh: bool,
     pub background: [f64; 3],
 }
 
@@ -38,6 +40,7 @@ impl Default for RenderSettings {
             ambient: 1.0,
             line_px: 1.6,
             show_edges: true,
+            show_mesh: true,
             background: [0.10, 0.11, 0.13],
         }
     }
@@ -362,14 +365,16 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let (Some(vb), Some(ib)) = (&self.vertex_buf, &self.index_buf) {
+            if let (Some(vb), Some(ib), true) =
+                (&self.vertex_buf, &self.index_buf, self.settings.show_mesh && self.index_count > 0)
+            {
                 pass.set_pipeline(&self.mesh_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
-            if self.settings.show_edges {
+            if self.settings.show_edges && self.segment_count > 0 {
                 if let Some(sb) = &self.segment_buf {
                     pass.set_pipeline(&self.edge_pipeline);
                     pass.set_bind_group(0, &self.bind_group, &[]);

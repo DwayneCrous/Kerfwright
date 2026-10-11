@@ -7,7 +7,35 @@ publish.workspace = true
 [lib]
 bench = false
 
+[[bin]]
+name = "kerfwright"
+path = "src/main.rs"
+
 [dependencies]
 rayon.workspace = true
 tokio.workspace = true
 kw-feature.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+rfd.workspace = true
+kw-expr.workspace = true
+kw-store.workspace = true
+kw-cam.workspace = true
+kw-ecad.workspace = true
+kw-fem.workspace = true
+kw-mesh3d.workspace = true
+kw-viewer.workspace = true
+kw-render.workspace = true
+kw-tess.workspace = true
+kw-brep.workspace = true
+kw-math.workspace = true
+nalgebra.workspace = true
+wgpu = "30"
+png = "0.18"
+kw-sketch.workspace = true
+kw-sketcher = { path = "../kw-sketcher" }
+
+[dev-dependencies]
+kw-fabcheck.workspace = true
+kw-gsim.workspace = true
