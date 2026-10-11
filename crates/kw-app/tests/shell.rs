@@ -4139,3 +4139,71 @@ fn a_rollback_bar_at_the_end_of_the_timeline_does_not_block_new_features() {
     d.rollback = Some(n);
     assert!(!d.rolled_back());
 }
+
+#[test]
+fn the_view_cube_looks_from_faces_edges_and_corners() {
+    use kw_app::chrome::viewcube::direction_view;
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    // faces agree with the named views
+    assert_eq!(direction_view([0, -1, 0]), (-FRAC_PI_2, 0.0));
+    let (y, p) = direction_view([1, 0, 0]);
+    assert!(y.abs() < 1e-12 && p.abs() < 1e-12);
+    assert!((direction_view([-1, 0, 0]).0 - PI).abs() < 1e-12);
+    assert!(direction_view([0, 0, 1]).1 > 1.5 && direction_view([0, 0, -1]).1 < -1.5);
+    // an edge between right and top: 45 degrees up from the right
+    let (y, p) = direction_view([1, 0, 1]);
+    assert!(y.abs() < 1e-12 && (p - FRAC_PI_4).abs() < 1e-12);
+    // a corner (right, back, top): 45 degrees round, asin(1/sqrt 3) up
+    let (y, p) = direction_view([1, 1, 1]);
+    assert!((y - FRAC_PI_4).abs() < 1e-12 && (p - (1.0f64 / 3.0f64.sqrt()).asin()).abs() < 1e-12);
+    // the camera at that (yaw, pitch) sits on the side the direction names
+    let mut cam = kw_viewer::OrbitCamera::new(10.0, 1.5);
+    cam.yaw = y;
+    cam.pitch = p;
+    let e = cam.eye() - cam.target;
+    assert!(
+        e.x > 0.0 && e.y > 0.0 && e.z > 0.0 && (e.x - e.y).abs() < 1e-9 && (e.y - e.z).abs() < 1e-9
+    );
+    // it draws in the design view, and previous view returns to where the camera was
+    let (mut h, _d) = design_harness("cube");
+    sketch_block(&mut h, 30.0, 20.0, "5 mm");
+    commit(&mut h);
+    h.frame();
+    let before = (
+        h.app.design.viewport.camera.yaw,
+        h.app.design.viewport.camera.pitch,
+    );
+    h.app.design.viewport.look(0.3, 0.2, 0.0);
+    h.app.design.viewport.previous_view(0.0);
+    for i in 0..60 {
+        h.t += 0.05;
+        let _ = i;
+        h.frame();
+    }
+    let after = (
+        h.app.design.viewport.camera.yaw,
+        h.app.design.viewport.camera.pitch,
+    );
+    assert!(
+        (after.0 - before.0).abs() < 1e-6 && (after.1 - before.1).abs() < 1e-6,
+        "{before:?} {after:?}"
+    );
+}
+
+#[test]
+fn construction_lines_of_a_sketch_are_not_drawn_in_the_3d_view() {
+    use kw_sketch::editor::Tool as SkTool;
+    let (mut h, _d) = design_harness("construction_hidden");
+    start_sketch_plane(&mut h, 0);
+    let ed = &mut h.app.design.sketch.app.editor;
+    ed.set_tool(SkTool::CenterRectangle);
+    ed.handle(kw_sketch::editor::Input::Click((0.0, 0.0)));
+    ed.handle(kw_sketch::editor::Input::Click((10.0, 5.0)));
+    act(&mut h, Action::FinishSketch);
+    h.app.design.close_dialog();
+    let ev = proj(&mut h).evaluation();
+    let doc = proj(&mut h).document();
+    let segs = geom::sketch_segments(&ev, &doc, &Default::default());
+    // the four sides only (no diagonals)
+    assert_eq!(segs.len(), 4, "{}", segs.len());
+}

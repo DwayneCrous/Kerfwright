@@ -132,7 +132,8 @@ pub fn sketch_segments(
             ]
         };
         for (id, ent) in &sp.sketch.entities {
-            if matches!(ent.kind, kw_sketch::EntityKind::Point(_)) {
+            // points and construction geometry (the diagonals of a centre rectangle) are not drawn in 3-D
+            if ent.construction || matches!(ent.kind, kw_sketch::EntityKind::Point(_)) {
                 continue;
             }
             if let Ok(poly) = kw_sketch::geom::polyline(&sp.sketch, id, 0.05) {

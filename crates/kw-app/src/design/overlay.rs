@@ -328,10 +328,28 @@ impl DesignWorkspace {
         self.draw_regions(ui, &painter, rect, o3);
         // ---- view cube
         let cube =
-            egui::Rect::from_min_size(rect.right_top() + vec2(-100.0, 12.0), vec2(88.0, 88.0));
-        if let Some((yaw, pitch)) = viewcube::show(ui, cube, &self.viewport.camera) {
-            let now = ui.ctx().input(|i| i.time);
+            egui::Rect::from_min_size(rect.right_top() + vec2(-146.0, 8.0), vec2(136.0, 148.0));
+        let cube_out = viewcube::show(ui, cube, &self.viewport.camera);
+        let now = ui.ctx().input(|i| i.time);
+        if let Some((yaw, pitch)) = cube_out.look {
             self.viewport.look(yaw, pitch, now);
+        }
+        match cube_out.menu {
+            Some(viewcube::CubeMenu::Isometric) => {
+                self.viewport.look(-0.8, 0.45, now);
+                self.viewport.fit();
+            }
+            Some(viewcube::CubeMenu::Fit) => self.viewport.fit(),
+            Some(viewcube::CubeMenu::Previous) => self.viewport.previous_view(now),
+            Some(viewcube::CubeMenu::Shaded) => self.shaded = !self.shaded,
+            Some(viewcube::CubeMenu::Edges) => self.viewport.show_edges = !self.viewport.show_edges,
+            Some(viewcube::CubeMenu::Section) => {
+                self.section = match self.section {
+                    Some(_) => None,
+                    None => Some(super::section::SectionState::new()),
+                };
+            }
+            None => {}
         }
         // ---- navigation bar
         let nav = egui::Rect::from_center_size(

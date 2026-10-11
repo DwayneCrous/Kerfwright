@@ -341,6 +341,7 @@ pub struct Viewport3d {
     key: Option<u128>,
     fitted: bool,
     anim: Option<Anim>,
+    prev_view: Option<(f64, f64)>,
     hover: Option<Pick>,
     last_pointer: Option<egui::Pos2>,
     last_edge_px: u32,
@@ -363,6 +364,7 @@ impl Default for Viewport3d {
             key: None,
             fitted: false,
             anim: None,
+            prev_view: None,
             hover: None,
             last_pointer: None,
             last_edge_px: 0,
@@ -388,11 +390,19 @@ impl Viewport3d {
 
     /// Turn the camera to look from direction (yaw, pitch), animated.
     pub fn look(&mut self, yaw: f64, pitch: f64, now: f64) {
+        self.prev_view = Some((self.camera.yaw, self.camera.pitch));
         self.anim = Some(Anim {
             from: (self.camera.yaw, self.camera.pitch),
             to: (yaw, pitch),
             start: now,
         });
+    }
+
+    /// Go back to where the camera looked from before the last view change (and again to come back).
+    pub fn previous_view(&mut self, now: f64) {
+        if let Some((yaw, pitch)) = self.prev_view {
+            self.look(yaw, pitch, now);
+        }
     }
 
     /// Frame the whole model again.
