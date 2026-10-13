@@ -10,7 +10,7 @@ use crate::project::Project;
 use crate::viewport::ViewOut;
 use eframe::egui::{self, pos2, vec2, Color32, Shape, Stroke, Ui};
 use kw_expr::{Dim, Param};
-use kw_feature::{Evaluation, FeatureSpec, Product};
+use kw_feature::{Evaluation, FeatureId, FeatureSpec, Product};
 use std::sync::Arc;
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -156,7 +156,14 @@ impl DesignWorkspace {
     }
 
     /// Construction planes (quads), axes (long lines) and points (crosses) of the document.
-    fn draw_datums(&self, painter: &egui::Painter, ev: &Evaluation, project: &Project, size: f64) {
+    fn draw_datums(
+        &self,
+        painter: &egui::Painter,
+        ev: &Evaluation,
+        project: &Project,
+        size: f64,
+        o3: [f64; 3],
+    ) {
         use kw_feature::Product;
         let doc = project.document();
         for f in &doc.features {
@@ -172,7 +179,8 @@ impl DesignWorkspace {
             let Some(Product::Datum(fr)) = ev.output(f.id).map(|o| &o.product) else {
                 continue;
             };
-            let chosen = self.model.selected == Some(f.id);
+            let chosen = self.model.selected == Some(f.id)
+                || self.hover_datum.is_some_and(|(id, _)| id == f.id);
             let colour = if chosen {
                 ACCENT
             } else {
@@ -180,7 +188,8 @@ impl DesignWorkspace {
             };
             let at = |a: f64, b: f64, c: f64| {
                 let w = fr.origin + fr.x * a + fr.y * b + fr.z * c;
-                self.viewport.project([w.x, w.y, w.z])
+                self.viewport
+                    .project([w.x + o3[0], w.y + o3[1], w.z + o3[2]])
             };
             match kind {
                 0 => {
@@ -257,6 +266,7 @@ impl DesignWorkspace {
         let o3 = [o.x, o.y, o.z];
         // ---- which origin plane is under the pointer (only while picking)
         self.hover_plane = None;
+        self.hover_datum = None;
         if picking {
             if let Some(pos) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) {
                 let (ro, rd) = self.viewport.ray(pos);
@@ -285,11 +295,64 @@ impl DesignWorkspace {
                     }
                 }
                 self.hover_plane = best.map(|b| b.1);
+                // construction planes: the nearest hit wins over an origin plane behind it
+                let mut datum: Option<(f64, FeatureId, geom::PlaneFrame)> = None;
+                for f in &project.document().features {
+                    if !matches!(f.spec, FeatureSpec::DatumPlane(_))
+                        || f.suppressed
+                        || self.hidden_datums.contains(&f.id)
+                    {
+                        continue;
+                    }
+                    let Some(kw_feature::Product::Datum(fr)) = ev.output(f.id).map(|o| &o.product)
+                    else {
+                        continue;
+                    };
+                    let n = [fr.z.x, fr.z.y, fr.z.z];
+                    let denom = dot(rd, n);
+                    if denom.abs() < 1e-9 {
+                        continue;
+                    }
+                    let c = [
+                        fr.origin.x + o3[0],
+                        fr.origin.y + o3[1],
+                        fr.origin.z + o3[2],
+                    ];
+                    let t = dot([c[0] - ro[0], c[1] - ro[1], c[2] - ro[2]], n) / denom;
+                    if t <= 0.0 {
+                        continue;
+                    }
+                    let hit = [
+                        ro[0] + t * rd[0] - c[0],
+                        ro[1] + t * rd[1] - c[1],
+                        ro[2] + t * rd[2] - c[2],
+                    ];
+                    let (x, y) = ([fr.x.x, fr.x.y, fr.x.z], [fr.y.x, fr.y.y, fr.y.z]);
+                    if dot(hit, x).abs() <= s
+                        && dot(hit, y).abs() <= s
+                        && datum.is_none_or(|d| t < d.0)
+                    {
+                        let frame = geom::PlaneFrame {
+                            origin: [fr.origin.x, fr.origin.y, fr.origin.z],
+                            x,
+                            y,
+                            n,
+                        };
+                        datum = Some((t, f.id, frame));
+                    }
+                }
+                if let Some((t, id, frame)) = datum {
+                    if best.is_none_or(|b| t < b.0) {
+                        self.hover_plane = None;
+                        self.hover_datum = Some((id, frame));
+                    }
+                }
             }
         }
         // a hovered planar face takes precedence over a plane behind it
         if picking && matches!(out.hover, Some(crate::viewport::Pick::Face(_))) {
             self.hover_plane = None;
+            self.hover_datum = None;
         }
         // ---- the planes
         for (k, (name, idx)) in geom::ORIGIN_PLANES.iter().enumerate() {
@@ -322,7 +385,7 @@ impl DesignWorkspace {
             }
         }
         // ---- construction planes, axes and points
-        self.draw_datums(&painter, ev, project, s);
+        self.draw_datums(&painter, ev, project, s, o3);
         // ---- joint origins while the assembly is shown
         if self.asm.view {
             self.draw_joint_markers(&painter, project, o3, radius * 0.18);

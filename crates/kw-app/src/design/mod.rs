@@ -147,6 +147,8 @@ pub struct DesignWorkspace {
     /// Origin planes shown in the 3-D view (XY, XZ, YZ).
     pub plane_visible: [bool; 3],
     pub hover_plane: Option<usize>,
+    /// The construction plane under the pointer while picking a sketch plane, with its frame.
+    pub hover_datum: Option<(FeatureId, geom::PlaneFrame)>,
     pub preview: Option<Preview>,
     pub status: String,
     pub hole_plane: Option<PlaneSpec>,
@@ -201,6 +203,7 @@ impl Default for DesignWorkspace {
             hidden_sketches: HashSet::new(),
             plane_visible: [false; 3],
             hover_plane: None,
+            hover_datum: None,
             preview: None,
             status: String::new(),
             hole_plane: None,
@@ -1144,7 +1147,10 @@ impl DesignWorkspace {
                             _ => {}
                         }
                     }
-                    if let Some(i) = self.hover_plane {
+                    if let Some((id, frame)) = self.hover_datum {
+                        self.actions
+                            .push(Action::SketchOn(PlaneSpec::Datum(id), frame));
+                    } else if let Some(i) = self.hover_plane {
                         self.actions.push(Action::SketchOn(
                             geom::origin_spec(geom::ORIGIN_PLANES[i].1),
                             geom::origin_frame(geom::ORIGIN_PLANES[i].1),
