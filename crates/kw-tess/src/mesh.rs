@@ -8,6 +8,8 @@ use std::collections::HashMap;
 pub struct Mesh {
     pub positions: Vec<Point3<f64>>,
     pub normals: Vec<Vector3<f64>>,
+    /// Surface parameters `(u, v)` of each vertex on the surface of its face.
+    pub uv: Vec<(f64, f64)>,
     /// Topological vertex id: equal ids ⇔ identical position by construction.
     pub weld: Vec<u32>,
     /// Triangle list (3 indices per triangle), counter-clockwise seen from outside.
@@ -57,6 +59,7 @@ impl Mesh {
         let base = self.positions.len() as u32;
         self.positions.extend(fm.positions);
         self.normals.extend(fm.normals);
+        self.uv.extend(fm.uv);
         for w in fm.weld {
             if w == crate::face::LOCAL {
                 self.weld.push(self.next_weld);

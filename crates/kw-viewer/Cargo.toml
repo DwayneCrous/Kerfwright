@@ -20,6 +20,7 @@ kw-tess.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+kw-analysis.workspace = true
 
 [lib]
 name = "kw_viewer"

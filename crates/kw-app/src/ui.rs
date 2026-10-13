@@ -578,6 +578,38 @@ impl KerfwrightApp {
                     }
                 }
             }
+            "zebra" | "curvature" | "draft" => {
+                // round the top edges so there is something curved to look at
+                let ev = project.evaluation();
+                let picks: Vec<crate::viewport::Pick> = ev
+                    .final_solid()
+                    .and_then(|(_, o)| o.brep().map(|b| (b.clone(), o.body())))
+                    .map(|(b, _)| {
+                        let zmax = b
+                            .vertices
+                            .values()
+                            .map(|v| v.point.z)
+                            .fold(f64::MIN, f64::max);
+                        b.edges
+                            .iter()
+                            .filter(|(_, ed)| {
+                                (b.vertices[ed.start].point.z - zmax).abs() < 1e-9
+                                    && (b.vertices[ed.end].point.z - zmax).abs() < 1e-9
+                            })
+                            .map(|(e, _)| crate::viewport::Pick::Edge(e))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.design.model.picks = picks;
+                let _ = self.design.model.add_fillet(project, "3 mm");
+                self.design.model.picks.clear();
+                use crate::design::analysis::{AKind, AnalysisState};
+                self.design.analysis = Some(AnalysisState::new(match what {
+                    "zebra" => AKind::Zebra,
+                    "curvature" => AKind::Mean,
+                    _ => AKind::Draft,
+                }));
+            }
             "construct" => {
                 use crate::design::tools::{PlaneInput, PointInput};
                 let pt = |x: &str, y: &str, z: &str| PointInput {

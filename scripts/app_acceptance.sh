@@ -14,10 +14,10 @@ step() { printf '\n=== %s ===\n' "$*"; }
 
 step "fmt + clippy (app crates)"
 cargo fmt --all -- --check
-cargo clippy -p kw-app -p kw-sketcher -p kw-viewer -p kw-store -p kw-drawing -p kw-dxf --all-targets -- -D warnings
+cargo clippy -p kw-app -p kw-sketcher -p kw-viewer -p kw-store -p kw-drawing -p kw-dxf -p kw-analysis --all-targets -- -D warnings
 
 step "tests: shell, projects, workspaces, viewport (release, uncapped for the GPU ones)"
-cargo test --release -p kw-app -p kw-sketcher -p kw-viewer -p kw-store -p kw-drawing -p kw-dxf 2>&1 | tee "$OUT/tests.log"
+cargo test --release -p kw-app -p kw-sketcher -p kw-viewer -p kw-store -p kw-drawing -p kw-dxf -p kw-analysis 2>&1 | tee "$OUT/tests.log"
 
 step "screenshots of every screen"
 cargo build --release -p kw-app
@@ -50,6 +50,9 @@ shot design_sheet_metal --design-demo sheet
 shot design_form --design-demo form
 shot design_tools_tab --design-demo tools
 shot drawing_sheet --drawing-demo
+shot analysis_zebra --design-demo zebra
+shot analysis_curvature --design-demo curvature
+shot analysis_draft --design-demo draft
 shot design_sketch_text --design-demo text
 shot design_chord_sketch --design-demo chord-sketch
 shot design_chord_extrude --design-demo chord

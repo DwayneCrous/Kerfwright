@@ -302,13 +302,49 @@ impl DesignWorkspace {
         )
         .active(self.section.is_some())
         .enabled_if(cx.has_solid, need_solid);
+        let zebra = it(
+            "zebra",
+            Icon::Zebra,
+            "Zebra Analysis",
+            "Reflected stripes: they flow across tangent joins and break at creases",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind == super::analysis::AKind::Zebra),
+        )
+        .enabled_if(cx.has_solid, need_solid);
+        let curvature = it(
+            "curvature",
+            Icon::Curvature,
+            "Curvature Analysis",
+            "Colour the surfaces by Gaussian, mean or principal curvature",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind.is_curvature()),
+        )
+        .enabled_if(cx.has_solid, need_solid);
+        let draft = it(
+            "draft_analysis",
+            Icon::DraftAnalysis,
+            "Draft Analysis",
+            "Faces with too little draft for a pull direction",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind == super::analysis::AKind::Draft),
+        )
+        .enabled_if(cx.has_solid, need_solid);
         if let Some(id) = rb::menu_group(
             ui,
             "INSPECT",
             &[measure.clone().into(), section.clone().into()],
             &[Section::new(
                 "ANALYSIS",
-                vec![measure, interference, section],
+                vec![measure, interference, section, zebra, curvature, draft],
             )],
         ) {
             picked.push(id);
@@ -730,6 +766,42 @@ impl DesignWorkspace {
         )
         .active(self.section.is_some())
         .enabled_if(cx.has_solid, need_solid);
+        let zebra = it(
+            "zebra",
+            Icon::Zebra,
+            "Zebra Analysis",
+            "Reflected stripes: they flow across tangent joins and break at creases",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind == super::analysis::AKind::Zebra),
+        )
+        .enabled_if(cx.has_solid, need_solid);
+        let curvature = it(
+            "curvature",
+            Icon::Curvature,
+            "Curvature Analysis",
+            "Colour the surfaces by Gaussian, mean or principal curvature",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind.is_curvature()),
+        )
+        .enabled_if(cx.has_solid, need_solid);
+        let draft = it(
+            "draft_analysis",
+            Icon::DraftAnalysis,
+            "Draft Analysis",
+            "Faces with too little draft for a pull direction",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind == super::analysis::AKind::Draft),
+        )
+        .enabled_if(cx.has_solid, need_solid);
         if let Some(id) = rb::menu_group(
             ui,
             "INSPECT",
@@ -740,7 +812,7 @@ impl DesignWorkspace {
             ],
             &[Section::new(
                 "ANALYSIS",
-                vec![measure, interference, section],
+                vec![measure, interference, section, zebra, curvature, draft],
             )],
         ) {
             picked.push(id);
@@ -1248,6 +1320,18 @@ impl DesignWorkspace {
             }
             "asm_bom" => {
                 self.actions.push(Action::Asm(AsmAction::OpenBom));
+                return;
+            }
+            "zebra" => {
+                self.toggle_analysis(super::analysis::AKind::Zebra);
+                return;
+            }
+            "curvature" => {
+                self.toggle_analysis(super::analysis::AKind::Mean);
+                return;
+            }
+            "draft_analysis" => {
+                self.toggle_analysis(super::analysis::AKind::Draft);
                 return;
             }
             "section" => {

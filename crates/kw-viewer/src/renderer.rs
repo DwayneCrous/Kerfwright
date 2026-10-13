@@ -22,6 +22,52 @@ struct Globals {
     /// Section plane: unit normal and offset (points with `dot(n, p) > d` are cut away); `w` of `ids`
     /// is 1 when it is on.
     clip: [f32; 4],
+    /// Analysis overlay: mode, range minimum, range maximum (or the limit), stripe duty.
+    analysis: [f32; 4],
+    /// Zebra axis or draft pull direction (unit), zebra stripe frequency in `w`.
+    adir: [f32; 4],
+}
+
+/// What the analysis overlay shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnalysisMode {
+    Off,
+    /// Reflection stripes along `axis`.
+    Zebra,
+    /// A scalar per vertex (see [`Renderer::upload_scalars`]) on the sequential ramp from `min` to `max`.
+    Scalar,
+    /// A signed scalar per vertex on the diverging ramp, `-limit..limit` (limit in `max`).
+    Signed,
+    /// Draft angle of the face normal against the pull direction `axis`; `max` is the draft limit
+    /// in degrees (faces with less are red).
+    Draft,
+}
+
+/// The analysis overlay: colours the faces by a diagnostic instead of lighting them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Analysis {
+    pub mode: AnalysisMode,
+    pub min: f32,
+    pub max: f32,
+    /// Zebra stripe axis or draft pull direction.
+    pub axis: [f32; 3],
+    /// Stripe pairs across the unit range of the reflection direction.
+    pub zebra_freq: f32,
+    /// Fraction of a stripe period that is white.
+    pub duty: f32,
+}
+
+impl Default for Analysis {
+    fn default() -> Self {
+        Analysis {
+            mode: AnalysisMode::Off,
+            min: 0.0,
+            max: 1.0,
+            axis: [1.0, 0.0, 0.0],
+            zebra_freq: 8.0,
+            duty: 0.5,
+        }
+    }
 }
 
 /// How many extra selected ids the shaders can highlight.
@@ -41,6 +87,8 @@ pub struct RenderSettings {
     /// A section plane: `(unit normal, offset)`; everything with `dot(normal, p) > offset` is cut away and
     /// the inside of the cut is shown as a flat cap.
     pub section: Option<([f64; 3], f64)>,
+    /// Colour the faces by a diagnostic (zebra, curvature, draft).
+    pub analysis: Analysis,
 }
 
 impl Default for RenderSettings {
@@ -55,6 +103,7 @@ impl Default for RenderSettings {
             show_mesh: true,
             background: [0.10, 0.11, 0.13],
             section: None,
+            analysis: Analysis::default(),
         }
     }
 }
@@ -66,6 +115,8 @@ pub struct Renderer {
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertex_buf: Option<wgpu::Buffer>,
+    /// One scalar per vertex for the analysis overlay (zeros until set).
+    scalar_buf: Option<wgpu::Buffer>,
     index_buf: Option<wgpu::Buffer>,
     segment_buf: Option<wgpu::Buffer>,
     index_count: u32,
@@ -163,13 +214,20 @@ impl Renderer {
                 module: &mesh_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Unorm8x4
-                    ],
-                })],
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Unorm8x4
+                        ],
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 4,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![4 => Float32],
+                    }),
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &mesh_shader,
@@ -222,6 +280,7 @@ impl Renderer {
             globals,
             bind_group,
             vertex_buf: None,
+            scalar_buf: None,
             index_buf: None,
             segment_buf: None,
             index_count: 0,
@@ -297,6 +356,11 @@ impl Renderer {
             bytemuck::cast_slice(&scene.vertices),
             wgpu::BufferUsages::VERTEX,
         ));
+        self.scalar_buf = Some(mk(
+            "scalars",
+            bytemuck::cast_slice(&vec![0.0f32; scene.vertices.len()]),
+            wgpu::BufferUsages::VERTEX,
+        ));
         self.index_buf = Some(mk(
             "indices",
             bytemuck::cast_slice(&scene.indices),
@@ -313,6 +377,20 @@ impl Renderer {
         };
         self.index_count = scene.indices.len() as u32;
         self.segment_count = scene.segments.len() as u32;
+    }
+
+    /// One scalar per vertex of the uploaded scene, for the `Scalar` and `Signed` analysis modes
+    /// (`NaN` marks a vertex with no value). Shorter lists are padded with zeros.
+    pub fn upload_scalars(&mut self, device: &wgpu::Device, scalars: &[f32], vertex_count: usize) {
+        let mut data = scalars.to_vec();
+        data.resize(vertex_count, 0.0);
+        self.scalar_buf = Some(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scalars"),
+                contents: bytemuck::cast_slice(&data),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+        );
     }
 
     fn write_globals(&self, queue: &wgpu::Queue, cam: &OrbitCamera) {
@@ -343,6 +421,23 @@ impl Renderer {
             clip: s.section.map_or([0.0, 0.0, 1.0, 0.0], |(n, d)| {
                 [n[0] as f32, n[1] as f32, n[2] as f32, d as f32]
             }),
+            analysis: [
+                match s.analysis.mode {
+                    AnalysisMode::Off => 0.0,
+                    AnalysisMode::Zebra => 1.0,
+                    AnalysisMode::Scalar => 2.0,
+                    AnalysisMode::Signed => 3.0,
+                    AnalysisMode::Draft => 4.0,
+                },
+                s.analysis.min,
+                s.analysis.max,
+                s.analysis.duty,
+            ],
+            adir: {
+                let a = s.analysis.axis;
+                let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-12);
+                [a[0] / l, a[1] / l, a[2] / l, s.analysis.zebra_freq]
+            },
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
     }
@@ -408,6 +503,9 @@ impl Renderer {
                 pass.set_pipeline(&self.mesh_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
+                if let Some(sb) = &self.scalar_buf {
+                    pass.set_vertex_buffer(1, sb.slice(..));
+                }
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }

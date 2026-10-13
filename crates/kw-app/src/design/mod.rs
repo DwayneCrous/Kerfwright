@@ -3,6 +3,7 @@
 //! a plane or a planar face, the view turns into the flat sketch canvas, *Finish Sketch* drops straight into
 //! the Extrude dialog with a live preview.
 
+pub mod analysis;
 pub mod asm_drag;
 pub mod asm_inspect;
 pub mod asm_joint;
@@ -168,6 +169,8 @@ pub struct DesignWorkspace {
     pub asm: assembly::AssemblyUi,
     /// The section plane (Section Analysis), when it is on.
     pub section: Option<section::SectionState>,
+    /// The analysis overlay (zebra, curvature, draft), if one is showing.
+    pub analysis: Option<analysis::AnalysisState>,
     /// Index into `measure::MATERIALS`.
     pub material: usize,
     /// The bodies drawn in the view (refreshed every frame), and the roots of the bodies hidden from it.
@@ -216,6 +219,7 @@ impl Default for DesignWorkspace {
             ribbon_tab: 0,
             asm: Default::default(),
             section: None,
+            analysis: None,
             material: 2,
             bodies: None,
             hidden_bodies: HashSet::new(),
@@ -939,6 +943,7 @@ impl DesignWorkspace {
         let ev = project.evaluation();
         let doc = project.document();
         self.viewport.section = self.section_plane(project);
+        self.viewport.analysis = self.analysis_view();
         self.update_preview(project);
         // While a tool is collecting picks (edges for Fillet / Chamfer, faces for Shell / Hole) the view must
         // show the body the picks refer to: the preview solid has other edges and faces, so picking on it
@@ -982,8 +987,20 @@ impl DesignWorkspace {
             }
         }
         let segs = geom::sketch_segments(&ev, &doc, &hidden_now);
-        let key =
-            geom_key ^ base_key ^ ((segs.len() as u128) << 96) ^ ((hidden_now.len() as u128) << 90);
+        // a curvature map is baked into the scene: another kind needs another build
+        let curvature = self.analysis.as_ref().and_then(|a| a.kind.curvature());
+        let curv_code: u128 = match curvature {
+            None => 0,
+            Some(kw_analysis::CurvKind::Gaussian) => 1,
+            Some(kw_analysis::CurvKind::Mean) => 2,
+            Some(kw_analysis::CurvKind::Max) => 3,
+            Some(kw_analysis::CurvKind::Min) => 4,
+        };
+        let key = geom_key
+            ^ base_key
+            ^ ((segs.len() as u128) << 96)
+            ^ ((hidden_now.len() as u128) << 90)
+            ^ (curv_code << 80);
         let highlight = self.model.picks.last().copied();
         // all picked faces / edges show as selected, and edges are easy to hit while a tool wants them
         self.viewport.extra_selected = self.model.picks.clone();
@@ -1011,8 +1028,8 @@ impl DesignWorkspace {
             key,
             move || {
                 let mut m = match (&asm_view, &b) {
-                    (Some((_, rep, cols)), _) => ModelScene::build_coloured(rep, cols),
-                    (None, Some(b)) => ModelScene::build_coloured(&b.brep, &b.colours()),
+                    (Some((_, rep, cols)), _) => ModelScene::build_analysed(rep, cols, curvature),
+                    (None, Some(b)) => ModelScene::build_analysed(&b.brep, &b.colours(), curvature),
                     (None, None) => ModelScene::empty(),
                 };
                 m.add_segments(&segs);

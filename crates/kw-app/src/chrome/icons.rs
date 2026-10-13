@@ -68,6 +68,10 @@ pub enum Icon {
     Ground,
     Bom,
     AssemblyView,
+    // ----- surface analysis
+    Zebra,
+    Curvature,
+    DraftAnalysis,
     // ----- drawings
     Drawing,
     BaseView,

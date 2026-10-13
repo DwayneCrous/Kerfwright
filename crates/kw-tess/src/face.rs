@@ -9,6 +9,8 @@ use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 pub(crate) const LOCAL: u32 = u32::MAX;
 
 pub(crate) struct FaceMesh {
+    /// Surface parameters of each vertex.
+    pub uv: Vec<(f64, f64)>,
     pub positions: Vec<Point3<f64>>,
     pub normals: Vec<Vector3<f64>>,
     pub weld: Vec<u32>,
@@ -461,6 +463,7 @@ pub(crate) fn mesh_face(
         .collect();
     let _ = boundary_count;
     Ok(FaceMesh {
+        uv: uvs,
         positions,
         normals,
         weld: welds,

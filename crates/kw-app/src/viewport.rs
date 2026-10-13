@@ -185,6 +185,32 @@ fn hide_seams(brep: &BRep, t: &mut Tessellation) {
 pub struct ModelScene {
     pub scene: Scene,
     tess: Vec<Tessellation>,
+    /// One curvature value per vertex of `scene` when the scene was built for a curvature analysis
+    /// (`NaN` where it cannot be found), else empty.
+    pub scalars: Vec<f32>,
+}
+
+/// What the analysis overlay shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnalysisKind {
+    Zebra,
+    Curvature(kw_analysis::CurvKind),
+    Draft,
+}
+
+/// The analysis overlay of the viewport: how to colour the faces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalysisView {
+    pub kind: AnalysisKind,
+    /// Choose the curvature range from the model (else `limit` is used).
+    pub auto: bool,
+    /// Curvature shown at the ends of the ramp (1/mm), both signs.
+    pub limit: f32,
+    /// Zebra stripe axis or draft pull direction (world).
+    pub axis: [f64; 3],
+    pub zebra_freq: f32,
+    /// Draft below this angle (degrees) is flagged.
+    pub draft_limit: f32,
 }
 
 impl ModelScene {
@@ -193,6 +219,7 @@ impl ModelScene {
         ModelScene {
             scene,
             tess: Vec::new(),
+            scalars: Vec::new(),
         }
     }
 
@@ -202,6 +229,15 @@ impl ModelScene {
 
     /// As [`ModelScene::build`], with the colour of body `i` (in the B-rep's body order) from `colours`.
     pub fn build_coloured(brep: &BRep, colours: &[[u8; 3]]) -> ModelScene {
+        ModelScene::build_analysed(brep, colours, None)
+    }
+
+    /// As [`ModelScene::build_coloured`], also finding the chosen curvature at every vertex.
+    pub fn build_analysed(
+        brep: &BRep,
+        colours: &[[u8; 3]],
+        curvature: Option<kw_analysis::CurvKind>,
+    ) -> ModelScene {
         let bodies: Vec<BodyId> = brep.bodies.keys().collect();
         let opts = TessOptions {
             chord_tol: 0.02,
@@ -231,7 +267,35 @@ impl ModelScene {
             scene.center = nalgebra::Vector3::zeros();
             scene.radius = 40.0;
         }
-        ModelScene { scene, tess }
+        let scalars = match curvature {
+            Some(kind) => tess
+                .iter()
+                .flat_map(|t| kw_analysis::mesh_curvature(brep, t, kind))
+                .collect(),
+            None => Vec::new(),
+        };
+        ModelScene {
+            scene,
+            tess,
+            scalars,
+        }
+    }
+
+    /// The range most curvature values lie in (the 2nd to the 98th percentile of the finite ones), so
+    /// a few extreme vertices do not wash out the colours.
+    pub fn scalar_range(&self) -> Option<(f32, f32)> {
+        let mut v: Vec<f32> = self
+            .scalars
+            .iter()
+            .copied()
+            .filter(|x| x.is_finite())
+            .collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_by(|a, b| a.total_cmp(b));
+        let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+        Some((at(0.02), at(0.98)))
     }
 
     pub fn empty() -> ModelScene {
@@ -353,6 +417,8 @@ pub struct Viewport3d {
     pub show_edges: bool,
     /// A section plane in world coordinates, `(unit normal, offset)`: what lies on the normal's side is cut.
     pub section: Option<([f64; 3], f64)>,
+    /// Colour the faces by zebra stripes, curvature or draft instead of lighting them.
+    pub analysis: Option<AnalysisView>,
     /// Picks drawn as selected besides the one passed to `show` (a multi-selection).
     pub extra_selected: Vec<Pick>,
     /// Reach, in pixels, of edge picking and hovering (0 = the exact pixel only).
@@ -370,6 +436,54 @@ pub struct Viewport3d {
     ppp: f32,
 }
 
+impl Viewport3d {
+    /// The curvature at the ends of the ramp: the model's own range when `auto`, else the chosen limit.
+    pub fn curvature_limit(&self) -> f32 {
+        Self::limit_of(&self.analysis, self.model.as_ref())
+    }
+
+    fn limit_of(a: &Option<AnalysisView>, model: Option<&ModelScene>) -> f32 {
+        let Some(a) = a else { return 1.0 };
+        if a.auto {
+            if let Some((lo, hi)) = model.and_then(|m| m.scalar_range()) {
+                return lo.abs().max(hi.abs()).max(1e-6);
+            }
+        }
+        a.limit.max(1e-6)
+    }
+
+    fn renderer_analysis(
+        analysis: &Option<AnalysisView>,
+        model: Option<&ModelScene>,
+    ) -> kw_viewer::renderer::Analysis {
+        use kw_viewer::renderer::{Analysis, AnalysisMode};
+        let Some(a) = analysis else {
+            return Analysis::default();
+        };
+        let axis = [a.axis[0] as f32, a.axis[1] as f32, a.axis[2] as f32];
+        match a.kind {
+            AnalysisKind::Zebra => Analysis {
+                mode: AnalysisMode::Zebra,
+                axis,
+                zebra_freq: a.zebra_freq,
+                duty: 0.5,
+                ..Analysis::default()
+            },
+            AnalysisKind::Curvature(_) => Analysis {
+                mode: AnalysisMode::Signed,
+                max: Self::limit_of(analysis, model),
+                ..Analysis::default()
+            },
+            AnalysisKind::Draft => Analysis {
+                mode: AnalysisMode::Draft,
+                axis,
+                max: a.draft_limit,
+                ..Analysis::default()
+            },
+        }
+    }
+}
+
 impl Default for Viewport3d {
     fn default() -> Self {
         Viewport3d {
@@ -379,6 +493,7 @@ impl Default for Viewport3d {
             wireframe: false,
             show_edges: true,
             section: None,
+            analysis: None,
             extra_selected: Vec::new(),
             edge_pick_px: 0,
             model: None,
@@ -566,6 +681,10 @@ impl Viewport3d {
         if self.key != Some(key) {
             let m = build();
             gpu.renderer.upload(device, &m.scene);
+            if !m.scalars.is_empty() {
+                gpu.renderer
+                    .upload_scalars(device, &m.scalars, m.scene.vertices.len());
+            }
             if !self.fitted && !m.scene.vertices.is_empty() {
                 self.camera.target = nalgebra::Vector3::zeros();
                 self.camera.fit(m.scene.radius.max(1e-3));
@@ -626,6 +745,8 @@ impl Viewport3d {
             }
             _ => None,
         };
+        gpu.renderer.settings.analysis =
+            Self::renderer_analysis(&self.analysis, self.model.as_ref());
         gpu.renderer.selected = highlight
             .and_then(|p| self.model.as_ref().map(|m| m.id_of(p)))
             .unwrap_or(0);

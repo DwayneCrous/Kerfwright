@@ -337,6 +337,46 @@ pub(super) fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
                 line(p, q(x, 3.0), q(x - 4.0, 10.0), ink, 1.6);
             }
         }
+        Icon::Zebra => {
+            // a sphere in stripes
+            p.circle_stroke(c, 12.0 * s, Stroke::new(1.6, ink));
+            for k in -2..=2 {
+                let y = k as f32 * 4.6;
+                let half = (144.0 - y * y).max(0.0).sqrt();
+                if k % 2 == 0 {
+                    line(p, q(-half, y), q(half, y), blue_d, 2.6);
+                }
+            }
+        }
+        Icon::Curvature => {
+            // a bump coloured red-white-blue
+            p.add(Shape::line(
+                vec![
+                    q(-12.0, 8.0),
+                    q(-6.0, 7.0),
+                    q(-2.0, -2.0),
+                    q(0.0, -9.0),
+                    q(2.0, -2.0),
+                    q(6.0, 7.0),
+                    q(12.0, 8.0),
+                ],
+                Stroke::new(2.0, ink),
+            ));
+            line(p, q(-12.0, 11.0), q(-4.0, 11.0), blue, 3.0);
+            line(p, q(-4.0, 11.0), q(4.0, 11.0), grey, 3.0);
+            line(p, q(4.0, 11.0), q(12.0, 11.0), orange, 3.0);
+        }
+        Icon::DraftAnalysis => {
+            line(p, q(-8.0, 10.0), q(-4.0, -10.0), ink, 2.0);
+            line(p, q(8.0, 10.0), q(4.0, -10.0), ink, 2.0);
+            line(p, q(-12.0, 10.0), q(12.0, 10.0), grey, 1.6);
+            p.add(Shape::dashed_line(
+                &[q(0.0, -12.0), q(0.0, 10.0)],
+                Stroke::new(1.2, orange),
+                3.0,
+                2.0,
+            ));
+        }
         Icon::Drawing => {
             p.rect_stroke(
                 Rect::from_center_size(c, vec2(22.0 * s, 28.0 * s)),

@@ -7393,3 +7393,91 @@ fn a_dimension_that_cannot_follow_stays_flagged_through_an_update() {
         h.frame();
     }
 }
+
+// ------------------------------------------------------------------------------------ surface analysis
+
+use kw_app::design::analysis::AKind;
+use kw_app::viewport::AnalysisKind;
+
+#[test]
+fn the_analysis_buttons_switch_overlays_on_and_off_and_the_viewport_follows() {
+    let (mut h, _d) = design_harness("analysis_buttons");
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    assert!(h.app.design.analysis.is_none());
+    run_command(&mut h, "zebra");
+    assert_eq!(
+        h.app.design.analysis.as_ref().map(|a| a.kind),
+        Some(AKind::Zebra)
+    );
+    assert!(matches!(
+        h.app.design.viewport.analysis.as_ref().map(|a| a.kind),
+        Some(AnalysisKind::Zebra)
+    ));
+    // the same button again turns it off
+    run_command(&mut h, "zebra");
+    assert!(h.app.design.analysis.is_none() && h.app.design.viewport.analysis.is_none());
+    // curvature: the model is built with a value at every vertex (a box is flat: all zero)
+    run_command(&mut h, "curvature");
+    assert_eq!(
+        h.app.design.analysis.as_ref().map(|a| a.kind),
+        Some(AKind::Mean)
+    );
+    let m = h.app.design.viewport.model().unwrap();
+    assert_eq!(m.scalars.len(), m.scene.vertices.len());
+    assert!(m.scalars.iter().all(|v| v.abs() < 1e-6));
+    // another kind of curvature is another build; switching to draft drops the scalars again
+    h.app.design.analysis.as_mut().unwrap().kind = AKind::Gaussian;
+    h.frame();
+    h.frame();
+    assert!(h
+        .app
+        .design
+        .viewport
+        .model()
+        .unwrap()
+        .scalars
+        .iter()
+        .all(|v| v.abs() < 1e-6));
+    run_command(&mut h, "draft_analysis");
+    assert_eq!(
+        h.app.design.analysis.as_ref().map(|a| a.kind),
+        Some(AKind::Draft)
+    );
+    assert!(h.app.design.viewport.model().unwrap().scalars.is_empty());
+    // draft takes the pull direction from the window: +Z by default
+    let v = h.app.design.analysis_view().unwrap();
+    assert_eq!(v.axis, [0.0, 0.0, 1.0]);
+    // every overlay draws (window, legend) without trouble
+    for k in AKind::ALL {
+        h.app.design.analysis.as_mut().unwrap().kind = k;
+        for _ in 0..3 {
+            h.frame();
+        }
+    }
+}
+
+#[test]
+fn curvature_scalars_follow_the_model_and_the_range_ignores_extremes() {
+    use kw_app::viewport::ModelScene;
+    use kw_brep::builders::{make_cylinder, make_sphere};
+    use kw_brep::BRep;
+    use kw_math::Frame3;
+    let mut rep = BRep::new();
+    make_sphere(&mut rep, &Frame3::world(), 5.0);
+    let m = ModelScene::build_analysed(&rep, &[], Some(kw_analysis::CurvKind::Mean));
+    assert_eq!(m.scalars.len(), m.scene.vertices.len());
+    let (lo, hi) = m.scalar_range().unwrap();
+    assert!(
+        (lo - 0.2).abs() < 1e-3 && (hi - 0.2).abs() < 1e-3,
+        "{lo} {hi}"
+    );
+    // without a curvature kind there are no scalars
+    assert!(ModelScene::build_coloured(&rep, &[]).scalars.is_empty());
+    // a cylinder: wall 1/(2r), caps 0; a few outliers do not stretch the range
+    let mut rep = BRep::new();
+    make_cylinder(&mut rep, &Frame3::world(), 4.0, 10.0);
+    let m = ModelScene::build_analysed(&rep, &[], Some(kw_analysis::CurvKind::Mean));
+    let (lo, hi) = m.scalar_range().unwrap();
+    assert!(lo.abs() < 1e-3 && (hi - 0.125).abs() < 1e-3, "{lo} {hi}");
+}

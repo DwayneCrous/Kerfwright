@@ -9,6 +9,8 @@ struct Globals {
     ids: vec4<u32>,      // hovered id, selected id, number of extra selected ids, section on
     sel: array<vec4<u32>, 16>, // extra selected ids
     clip: vec4<f32>,     // section plane: normal, offset (dot(n, p) > offset is cut away)
+    analysis: vec4<f32>, // mode (0 off, 1 zebra, 2 scalar, 3 signed, 4 draft), min, max, stripe duty
+    adir: vec4<f32>,     // zebra axis / pull direction, zebra frequency
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -18,6 +20,7 @@ struct VsIn {
     @location(1) normal: vec3<f32>,
     @location(2) id: u32,
     @location(3) color: vec4<f32>,
+    @location(4) scalar: f32,
 };
 
 struct VsOut {
@@ -26,6 +29,7 @@ struct VsOut {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) @interpolate(flat) id: u32,
+    @location(4) scalar: f32,
 };
 
 fn is_selected(id: u32) -> bool {
@@ -44,6 +48,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.normal = v.normal;
     o.color = v.color;
     o.id = v.id;
+    o.scalar = v.scalar;
     return o;
 }
 
@@ -82,6 +87,69 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// Colour ramps of the analysis overlays (the same stops as kw-analysis::ramp).
+fn ramp_seq(t: f32) -> vec3<f32> {
+    var s = array<vec3<f32>, 5>(
+        vec3<f32>(0.17, 0.23, 0.62), vec3<f32>(0.18, 0.66, 0.88), vec3<f32>(0.31, 0.78, 0.40),
+        vec3<f32>(0.95, 0.82, 0.24), vec3<f32>(0.84, 0.21, 0.17));
+    let x = clamp(t, 0.0, 1.0) * 4.0;
+    let k = min(u32(floor(x)), 3u);
+    return mix(s[k], s[k + 1u], x - f32(k));
+}
+
+fn ramp_div(t: f32) -> vec3<f32> {
+    var s = array<vec3<f32>, 3>(
+        vec3<f32>(0.18, 0.37, 0.83), vec3<f32>(0.95, 0.95, 0.95), vec3<f32>(0.83, 0.20, 0.18));
+    let x = (0.5 + 0.5 * clamp(t, -1.0, 1.0)) * 2.0;
+    let k = min(u32(floor(x)), 1u);
+    return mix(s[k], s[k + 1u], x - f32(k));
+}
+
+fn ramp_draft(a: f32, limit: f32) -> vec3<f32> {
+    if (abs(a) < limit) { return vec3<f32>(0.84, 0.21, 0.17); }
+    if (a > 0.0) {
+        let t = clamp((a - limit) / max(90.0 - limit, 1e-3), 0.0, 1.0);
+        return vec3<f32>(0.30 - 0.12 * t, 0.72 - 0.10 * t, 0.40 + 0.2 * t);
+    }
+    let t = clamp((-a - limit) / max(90.0 - limit, 1e-3), 0.0, 1.0);
+    return vec3<f32>(0.30 - 0.12 * t, 0.42 - 0.1 * t, 0.85 - 0.2 * t);
+}
+
+// NaN by its bits (a comparison with itself may be optimised away).
+fn is_nan(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// The colour (sRGB-encoded) of the analysis overlay at a fragment.
+fn analysis_colour(i: VsOut) -> vec3<f32> {
+    let n = normalize(i.normal);
+    let mode = u32(g.analysis.x + 0.5);
+    var c = vec3<f32>(0.5);
+    if (mode == 1u) {
+        let v = normalize(i.world - g.cam_pos.xyz);
+        let r = reflect(v, n);
+        let f = dot(r, g.adir.xyz) * g.adir.w;
+        let s = select(0.0, 1.0, (f - floor(f)) < g.analysis.w);
+        c = vec3<f32>(mix(0.06, 0.96, s));
+    } else if (mode == 2u) {
+        if (is_nan(i.scalar)) { return vec3<f32>(0.5); }
+        c = ramp_seq((i.scalar - g.analysis.y) / max(g.analysis.z - g.analysis.y, 1e-12));
+    } else if (mode == 3u) {
+        if (is_nan(i.scalar)) { return vec3<f32>(0.5); }
+        c = ramp_div(i.scalar / max(g.analysis.z, 1e-12));
+    } else if (mode == 4u) {
+        let a = degrees(asin(clamp(dot(n, g.adir.xyz), -1.0, 1.0)));
+        c = ramp_draft(a, g.analysis.z);
+    }
+    return c;
+}
+
 struct FsOut {
     @location(0) color: vec4<f32>,
     @location(1) id: u32,
@@ -97,6 +165,16 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> FsOut {
         cap.color = vec4<f32>(pow(vec3<f32>(0.93, 0.55, 0.20), vec3<f32>(2.2)), 1.0);
         cap.id = i.id;
         return cap;
+    }
+    if (g.analysis.x > 0.5) {
+        // diagnostics are shown unlit; hovering and selection only tint them lightly
+        var c = analysis_colour(i);
+        if (i.id == g.ids.x) { c = mix(c, vec3<f32>(1.0, 0.85, 0.2), 0.25); }
+        if (is_selected(i.id)) { c = mix(c, vec3<f32>(1.0, 0.45, 0.1), 0.35); }
+        var a: FsOut;
+        a.color = vec4<f32>(srgb_to_linear(c), 1.0);
+        a.id = i.id;
+        return a;
     }
     var albedo = i.color.rgb;
     if (i.id == g.ids.x) { albedo = mix(albedo, vec3<f32>(1.0, 0.85, 0.2), 0.55); }

@@ -22,6 +22,7 @@ rfd.workspace = true
 kw-expr.workspace = true
 kw-store.workspace = true
 kw-drawing.workspace = true
+kw-analysis.workspace = true
 kw-cam.workspace = true
 kw-ecad.workspace = true
 kw-fem.workspace = true

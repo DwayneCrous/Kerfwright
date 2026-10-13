@@ -463,6 +463,8 @@ impl DesignWorkspace {
         self.measure_window(ui.ctx(), project);
         self.interference_window(ui.ctx());
         self.section_window(ui.ctx(), project);
+        self.analysis_window(ui.ctx());
+        self.analysis_legend(&painter, rect);
         self.assembly_window(ui.ctx(), project);
         self.asm_rename_windows(ui.ctx());
         self.asm_joint_window(ui.ctx(), project);

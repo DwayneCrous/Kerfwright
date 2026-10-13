@@ -2094,11 +2094,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kw-analysis"
+version = "0.0.1"
+dependencies = [
+ "approx",
+ "kw-boolean",
+ "kw-brep",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
+ "kw-tess",
+ "nalgebra",
+]
+
+[[package]]
 name = "kw-app"
 version = "0.0.1"
 dependencies = [
  "eframe",
  "epaint_default_fonts",
+ "kw-analysis",
  "kw-assembly",
  "kw-boolean",
  "kw-brep",
@@ -2536,6 +2551,7 @@ dependencies = [
  "clap",
  "criterion",
  "env_logger",
+ "kw-analysis",
  "kw-brep",
  "kw-math",
  "kw-tess",
