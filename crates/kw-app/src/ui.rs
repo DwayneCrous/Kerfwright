@@ -610,7 +610,7 @@ impl KerfwrightApp {
                     _ => AKind::Draft,
                 }));
             }
-            "surface" | "surface-zebra" | "thicken" => {
+            "surface" | "surface-zebra" | "thicken" | "trim" => {
                 // a vase: a smooth surface through three rings, its open edges marked
                 use kw_expr::Param;
                 use kw_feature::{BodyOp, FeatureSpec, LoftSpec, PlaneSpec};
@@ -637,6 +637,21 @@ impl KerfwrightApp {
                         }),
                     )
                 });
+                if what == "trim" {
+                    // the vase is cut across at 22 mm and its top part kept
+                    use kw_expr::Param;
+                    use kw_feature::{FeatureSpec, PlaneSpec, TrimSpec, TrimToolSpec};
+                    let _ = self.design.model.edit(project, |d| {
+                        d.add(
+                            "Cut",
+                            FeatureSpec::Trim(TrimSpec {
+                                tool: TrimToolSpec::Plane(PlaneSpec::Xy(Param::length(22.0))),
+                                keep_positive: false,
+                                base: None,
+                            }),
+                        )
+                    });
+                }
                 if what == "thicken" {
                     // the vase gets a wall: a solid, cut open to show it
                     use kw_expr::Param;

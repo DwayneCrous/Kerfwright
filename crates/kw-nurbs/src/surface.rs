@@ -12,6 +12,15 @@ pub struct SurfaceProjection {
     pub distance: f64,
 }
 
+/// Which end of which parameter a surface is continued at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtendDir {
+    UStart,
+    UEnd,
+    VStart,
+    VEnd,
+}
+
 /// Tensor-product rational B-spline surface. The control net is row-major:
 /// index `(i, j) -> i * nv + j`, with `i` along `u` and `j` along `v`.
 #[derive(Debug, Clone, PartialEq)]
@@ -413,6 +422,131 @@ impl NurbsSurface {
         }
         let grid: Vec<Hom> = rows.into_iter().flatten().collect();
         Self::from_hom_grid(self.knots_u.clone(), kv, &grid)
+    }
+
+    /// The surface with its two parameters swapped.
+    pub fn transposed(&self) -> NurbsSurface {
+        let (nu, nv) = (self.num_u(), self.num_v());
+        let mut pts = Vec::with_capacity(nu * nv);
+        let mut ws = Vec::with_capacity(nu * nv);
+        for j in 0..nv {
+            for i in 0..nu {
+                pts.push(self.points[i * nv + j]);
+                ws.push(self.weights[i * nv + j]);
+            }
+        }
+        NurbsSurface::new(self.knots_v.clone(), self.knots_u.clone(), pts, ws)
+            .expect("a transposed surface is valid")
+    }
+
+    /// The surface with `v` running the other way (`v -> a + b - v`).
+    pub fn reversed_v(&self) -> NurbsSurface {
+        let (a, b) = self.knots_v.domain();
+        self.reflected_v(a + b)
+    }
+
+    /// The surface mirrored in `v` about `sum / 2` (`v -> sum - v`).
+    fn reflected_v(&self, sum: f64) -> NurbsSurface {
+        let (nu, nv) = (self.num_u(), self.num_v());
+        let ks: Vec<f64> = self
+            .knots_v
+            .as_slice()
+            .iter()
+            .rev()
+            .map(|k| sum - k)
+            .collect();
+        let kv = KnotVector::new(self.knots_v.degree(), ks).expect("reversed knots are valid");
+        let mut pts = Vec::with_capacity(nu * nv);
+        let mut ws = Vec::with_capacity(nu * nv);
+        for i in 0..nu {
+            for j in (0..nv).rev() {
+                pts.push(self.points[i * nv + j]);
+                ws.push(self.weights[i * nv + j]);
+            }
+        }
+        NurbsSurface::new(self.knots_u.clone(), kv, pts, ws).expect("a reversed surface is valid")
+    }
+
+    /// The surface continued past the end of its `v` domain by `delta`: the last polynomial piece is
+    /// carried on, so the part that was there is unchanged (same parameters) and the new part is the
+    /// natural continuation of the surface. Fails if a rational surface's weight would turn negative.
+    pub fn extended_v_end(&self, delta: f64) -> Result<NurbsSurface, NurbsError> {
+        if delta.is_nan() || delta <= 0.0 {
+            return Err(NurbsError::InvalidArgument("extension"));
+        }
+        let p = self.knots_v.degree();
+        let (_, b) = self.knots_v.domain();
+        // the last knot before the end: the start of the last polynomial piece
+        let distinct = self.knots_v.distinct();
+        let (a_l, mult) = if distinct.len() >= 2 {
+            distinct[distinct.len() - 2]
+        } else {
+            return Err(NurbsError::InvalidArgument("a surface without a span"));
+        };
+        let s = if mult < p && a_l > self.knots_v.domain().0 {
+            self.insert_knot_v(a_l, p - mult)
+        } else {
+            self.clone()
+        };
+        let (nu, nv) = (s.num_u(), s.num_v());
+        let c = (b + delta - a_l) / (b - a_l);
+        let mut grid: Vec<Hom> = Vec::with_capacity(nu * nv);
+        for i in 0..nu {
+            let mut row = s.row_homogeneous(i);
+            let base = nv - p - 1;
+            let bez: Vec<Hom> = row[base..].to_vec();
+            // the Bezier points of the same polynomial over [a_l, b + delta]: blossom at (0^(p-k), c^k)
+            for k in 1..=p {
+                let mut pts = bez.clone();
+                let params: Vec<f64> = std::iter::repeat_n(c, k)
+                    .chain(std::iter::repeat_n(0.0, p - k))
+                    .collect();
+                for r in params {
+                    let n = pts.len();
+                    pts = (0..n - 1)
+                        .map(|j| pts[j] * (1.0 - r) + pts[j + 1] * r)
+                        .collect();
+                }
+                row[base + k] = pts[0];
+            }
+            grid.extend(row);
+        }
+        let mut ks = s.knots_v.as_slice().to_vec();
+        let n = ks.len();
+        for k in ks.iter_mut().skip(n - p - 1) {
+            *k = b + delta;
+        }
+        let kv = KnotVector::new(p, ks).map_err(|_| NurbsError::InvalidArgument("knots"))?;
+        let pts: Vec<Point3<f64>> = grid
+            .iter()
+            .map(|h| Point3::new(h.x / h.w, h.y / h.w, h.z / h.w))
+            .collect();
+        let ws: Vec<f64> = grid.iter().map(|h| h.w).collect();
+        NurbsSurface::new(s.knots_u.clone(), kv, pts, ws)
+    }
+
+    /// The surface continued by `delta` past the start or the end of its `u` or `v` domain.
+    pub fn extended(&self, dir: ExtendDir, delta: f64) -> Result<NurbsSurface, NurbsError> {
+        match dir {
+            ExtendDir::VEnd => self.extended_v_end(delta),
+            ExtendDir::VStart => {
+                let (a, b) = self.knots_v.domain();
+                Ok(self
+                    .reflected_v(a + b)
+                    .extended_v_end(delta)?
+                    .reflected_v(a + b))
+            }
+            ExtendDir::UEnd => Ok(self.transposed().extended_v_end(delta)?.transposed()),
+            ExtendDir::UStart => {
+                let (a, b) = self.knots_u.domain();
+                Ok(self
+                    .transposed()
+                    .reflected_v(a + b)
+                    .extended_v_end(delta)?
+                    .reflected_v(a + b)
+                    .transposed())
+            }
+        }
     }
 
     /// Curve at fixed `v` (a u-isocurve), by de Boor on the control net.

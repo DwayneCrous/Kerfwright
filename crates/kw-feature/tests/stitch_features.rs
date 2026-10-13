@@ -214,7 +214,7 @@ fn a_pipe_thickens_to_the_exact_volume_and_follows_its_parameter() {
 }
 
 #[test]
-fn a_solid_cannot_be_thickened_or_offset_as_a_surface_and_a_surface_cannot_be_filleted() {
+fn a_solid_cannot_be_thickened_or_offset_as_a_surface() {
     let mut doc = Document::new();
     let s = doc
         .add_rect_sketch(

@@ -26,6 +26,8 @@ pub struct BuildCtx<'a> {
     pub boundary: &'a [(FeatureId, kw_feature::BoundaryRef)],
     /// The bodies the picked faces and edges belong to, and every surface body of the document.
     pub picked_bodies: &'a [FeatureId],
+    /// The faces picked, each with the feature whose body it is on.
+    pub faces: &'a [(FeatureId, kw_feature::Reference)],
     pub surfaces: &'a [FeatureId],
     /// Plane picked for a hole, and the spot on it (plane coordinates).
     pub hole_plane: Option<PlaneSpec>,
@@ -319,6 +321,22 @@ pub enum Tool {
     },
     /// A surface of straight lines between two picked edges.
     Ruled,
+    /// Cut a surface with a plane or a picked face and keep one side.
+    Trim {
+        plane: PlaneInput,
+        /// Cut with the picked face instead of the plane.
+        use_face: bool,
+        /// Keep the side the tool's normal points to.
+        keep_positive: bool,
+    },
+    /// Carry a surface on past the picked open edges.
+    Extend {
+        length: String,
+    },
+    /// Reshape a patch near the picked open edge to meet the picked face: 0 = G1, 1 = G2.
+    Match {
+        level: u8,
+    },
     /// Join the picked surfaces (all of them if none is picked) along edges closer than `tolerance`.
     Stitch {
         tolerance: String,
@@ -651,6 +669,9 @@ impl Tool {
             Tool::Sweep { .. } => "SWEEP",
             Tool::Patch { .. } => "PATCH",
             Tool::Ruled => "RULED SURFACE",
+            Tool::Trim { .. } => "TRIM",
+            Tool::Extend { .. } => "EXTEND",
+            Tool::Match { .. } => "MATCH",
             Tool::Stitch { .. } => "STITCH",
             Tool::Unstitch => "UNSTITCH",
             Tool::Thicken { .. } => "THICKEN",
@@ -690,6 +711,9 @@ impl Tool {
             Tool::Sweep { .. } => "Sweep",
             Tool::Patch { .. } => "Patch",
             Tool::Ruled => "Ruled",
+            Tool::Trim { .. } => "Trim",
+            Tool::Extend { .. } => "Extend",
+            Tool::Match { .. } => "Match",
             Tool::Stitch { .. } => "Stitch",
             Tool::Unstitch => "Unstitch",
             Tool::Thicken { .. } => "Thicken",
@@ -740,6 +764,8 @@ impl Tool {
                 | Tool::Chamfer { .. }
                 | Tool::VariableFillet { .. }
                 | Tool::Patch { .. }
+                | Tool::Extend { .. }
+                | Tool::Match { .. }
                 | Tool::Ruled
                 | Tool::Revolve {
                     axis_edge: true,
@@ -756,6 +782,8 @@ impl Tool {
                 | Tool::Hole { .. }
                 | Tool::Draft { .. }
                 | Tool::Thread { .. }
+                | Tool::Match { .. }
+                | Tool::Trim { use_face: true, .. }
                 | Tool::SplitBody { plane: 3, .. }
                 | Tool::Mirror { plane: 4, .. }
                 | Tool::Axis { mode: 2, .. }
@@ -901,6 +929,23 @@ impl Tool {
                 tangent: x.edges.iter().any(|e| e.tangent),
             },
             FeatureSpec::Ruled(_) => Tool::Ruled,
+            FeatureSpec::Trim(x) => Tool::Trim {
+                plane: match &x.tool {
+                    kw_feature::TrimToolSpec::Plane(ps) => PlaneInput::from_spec(ps),
+                    _ => PlaneInput::default(),
+                },
+                use_face: matches!(x.tool, kw_feature::TrimToolSpec::Face { .. }),
+                keep_positive: x.keep_positive,
+            },
+            FeatureSpec::Extend(x) => Tool::Extend {
+                length: param_text(&x.length),
+            },
+            FeatureSpec::Match(x) => Tool::Match {
+                level: match x.level {
+                    kw_feature::MatchLevel::G1 => 0,
+                    kw_feature::MatchLevel::G2 => 1,
+                },
+            },
             FeatureSpec::Stitch(x) => Tool::Stitch {
                 tolerance: param_text(&x.tolerance),
             },
@@ -1593,6 +1638,76 @@ impl Tool {
                     );
                 }
                 FeatureSpec::Patch(kw_feature::PatchSpec { edges })
+            }
+            Tool::Trim {
+                plane,
+                use_face,
+                keep_positive,
+            } => {
+                let tool = if *use_face {
+                    match (ctx.faces.first(), orig) {
+                        (Some((source, face)), _) => kw_feature::TrimToolSpec::Face {
+                            source: *source,
+                            face: face.clone(),
+                        },
+                        (None, Some(FeatureSpec::Trim(o)))
+                            if matches!(o.tool, kw_feature::TrimToolSpec::Face { .. }) =>
+                        {
+                            o.tool.clone()
+                        }
+                        _ => return Err("click the face to cut with".into()),
+                    }
+                } else {
+                    kw_feature::TrimToolSpec::Plane(plane.spec()?)
+                };
+                FeatureSpec::Trim(kw_feature::TrimSpec {
+                    tool,
+                    keep_positive: *keep_positive,
+                    base: None,
+                })
+            }
+            Tool::Extend { length } => {
+                let edges: Vec<kw_feature::BoundaryRef> = if ctx.boundary.is_empty() {
+                    match orig {
+                        Some(FeatureSpec::Extend(o)) => o.edges.clone(),
+                        _ => Vec::new(),
+                    }
+                } else {
+                    ctx.boundary.iter().map(|(_, e)| e.clone()).collect()
+                };
+                if edges.is_empty() {
+                    return Err("click the open edges to extend".into());
+                }
+                FeatureSpec::Extend(kw_feature::ExtendSpec {
+                    edges,
+                    length: len(length)?,
+                    base: None,
+                })
+            }
+            Tool::Match { level } => {
+                let edge = match (ctx.boundary.first(), orig) {
+                    (Some((_, e)), _) => e.clone(),
+                    (None, Some(FeatureSpec::Match(o))) => o.edge.clone(),
+                    _ => return Err("click the open edge of the patch to reshape".into()),
+                };
+                let (source, face) = match (ctx.faces.first(), orig) {
+                    (Some((s, f)), _) => (*s, f.clone()),
+                    (None, Some(FeatureSpec::Match(o))) => {
+                        (o.neighbour_source, o.neighbour_face.clone())
+                    }
+                    _ => return Err("click the face the patch should meet".into()),
+                };
+                FeatureSpec::Match(kw_feature::MatchSpec {
+                    edge,
+                    neighbour_source: source,
+                    neighbour_face: face,
+                    level: if *level == 1 {
+                        kw_feature::MatchLevel::G2
+                    } else {
+                        kw_feature::MatchLevel::G1
+                    },
+                    base: None,
+                })
             }
             Tool::Stitch { tolerance } => {
                 let bodies: Vec<FeatureId> = if !ctx.picked_bodies.is_empty() {
@@ -2466,6 +2581,82 @@ impl Tool {
                 ui.label(
                     egui::RichText::new(
                         "Click the edges around the hole (Shift adds): three or more, closing a loop. Four edges give one smooth patch; other counts are split about the centre. Only open edges of a surface can be tangent.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Trim {
+                plane,
+                use_face,
+                keep_positive,
+            } => {
+                row(ui, "Cut with", |ui| {
+                    ui.selectable_value(use_face, false, "Plane");
+                    ui.selectable_value(use_face, true, "Face");
+                });
+                if *use_face {
+                    let n = picks.iter().filter(|p| matches!(p, Pick::Face(_))).count();
+                    row(ui, "Face", |ui| {
+                        ui.label(if n > 0 {
+                            "face selected"
+                        } else {
+                            "click a face"
+                        });
+                    });
+                } else {
+                    plane_input_ui(ui, "trim_plane", "Plane", doc, plane);
+                }
+                row(ui, "Keep", |ui| {
+                    ui.selectable_value(keep_positive, true, "Normal side");
+                    ui.selectable_value(keep_positive, false, "Other side");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "The surface is cut where the tool crosses it; the side that is kept is the one the tool's normal points to, or the other.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Extend { length } => {
+                let n = picks.iter().filter(|p| matches!(p, Pick::Edge(_))).count();
+                row(ui, "Edges", |ui| {
+                    ui.label(format!("{n} selected"));
+                });
+                text_field(ui, "Length", length);
+                ui.label(
+                    egui::RichText::new(
+                        "Click open edges that run along a parameter line of their surface (the edges of lofts, sweeps, patches, extrusions and revolutions do). The surface is carried on as it is.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Match { level } => {
+                let e = picks.iter().filter(|p| matches!(p, Pick::Edge(_))).count();
+                let f = picks.iter().filter(|p| matches!(p, Pick::Face(_))).count();
+                row(ui, "Edge", |ui| {
+                    ui.label(if e > 0 {
+                        "edge selected"
+                    } else {
+                        "click the patch's open edge"
+                    });
+                });
+                row(ui, "Meet", |ui| {
+                    ui.label(if f > 0 {
+                        "face selected"
+                    } else {
+                        "click the face to meet"
+                    });
+                });
+                row(ui, "Continuity", |ui| {
+                    ui.selectable_value(level, 0, "G1 tangent");
+                    ui.selectable_value(level, 1, "G2 curvature");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Only a NURBS patch (made by Patch or Offset, for one) can be reshaped, and only near its edge; the match fades out at the ends of the edge.",
                     )
                     .color(TEXT_WEAK)
                     .size(10.5),

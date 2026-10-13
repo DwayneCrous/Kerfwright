@@ -7607,6 +7607,7 @@ fn the_surface_dialogs_build_surface_specs_and_keep_the_operation_new() {
         picks: &[],
         boundary: &[],
         picked_bodies: &[],
+        faces: &[],
         surfaces: &[],
         hole_plane: None,
     };
@@ -7880,6 +7881,7 @@ fn the_stitch_unstitch_thicken_and_offset_dialogs_build_their_specs() {
             picks: &[],
             boundary: &[],
             picked_bodies: picked,
+            faces: &[],
             surfaces,
             hole_plane: None,
         }
@@ -7927,4 +7929,106 @@ fn the_stitch_unstitch_thicken_and_offset_dialogs_build_their_specs() {
         off.spec(&ctx(&doc, &[], &surfaces), None),
         Ok(FeatureSpec::OffsetSurface(_))
     ));
+}
+
+#[test]
+fn the_trim_and_extend_tools_cut_and_carry_a_surface_on() {
+    // a 30 x 20 x 10 open tube
+    let (mut h, _d) = design_harness("trim_tool");
+    open_tube(&mut h);
+    run_command(&mut h, "surf_trim");
+    if let Some(Tool::Trim {
+        plane,
+        keep_positive,
+        ..
+    }) = h.app.design.dialog.as_mut().map(|d| &mut d.tool)
+    {
+        plane.offset = "4 mm".into();
+        *keep_positive = false;
+    } else {
+        panic!("the Trim dialog is not open");
+    }
+    commit(&mut h);
+    let ev = proj(&mut h).evaluation();
+    let (_, out) = ev.final_body().unwrap();
+    assert!(out.is_sheet());
+    let area = out.brep().unwrap().area(out.body().unwrap()).unwrap();
+    assert!((area - 2.0 * 50.0 * 4.0).abs() < 1e-3, "{area}");
+
+    // extend the new top rim edge of the trimmed tube along 5 mm
+    let rim: Vec<_> = display_rim(&mut h, 4.0);
+    assert!(!rim.is_empty());
+    run_command(&mut h, "surf_extend");
+    click(&mut h, Some(Pick::Edge(rim[0])));
+    h.frame();
+    commit(&mut h);
+    let ev = proj(&mut h).evaluation();
+    let (_, out) = ev.final_body().unwrap();
+    let grown = out.brep().unwrap().area(out.body().unwrap()).unwrap();
+    assert!(grown > area + 5.0 * 20.0 - 1e-3, "{grown} from {area}");
+}
+
+#[test]
+fn the_match_tool_reshapes_a_cap_to_meet_a_wall() {
+    let (mut h, _d) = design_harness("match_tool");
+    open_tube(&mut h);
+    // cap the top
+    h.frame();
+    let rim = display_rim(&mut h, 10.0);
+    run_command(&mut h, "surf_patch");
+    for e in rim {
+        click(&mut h, Some(Pick::Edge(e)));
+        h.frame();
+    }
+    commit(&mut h);
+    h.frame();
+    // in the merged view: the cap's edge on the wall y = 0, and the tube's wall face there
+    let heads = proj(&mut h).document().heads();
+    assert_eq!(heads.len(), 2);
+    let (edge, face) = {
+        let bodies = h.app.design.bodies.as_ref().expect("bodies");
+        let rep = bodies.brep.clone();
+        let cap_index = bodies
+            .list
+            .iter()
+            .position(|b| b.output.is_sheet() && b.head == heads[1])
+            .unwrap();
+        let tube_index = 1 - cap_index;
+        let edge = rep
+            .edges
+            .keys()
+            .find(|e| {
+                let ed = &rep.edges[*e];
+                [ed.start, ed.end].iter().all(|v| {
+                    let q = rep.vertices[*v].point;
+                    q.y.abs() < 1e-9 && (q.z - 10.0).abs() < 1e-9
+                }) && matches!(bodies.origin(Pick::Edge(*e)), Some((i, _)) if i == cap_index)
+            })
+            .expect("the cap's edge on the wall");
+        let face = rep
+            .faces
+            .keys()
+            .find(|f| {
+                rep.face_bbox(*f).unwrap().max.y < 1e-3
+                    && matches!(bodies.origin(Pick::Face(*f)), Some((i, _)) if i == tube_index)
+            })
+            .expect("the wall");
+        (edge, face)
+    };
+    run_command(&mut h, "surf_match");
+    click(&mut h, Some(Pick::Edge(edge)));
+    h.frame();
+    click(&mut h, Some(Pick::Face(face)));
+    h.frame();
+    commit(&mut h);
+    // the cap is the model's last body, reshaped: its normal at the middle of that edge lies along y
+    let ev = proj(&mut h).evaluation();
+    let (_, out) = ev.final_body().unwrap();
+    let rep = out.brep().unwrap();
+    let f = rep.body_faces(out.body().unwrap())[0];
+    let s = rep.surfaces[rep.faces[f].surface].clone();
+    let uv = kw_nurbs::proj::surface_param_of(&s, &kw_math::Point3::new(15.0, 0.0, 10.0), None);
+    assert!(uv.distance < 1e-6, "{}", uv.distance);
+    let n = kw_nurbs::Surface::normal_at(&s, uv.u, uv.v);
+    assert!(n.y.abs() > 0.999, "{n:?}");
 }

@@ -492,6 +492,7 @@ impl DesignWorkspace {
                             picks: &[],
                             boundary: &[],
                             picked_bodies: &[],
+                            faces: &[],
                             surfaces: &[],
                             hole_plane: self.hole_plane.clone(),
                         };
@@ -503,22 +504,45 @@ impl DesignWorkspace {
         // a surface bounded by edges may take them from several bodies
         let multi = matches!(
             dlg.tool,
-            Tool::Patch { .. } | Tool::Ruled | Tool::Stitch { .. }
+            Tool::Patch { .. }
+                | Tool::Ruled
+                | Tool::Stitch { .. }
+                | Tool::Match { .. }
+                | Tool::Trim { use_face: true, .. }
         );
+        let wants_edges = matches!(
+            dlg.tool,
+            Tool::Patch { .. } | Tool::Ruled | Tool::Extend { .. } | Tool::Match { .. }
+        );
+        let wants_faces = matches!(dlg.tool, Tool::Match { .. } | Tool::Trim { .. });
+        let mut picked_faces: Vec<(FeatureId, kw_feature::Reference)> = Vec::new();
         let mut picked_heads: Vec<FeatureId> = Vec::new();
         let mut boundary: Vec<(FeatureId, kw_feature::BoundaryRef)> = Vec::new();
         let mut picked_body: Option<usize> = None;
         let mut local: Vec<Pick> = Vec::new();
         for p in &self.model.picks {
             if let Some((i, lp)) = bodies.origin(*p) {
+                let body = &bodies.list[i];
+                if let (Pick::Edge(e), true) = (lp, wants_edges) {
+                    boundary.push((body.head, kw_feature::ops::boundary_ref(&body.output, e)?));
+                    // a match works on the body its edge is on
+                    if matches!(dlg.tool, Tool::Match { .. }) {
+                        picked_body = Some(i);
+                    }
+                }
+                if let (Pick::Face(f), true) = (lp, wants_faces) {
+                    if let Some(r) = body
+                        .output
+                        .brep()
+                        .and_then(|rep| body.output.names.reference_to(rep, f))
+                    {
+                        picked_faces.push((body.head, r));
+                    }
+                }
                 if multi {
-                    let head = bodies.list[i].head;
+                    let head = body.head;
                     if !picked_heads.contains(&head) {
                         picked_heads.push(head);
-                    }
-                    if let Pick::Edge(e) = lp {
-                        let body = &bodies.list[i];
-                        boundary.push((body.head, kw_feature::ops::boundary_ref(&body.output, e)?));
                     }
                     continue;
                 }
@@ -545,6 +569,7 @@ impl DesignWorkspace {
             picks: &local,
             boundary: &boundary,
             picked_bodies: &picked_heads,
+            faces: &picked_faces,
             surfaces: &sheet_heads,
             hole_plane: self.hole_plane.clone(),
         };

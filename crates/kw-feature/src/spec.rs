@@ -191,6 +191,47 @@ pub enum ThickenDir {
     Both,
 }
 
+/// What a trim cuts with: a plane, or the surface of a face (carried on past the face's edges).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TrimToolSpec {
+    Plane(PlaneSpec),
+    Face { source: FeatureId, face: Reference },
+}
+
+/// Cut a surface with a plane or a surface and keep one side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrimSpec {
+    pub tool: TrimToolSpec,
+    /// Keep the side the tool's normal points to (else the other).
+    pub keep_positive: bool,
+    pub base: Option<FeatureId>,
+}
+
+/// Carry a surface on past its open edges.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtendSpec {
+    pub edges: Vec<BoundaryRef>,
+    pub length: Param,
+    pub base: Option<FeatureId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchLevel {
+    G1,
+    G2,
+}
+
+/// Reshape a NURBS patch near an open edge to meet a neighbouring face.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchSpec {
+    pub edge: BoundaryRef,
+    /// The face to meet, and the feature whose body it is on.
+    pub neighbour_source: FeatureId,
+    pub neighbour_face: Reference,
+    pub level: MatchLevel,
+    pub base: Option<FeatureId>,
+}
+
 /// Join surface bodies along coincident edges; a group that closes becomes a solid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StitchSpec {
@@ -580,6 +621,9 @@ pub enum FeatureSpec {
     Sweep(SweepSpec),
     Patch(PatchSpec),
     Ruled(RuledSpec),
+    Trim(TrimSpec),
+    Extend(ExtendSpec),
+    Match(MatchSpec),
     Stitch(StitchSpec),
     Unstitch(UnstitchSpec),
     Thicken(ThickenSpec),
@@ -638,6 +682,9 @@ impl FeatureSpec {
             FeatureSpec::Sweep(_) => "Sweep",
             FeatureSpec::Patch(_) => "Patch",
             FeatureSpec::Ruled(_) => "Ruled",
+            FeatureSpec::Trim(_) => "Trim",
+            FeatureSpec::Extend(_) => "Extend",
+            FeatureSpec::Match(_) => "Match",
             FeatureSpec::Stitch(_) => "Stitch",
             FeatureSpec::Unstitch(_) => "Unstitch",
             FeatureSpec::Thicken(_) => "Thicken",
@@ -765,7 +812,13 @@ impl FeatureSpec {
             | FeatureSpec::Combine(_)
             | FeatureSpec::Patch(_)
             | FeatureSpec::Ruled(_)
-            | FeatureSpec::Unstitch(_) => {}
+            | FeatureSpec::Unstitch(_)
+            | FeatureSpec::Match(_) => {}
+            FeatureSpec::Trim(t) => {
+                if let TrimToolSpec::Plane(pl) = &mut t.tool {
+                    plane_params(pl, &mut |p| f(p));
+                }
+            }
             FeatureSpec::Fillet(x) => f(&mut x.radius),
             FeatureSpec::Chamfer(x) => {
                 f(&mut x.d1);
@@ -785,6 +838,7 @@ impl FeatureSpec {
             FeatureSpec::Thread(x) => f(&mut x.length),
             FeatureSpec::Offset(x) => f(&mut x.distance),
             FeatureSpec::Thicken(x) => f(&mut x.thickness),
+            FeatureSpec::Extend(x) => f(&mut x.length),
             FeatureSpec::OffsetSurface(x) => f(&mut x.distance),
             FeatureSpec::Stitch(x) => f(&mut x.tolerance),
             FeatureSpec::Hole(h) => {
@@ -953,6 +1007,9 @@ impl FeatureSpec {
             FeatureSpec::Thread(x) => x.base,
             FeatureSpec::Offset(x) => x.base,
             FeatureSpec::Unstitch(x) => x.base,
+            FeatureSpec::Trim(x) => x.base,
+            FeatureSpec::Extend(x) => x.base,
+            FeatureSpec::Match(x) => x.base,
             FeatureSpec::Thicken(x) => x.base,
             FeatureSpec::OffsetSurface(x) => x.base,
             FeatureSpec::Hole(x) => x.base,
@@ -984,6 +1041,9 @@ impl FeatureSpec {
             FeatureSpec::Thread(x) => x.base = b,
             FeatureSpec::Offset(x) => x.base = b,
             FeatureSpec::Unstitch(x) => x.base = b,
+            FeatureSpec::Trim(x) => x.base = b,
+            FeatureSpec::Extend(x) => x.base = b,
+            FeatureSpec::Match(x) => x.base = b,
             FeatureSpec::Thicken(x) => x.base = b,
             FeatureSpec::OffsetSurface(x) => x.base = b,
             FeatureSpec::Hole(x) => x.base = b,
@@ -1123,6 +1183,29 @@ impl FeatureSpec {
             FeatureSpec::Combine(x) => {
                 v.push(x.target);
                 v.push(x.tool);
+            }
+            FeatureSpec::Trim(x) => match &x.tool {
+                TrimToolSpec::Plane(pl) => plane_refs(pl, &mut v),
+                TrimToolSpec::Face { source, face } => {
+                    v.push(*source);
+                    v.push(face.name.feature);
+                }
+            },
+            FeatureSpec::Extend(x) => {
+                for e in &x.edges {
+                    match e {
+                        BoundaryRef::Shared(r) => refs(&r.faces, &mut v),
+                        BoundaryRef::Free { face, .. } => v.push(face.name.feature),
+                    }
+                }
+            }
+            FeatureSpec::Match(x) => {
+                v.push(x.neighbour_source);
+                v.push(x.neighbour_face.name.feature);
+                match &x.edge {
+                    BoundaryRef::Shared(r) => refs(&r.faces, &mut v),
+                    BoundaryRef::Free { face, .. } => v.push(face.name.feature),
+                }
             }
             FeatureSpec::Stitch(x) => v.extend(x.bodies.iter().copied()),
             FeatureSpec::Patch(x) => v.extend(x.edges.iter().map(|e| e.source)),

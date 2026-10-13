@@ -16,12 +16,14 @@ use kw_brep::{BRep, BodyId, BuildResult, CopyOptions, EdgeId, EntityRef, FaceId,
 use kw_expr::{Dim, Param, Quantity};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
 use kw_model::{
-    draft_faces, extrude, extrude_sheet, loft, loft_sheet, offset_body, offset_sheet, patch_sheet,
-    revolve_sheet, ruled_sheet, shell, stitch, sweep, sweep_sheet, thicken, unstitch, Chain,
-    PatchEdge, Profile, ProfileEdge, ProfileLoop, SweepOptions, ThickenSide,
+    draft_faces, extend_sheet, extrude, extrude_sheet, loft, loft_sheet, match_boundary,
+    offset_body, offset_sheet, patch_sheet, revolve_sheet, ruled_sheet, shell, stitch, sweep,
+    sweep_sheet, thicken, trim_sheet, unstitch, Chain, PatchEdge, Profile, ProfileEdge,
+    ProfileLoop, SweepOptions, ThickenSide,
 };
 use kw_nurbs::Curve3;
 use kw_nurbs::CurveGeom;
+use kw_nurbs::SurfaceGeom;
 use kw_sketch::{EntityKind, Solver};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1050,6 +1052,86 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             sess.adopt(r);
             finish_with_op(id, inp, sess, w.op, notes)
         }
+        FeatureSpec::Trim(t) => {
+            let b = any_body_of(inp, "trim", false)?;
+            let tool = match &t.tool {
+                TrimToolSpec::Plane(ps) => {
+                    let frame = plane_frame(ps, inp, &mut notes)?;
+                    kw_model::TrimTool {
+                        surface: SurfaceGeom::Plane(kw_nurbs::geom::Plane { frame }),
+                        sign: 1.0,
+                    }
+                }
+                TrimToolSpec::Face { source, face } => {
+                    let src = inp.get(*source)?;
+                    let rep = src.brep().ok_or_else(|| {
+                        EvalError::Dependency(format!("{source} has no body to take a face from"))
+                    })?;
+                    let f = resolve_face(src, face, &mut notes)?;
+                    let (surface, sign, _) = neighbour_of(rep, f);
+                    kw_model::TrimTool { surface, sign }
+                }
+            };
+            let mut sess = Session::new(id, Some(b));
+            let body = sess.input_body("trim")?;
+            let r = trim_sheet(&mut sess.rep, body, &tool, t.keep_positive)
+                .map_err(|e| kernel("trim", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
+        FeatureSpec::Extend(x) => {
+            let b = any_body_of(inp, "extend", false)?;
+            let length = length(&x.length)?;
+            let mut edges = Vec::new();
+            for r in &x.edges {
+                let (e, _) = resolve_boundary_edge(b, r, &mut notes)?;
+                if !edges.contains(&e) {
+                    edges.push(e);
+                }
+            }
+            let mut sess = Session::new(id, Some(b));
+            let body = sess.input_body("extend")?;
+            let r = extend_sheet(&mut sess.rep, body, &edges, length)
+                .map_err(|e| kernel("extend", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
+        FeatureSpec::Match(m) => {
+            let b = any_body_of(inp, "match", false)?;
+            let (edge, _) = resolve_boundary_edge(b, &m.edge, &mut notes)?;
+            let src = inp.get(m.neighbour_source)?;
+            let nrep = src.brep().ok_or_else(|| {
+                EvalError::Dependency(format!("{} has no body to match to", m.neighbour_source))
+            })?;
+            let nf = resolve_face(src, &m.neighbour_face, &mut notes)?;
+            let (surface, sign, inside) = neighbour_of(nrep, nf);
+            let neighbour: kw_model::NeighbourFn =
+                Arc::new(move |p: &Point3<f64>, b: &Vector3<f64>| {
+                    let (normal, out, uv) = face_frame_at(&surface, sign, inside, p, b)?;
+                    let curvature = kw_model::normal_curvature(&surface, uv, &out, sign);
+                    Some(kw_model::NeighbourSample {
+                        normal,
+                        out,
+                        curvature,
+                    })
+                });
+            let level = match m.level {
+                MatchLevel::G1 => kw_model::Continuity::G1,
+                MatchLevel::G2 => kw_model::Continuity::G2,
+            };
+            let mut sess = Session::new(id, Some(b));
+            let body = sess.input_body("match")?;
+            let (r, residual) = match_boundary(&mut sess.rep, body, edge, &neighbour, level)
+                .map_err(|e| kernel("match", e))?;
+            if residual.angle > 0.02 {
+                return Err(EvalError::Kernel(format!(
+                    "match: the surface could only be brought within {:.1} degrees of the neighbour's tangent plane",
+                    residual.angle.to_degrees()
+                )));
+            }
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
         FeatureSpec::Stitch(st) => {
             if st.bodies.is_empty() {
                 return Err(EvalError::Reference("pick the surfaces to stitch".into()));
@@ -1888,6 +1970,68 @@ pub fn boundary_ref(out: &EvalOutput, edge: EdgeId) -> Result<BoundaryRef, Strin
     }
 }
 
+/// The edge a boundary reference names, and (for an open edge) the face it belongs to.
+fn resolve_boundary_edge(
+    src: &EvalOutput,
+    r: &BoundaryRef,
+    notes: &mut Vec<Resolution>,
+) -> Result<(EdgeId, Option<FaceId>), EvalError> {
+    let (Some(rep), Some(body)) = (src.brep(), src.body()) else {
+        return Err(EvalError::Dependency("the input has no body".into()));
+    };
+    match r {
+        BoundaryRef::Shared(r) => {
+            Ok((resolve_edges(src, std::slice::from_ref(r), notes)?[0], None))
+        }
+        BoundaryRef::Free { face, index } => {
+            let f = resolve_face(src, face, notes)?;
+            let e = *free_edges_of(rep, body, f)
+                .get(*index as usize)
+                .ok_or_else(|| {
+                    EvalError::Reference("the face has no open edge at that place".into())
+                })?;
+            Ok((e, Some(f)))
+        }
+    }
+}
+
+/// What a face looks like to a surface meeting it: its surface, which way it looks, and a point inside.
+fn neighbour_of(rep: &BRep, f: FaceId) -> (SurfaceGeom, f64, Option<Vector3<f64>>) {
+    let fc = &rep.faces[f];
+    let sign = if fc.sense == kw_brep::Sense::Forward {
+        1.0
+    } else {
+        -1.0
+    };
+    let inside = rep
+        .face_bbox(f)
+        .map(|b| (b.min.coords + b.max.coords) * 0.5);
+    (rep.surfaces[fc.surface].clone(), sign, inside)
+}
+
+/// The unit normal and the unit vector across the edge, out of the face, at a point of its edge
+/// whose tangent is `b`; also the point's parameters.
+fn face_frame_at(
+    surface: &SurfaceGeom,
+    sign: f64,
+    inside: Option<Vector3<f64>>,
+    p: &Point3<f64>,
+    b: &Vector3<f64>,
+) -> Option<(Vector3<f64>, Vector3<f64>, (f64, f64))> {
+    use kw_nurbs::Surface;
+    let uv = kw_nurbs::proj::surface_param_of(surface, p, None);
+    let n = surface.normal_at(uv.u, uv.v) * sign;
+    let towards = inside? - p.coords;
+    let in_plane = towards - n * n.dot(&towards);
+    let across = in_plane - b * b.dot(&in_plane);
+    let out = match across.try_normalize(1e-9) {
+        Some(a) => -a,
+        // the edge runs through the middle of the face: no side is better than another
+        None => n.cross(b).try_normalize(1e-300)?,
+    };
+    Some((n, out, (uv.u, uv.v)))
+}
+
 struct Boundary {
     edge: ProfileEdge,
     neighbour: Option<kw_model::NormalFn>,
@@ -1901,31 +2045,18 @@ fn boundary_curve(
     notes: &mut Vec<Resolution>,
 ) -> Result<Boundary, EvalError> {
     let src = inp.get(be.source)?;
-    let (Some(rep), Some(body)) = (src.brep(), src.body()) else {
+    let (Some(rep), Some(_)) = (src.brep(), src.body()) else {
         return Err(EvalError::Dependency(format!(
             "{} has no body to take an edge from",
             be.source
         )));
     };
-    let (edge, face) = match &be.edge {
-        BoundaryRef::Shared(r) => {
-            if be.tangent {
-                return Err(EvalError::Reference(
-                    "only an open edge of a surface can be made tangent: an edge between two faces has two sides".into(),
-                ));
-            }
-            (resolve_edges(src, std::slice::from_ref(r), notes)?[0], None)
-        }
-        BoundaryRef::Free { face, index } => {
-            let f = resolve_face(src, face, notes)?;
-            let e = *free_edges_of(rep, body, f)
-                .get(*index as usize)
-                .ok_or_else(|| {
-                    EvalError::Reference("the face has no open edge at that place".into())
-                })?;
-            (e, Some(f))
-        }
-    };
+    if be.tangent && matches!(be.edge, BoundaryRef::Shared(_)) {
+        return Err(EvalError::Reference(
+            "only an open edge of a surface can be made tangent: an edge between two faces has two sides".into(),
+        ));
+    }
+    let (edge, face) = resolve_boundary_edge(src, &be.edge, notes)?;
     let ed = &rep.edges[edge];
     let curve = ed
         .curve
@@ -1933,30 +2064,9 @@ fn boundary_curve(
         .ok_or_else(|| EvalError::Reference("that edge is a single point".into()))?;
     let neighbour = match (face, be.tangent) {
         (Some(f), true) => {
-            let fc = &rep.faces[f];
-            let surface = rep.surfaces[fc.surface].clone();
-            let sign = if fc.sense == kw_brep::Sense::Forward {
-                1.0
-            } else {
-                -1.0
-            };
-            // a point inside the face, to tell which way is out of it
-            let inside = rep
-                .face_bbox(f)
-                .map(|b| (b.min.coords + b.max.coords) * 0.5);
+            let (surface, sign, inside) = neighbour_of(rep, f);
             let nf: kw_model::NormalFn = Arc::new(move |p: &Point3<f64>, b: &Vector3<f64>| {
-                use kw_nurbs::Surface;
-                let uv = kw_nurbs::proj::surface_param_of(&surface, p, None);
-                let n = surface.normal_at(uv.u, uv.v) * sign;
-                let towards = inside? - p.coords;
-                let in_plane = towards - n * n.dot(&towards);
-                let across = in_plane - b * b.dot(&in_plane);
-                let out = match across.try_normalize(1e-9) {
-                    Some(a) => -a,
-                    // the edge runs through the middle of the face: no side is better than another
-                    None => n.cross(b).try_normalize(1e-300)?,
-                };
-                Some((n, out))
+                face_frame_at(&surface, sign, inside, p, b).map(|(n, out, _)| (n, out))
             });
             Some(nf)
         }

@@ -29,4 +29,4 @@ pub use geom::{
     Torus,
 };
 pub use knots::{KnotError, KnotVector};
-pub use surface::{NurbsSurface, SurfaceProjection};
+pub use surface::{ExtendDir, NurbsSurface, SurfaceProjection};

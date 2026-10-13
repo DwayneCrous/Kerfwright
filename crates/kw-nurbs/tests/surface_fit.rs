@@ -76,3 +76,104 @@ fn bad_grids_are_refused() {
     assert!(NurbsSurface::interpolate(&small, 3, 3).is_err());
     assert!(NurbsSurface::interpolate(&small, 0, 2).is_err());
 }
+
+use kw_nurbs::{ExtendDir, KnotVector};
+
+/// A bicubic polynomial surface on `[0, 1] x [0, 2]`, with two spans in v.
+fn poly_surface() -> NurbsSurface {
+    let f = |u: f64, v: f64| {
+        Point3::new(
+            u + 0.3 * v * v,
+            v - 0.2 * u * u * v + 0.1 * v * v * v,
+            u * u * u - u * v + 0.5 * v * v,
+        )
+    };
+    let ku = KnotVector::new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
+    let kv = KnotVector::new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0, 2.0]).unwrap();
+    // a polynomial of degree 3 is reproduced exactly by collocation (the C2 spline has the same span space)
+    let _ = f;
+    NurbsSurface::collocate(ku, kv, &f).unwrap()
+}
+
+fn f_exact(u: f64, v: f64) -> Point3<f64> {
+    Point3::new(
+        u + 0.3 * v * v,
+        v - 0.2 * u * u * v + 0.1 * v * v * v,
+        u * u * u - u * v + 0.5 * v * v,
+    )
+}
+
+#[test]
+fn an_extended_surface_keeps_what_it_was_and_continues_the_polynomial() {
+    let s = poly_surface();
+    // the collocation really is the polynomial (it has cubic pieces in v only where the data is cubic)
+    for (u, v) in [(0.2, 0.4), (0.9, 1.7)] {
+        assert!((s.point_at(u, v) - f_exact(u, v)).norm() < 1e-9);
+    }
+    for (dir, check) in [
+        (ExtendDir::VEnd, (0.4, 2.0 + 0.6)),
+        (ExtendDir::VStart, (0.4, -0.6)),
+        (ExtendDir::UEnd, (1.5, 0.7)),
+        (ExtendDir::UStart, (-0.5, 0.7)),
+    ] {
+        let e = s
+            .extended(dir, 0.6)
+            .unwrap_or_else(|er| panic!("{dir:?}: {er:?}"));
+        let ((u0, u1), (v0, v1)) = e.domain();
+        // the new domain is the old one plus 0.6 at the chosen end
+        match dir {
+            ExtendDir::VEnd => assert!((v1 - 2.6).abs() < 1e-12 && v0 == 0.0 && u1 == 1.0),
+            ExtendDir::VStart => assert!((v0 + 0.6).abs() < 1e-12 && v1 == 2.0),
+            ExtendDir::UEnd => assert!((u1 - 1.6).abs() < 1e-12 && u0 == 0.0),
+            ExtendDir::UStart => assert!((u0 + 0.6).abs() < 1e-12 && u1 == 1.0),
+        }
+        // where the surface already was it is unchanged, with the same parameters
+        for (u, v) in [(0.2, 0.4), (0.9, 1.7), (0.5, 1.0)] {
+            assert!(
+                (e.point_at(u, v) - s.point_at(u, v)).norm() < 1e-9,
+                "{dir:?}"
+            );
+        }
+        // and beyond it, it is the polynomial carried on
+        let (u, v) = check;
+        let u = if matches!(dir, ExtendDir::VEnd | ExtendDir::VStart) {
+            0.4
+        } else {
+            u
+        };
+        let v = if matches!(dir, ExtendDir::VEnd | ExtendDir::VStart) {
+            v
+        } else {
+            0.7
+        };
+        assert!(
+            (e.point_at(u, v) - f_exact(u, v)).norm() < 1e-9,
+            "{dir:?} at ({u}, {v})"
+        );
+    }
+}
+
+#[test]
+fn a_rational_surface_extends_too_and_a_collapsing_weight_is_refused() {
+    // a quarter cylinder: rational in u, linear in v
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let pts = vec![
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(1.0, 1.0, 0.0),
+        Point3::new(1.0, 1.0, 1.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ];
+    let ws = vec![1.0, 1.0, h, h, 1.0, 1.0];
+    let ku = KnotVector::new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+    let kv = KnotVector::new(1, vec![0.0, 0.0, 1.0, 1.0]).unwrap();
+    let s = NurbsSurface::new(ku, kv, pts, ws).unwrap();
+    // along v (a straight generator) the extension is exact
+    let e = s.extended(ExtendDir::VEnd, 2.0).unwrap();
+    let p = e.point_at(0.3, 2.5);
+    let q = s.point_at(0.3, 0.0);
+    assert!((p.x - q.x).abs() < 1e-12 && (p.y - q.y).abs() < 1e-12 && (p.z - 2.5).abs() < 1e-12);
+    // along u the circle's weights run out: far enough, the rational continuation breaks
+    assert!(s.extended(ExtendDir::UEnd, 100.0).is_err());
+}

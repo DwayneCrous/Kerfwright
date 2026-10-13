@@ -55,6 +55,7 @@ shot surface_loft --design-demo surface
 shot surface_zebra --design-demo surface-zebra
 shot surface_patch --design-demo patch
 shot surface_thicken --design-demo thicken
+shot surface_trim --design-demo trim
 shot surface_patch_zebra --design-demo patch-zebra
 shot analysis_curvature --design-demo curvature
 shot analysis_draft --design-demo draft

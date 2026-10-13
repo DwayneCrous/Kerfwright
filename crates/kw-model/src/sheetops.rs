@@ -169,7 +169,7 @@ impl EdgeSampler<'_> {
 
 /// A clamped knot vector over `[a, b]` with a break (a knot of multiplicity `deg`) at every value of
 /// `breaks`, and `per` equal spans between neighbouring breaks.
-fn knots_over(a: f64, b: f64, breaks: &[f64], per: usize, deg: usize) -> KnotVector {
+pub(crate) fn knots_over(a: f64, b: f64, breaks: &[f64], per: usize, deg: usize) -> KnotVector {
     let mut k = vec![a; deg + 1];
     let mut at = vec![a];
     at.extend(breaks.iter().copied().filter(|x| *x > a && *x < b));
@@ -187,7 +187,7 @@ fn knots_over(a: f64, b: f64, breaks: &[f64], per: usize, deg: usize) -> KnotVec
 }
 
 /// The interior knot values of a knot vector.
-fn interior_breaks(k: &KnotVector) -> Vec<f64> {
+pub(crate) fn interior_breaks(k: &KnotVector) -> Vec<f64> {
     let ks = k.as_slice();
     let (a, b) = (ks[0], ks[ks.len() - 1]);
     k.distinct()
@@ -206,7 +206,7 @@ fn midpoints(g: &[f64], max: usize) -> Vec<f64> {
         .collect()
 }
 
-fn greville(k: &KnotVector) -> Vec<f64> {
+pub(crate) fn greville(k: &KnotVector) -> Vec<f64> {
     let p = k.degree();
     let ks = k.as_slice();
     (0..k.num_ctrl())

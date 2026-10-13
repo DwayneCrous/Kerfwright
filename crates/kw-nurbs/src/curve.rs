@@ -332,8 +332,22 @@ impl NurbsCurve {
         knots: KnotVector,
         f: &dyn Fn(f64) -> Point3<f64>,
     ) -> Result<NurbsCurve, NurbsError> {
+        let g = greville(&knots);
+        let values: Vec<Point3<f64>> = g.iter().map(|t| f(*t)).collect();
+        Self::collocate_values(knots, &values)
+    }
+
+    /// Like [`collocate`](Self::collocate) for values already known at the Greville abscissae (given
+    /// in order): the curve whose control points solve the interpolation there.
+    pub fn collocate_values(
+        knots: KnotVector,
+        values: &[Point3<f64>],
+    ) -> Result<NurbsCurve, NurbsError> {
         let p = knots.degree();
         let n = knots.num_ctrl();
+        if values.len() != n {
+            return Err(NurbsError::InvalidArgument("one value per Greville point"));
+        }
         let g = greville(&knots);
         let mut a = DMatrix::<f64>::zeros(n, n);
         for (r, &t) in g.iter().enumerate() {
@@ -342,8 +356,7 @@ impl NurbsCurve {
                 a[(r, span - p + j)] = *b;
             }
         }
-        let pts: Vec<Point3<f64>> = g.iter().map(|t| f(*t)).collect();
-        let rhs = DMatrix::from_fn(n, 3, |i, c| pts[i][c]);
+        let rhs = DMatrix::from_fn(n, 3, |i, c| values[i][c]);
         let sol = a.lu().solve(&rhs).ok_or(NurbsError::SingularSystem)?;
         let ctrl = (0..n)
             .map(|i| Point3::new(sol[(i, 0)], sol[(i, 1)], sol[(i, 2)]))

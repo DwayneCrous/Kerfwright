@@ -256,19 +256,46 @@ impl DesignWorkspace {
         )
         .active(dlg("OFFSET SURFACE"))
         .enabled_if(cx.surfaces >= 1, need_surface);
+        let trim = it(
+            "surf_trim",
+            Icon::Split,
+            "Trim",
+            "Cut a surface with a plane or another surface and keep one side",
+        )
+        .active(dlg("TRIM"))
+        .enabled_if(cx.surfaces >= 1, need_surface);
+        let extend = it(
+            "surf_extend",
+            Icon::Offset,
+            "Extend",
+            "Carry a surface on past an open edge",
+        )
+        .active(dlg("EXTEND"))
+        .enabled_if(cx.surfaces >= 1, need_surface);
+        let matching = it(
+            "surf_match",
+            Icon::Mirror,
+            "Match",
+            "Reshape a patch near an edge to meet a neighbouring face tangentially (G1) or with its curvature (G2)",
+        )
+        .active(dlg("MATCH"))
+        .enabled_if(cx.surfaces >= 1, need_surface);
         if let Some(id) = rb::menu_group(
             ui,
             "MODIFY",
             &[
+                trim.clone().into(),
+                extend.clone().into(),
+                matching.clone().into(),
                 stitch.clone().into(),
                 unstitch.clone().into(),
                 thicken.clone().into(),
                 offset.clone().into(),
             ],
-            &[Section::new(
-                "SURFACES",
-                vec![stitch, unstitch, thicken, offset],
-            )],
+            &[
+                Section::new("SHAPE", vec![trim, extend, matching]),
+                Section::new("SURFACES", vec![stitch, unstitch, thicken, offset]),
+            ],
         ) {
             picked.push(id);
         }
@@ -1206,6 +1233,15 @@ impl DesignWorkspace {
                 twist: String::new(),
                 guide: None,
             },
+            "surf_trim" => Tool::Trim {
+                plane: Default::default(),
+                use_face: false,
+                keep_positive: false,
+            },
+            "surf_extend" => Tool::Extend {
+                length: "5 mm".into(),
+            },
+            "surf_match" => Tool::Match { level: 0 },
             "surf_stitch" => Tool::Stitch {
                 tolerance: "0.01 mm".into(),
             },
