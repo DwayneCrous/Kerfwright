@@ -20,7 +20,7 @@ A project is a `.kwf` file: the feature document of Phase 4 plus the Phase 5 dat
 * **View**: the view cube (click a face to turn the camera there, animated), orbit (drag), pan (right/middle drag), zoom (wheel), hover and selection highlights, and a navigation bar (Home, Fit, shaded / wireframe, edges, planes).
 
 ## The ribbon (round 2)
-Tabs **SOLID, SHEET METAL, FORM, TOOLS** (and **SKETCH** while sketching). Each group is a few big icon buttons plus a `TITLE ▾` dropdown that lists every command of the group, with its icon, name, shortcut and category headings (CREATE: sketch-based / features / pattern; MODIFY; CONSTRUCT: plane / axis / point; INSPECT; ASSEMBLE; …). A command that cannot run says why in its tooltip. The ribbon scrolls sideways when the window is narrow.
+Tabs **SOLID, SURFACE, SHEET METAL, FORM, TOOLS** (and **SKETCH** while sketching). Each group is a few big icon buttons plus a `TITLE ▾` dropdown that lists every command of the group, with its icon, name, shortcut and category headings (CREATE: sketch-based / features / pattern; MODIFY; CONSTRUCT: plane / axis / point; INSPECT; ASSEMBLE; …). A command that cannot run says why in its tooltip. The ribbon scrolls sideways when the window is narrow.
 * **CREATE ▾** adds Tapped Hole, Thread, Rib, Pipe; **MODIFY ▾** adds Move / Copy, Scale, Split Body (Bodies are listed in the browser with an eye, rename, colour and material; a click makes a body the target of new features).
 * **Extrude** has *Start*, *To face*, *Thin* (inside / outside / centred) and, for sketches with overlapping shapes, **region picking**: the regions are drawn over the sketch plane, click to toggle. **Revolve** can turn about a clicked body edge or a construction axis.
 * **CONSTRUCT ▾**: planes, axes and points (listed under *Construction* in the browser with eye toggles).
@@ -32,6 +32,7 @@ Tabs **SOLID, SHEET METAL, FORM, TOOLS** (and **SKETCH** while sketching). Each 
   * **Interference** lists overlaps, outlines them in red and can re-check after every change; **Bill of Materials** lists parts with quantity, material (pick one per part), volume, mass and size, and exports CSV.
   * The **browser** has *Components* (eye, a **G** badge on grounded ones, sub-assemblies indented; right-click: Activate, Ground, Rename, Copy, Isolate, Show all, Create rigid group, Group into sub-assembly, Delete), *Joints* (double-click for properties: type, values, limits, flip, offset, angle) and *Rigid Groups*.
   * Undo / Redo act on the assembly while the assembly view is shown and on the design otherwise.
+* **SURFACE**: CREATE ▾ Extrude, Revolve, Sweep, Loft (each opens the solid dialog set to *Output: Surface*), **Patch** and **Ruled Surface** (click the edges; Shift adds); MODIFY ▾ **Trim** (plane or a clicked face, side to keep), **Extend**, **Match** (click the patch's open edge, then the face to meet; G1 or G2), **Stitch** (nothing picked takes every surface), **Unstitch**, **Thicken**, **Offset Surface**; INSPECT ▾ **Zebra**, **Curvature**, **Draft** (a window sets the kind, direction, density or range; a colour bar shows the scale) and **Edge Continuity** (coloured edges and a window of counts). Commands that need a surface say so when there is none.
 * **SKETCH ▸ CREATE ▾ Text**, **MODIFY ▾ Rectangular / Circular Pattern** (select curves first), **PROJECT ▾ Project / Intersect**.
 * **SHEET METAL**: L / U / Z strips or a custom strip (thickness, K-factor, radius, width, flats and bends), **Flat Pattern** window with bend table, DXF export and Refold. **FORM**: box, cylinder, sphere, torus cages (cage drawn in the view; OK finishes it into a body). **TOOLS**: inspect, appearance, parameters, import / export.
 
@@ -56,6 +57,6 @@ Tabs **SOLID, SHEET METAL, FORM, TOOLS** (and **SKETCH** while sketching). Each 
 
 ## Limits
 * Fillet / chamfer / shell reference faces by name; a feature added while the model is rolled back is refused rather than inserted at the marker.
-* SURFACE and MESH tabs are not shown (nothing behind them). The full list of what fell short in round 2 (cosmetic threads only, no pyramid Form, numeric cage editing, …) is in `docs/fusion-parity.md`.
+* The MESH tab is not shown (nothing behind it); the SURFACE tab is described in `docs/surface-report.md`. The full list of what fell short in round 2 (cosmetic threads only, no pyramid Form, numeric cage editing, …) is in `docs/fusion-parity.md`.
 * Sketching is on the flat 2-D canvas, not in the 3-D view. The model is evaluated on the UI thread (a very heavy model pauses the window); CAM, FEA, routing, stock simulation and denoising run on background threads.
 * CAM works on rectangles (typed or the model's bounding box); FEA meshes the first body's faceted tessellation and stores supports and loads by face index (stale if the geometry changes shape); ECAD offers generated sample boards only; Render uses its own GPU device and a fixed 960×600 image.

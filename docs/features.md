@@ -12,7 +12,7 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 
 ## 2. Ribbon and interface widgets
 * Icon buttons in groups, each with a `TITLE ▾` dropdown listing every command with icon, name, shortcut and category headings; split buttons for variants; disabled commands explain why; the ribbon scrolls sideways in a narrow window.
-* Tabs: SOLID (CREATE, MODIFY, CONSTRUCT, INSPECT, ASSEMBLE, SELECT), SHEET METAL, FORM, TOOLS, and SKETCH while sketching (CREATE, MODIFY, PROJECT, CONSTRAINTS, OPTIONS, FINISH). SURFACE and MESH are not shown.
+* Tabs: SOLID (CREATE, MODIFY, CONSTRUCT, INSPECT, ASSEMBLE, SELECT), SURFACE (CREATE, MODIFY, INSPECT), SHEET METAL, FORM, TOOLS, and SKETCH while sketching (CREATE, MODIFY, PROJECT, CONSTRAINTS, OPTIONS, FINISH). MESH is not shown.
 * Painter-drawn icon set (no image files).
 * View cube: bevelled cube with clickable faces, edges and corners, turn arrows (quarter turn, 45° up/down), menu (Isometric, Zoom to fit, Previous view, Shaded/wireframe, Show edges, Section view).
 * Navigation: orbit, pan, zoom, home, fit, shaded/wireframe, edges on/off, origin planes; clip planes follow the model so panning never cuts it.
@@ -47,6 +47,13 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 **Inspect:** Measure (face area/kind, edge length/radius, distances and angles between picks, volume, area, mass in 10 materials, centre of mass, bounding box, inertia, threads), Interference (overlap volumes), Section Analysis (clip plane with cap; origin or construction plane, offset, flip).
 **Import:** STEP / IGES solids as a feature.
 **Persistent naming:** faces keep their names through edits and later features; references survive rollback and reorder.
+
+## 4a. Surfaces and analysis
+**Surface bodies** (sheets) have area but no volume; Booleans, fillet, shell and the other solid features refuse them. Open edges are drawn in magenta; Measure shows area, free edges and bounding box; the browser marks them *(surface)*.
+**SURFACE tab, CREATE:** Extrude, Revolve, Loft (smooth or ruled), Sweep (twist, guide rail) of open or closed sketch curves (also *Output: Surface* in the solid dialogs); **Patch** (three or more picked edges; four give one Coons patch, optionally tangent to the surface an open edge belongs to; more or fewer split about the centre); **Ruled Surface** between two edges.
+**MODIFY:** **Trim** (plane or a picked face, keep either side), **Extend** (strip past an open edge, surface carried on), **Match** (G1 / G2 of a NURBS patch to a neighbouring face along an open edge), **Stitch** (surfaces whose open edges coincide within a tolerance; a closed group becomes a solid), **Unstitch** (a body into its faces), **Thicken** (normal / reverse / both sides, walls along the open edges), **Offset Surface**.
+**INSPECT:** **Zebra** (reflection stripes, axis and density), **Curvature** (Gaussian, mean, maximum, minimum; range from the model or set by hand; colour bar), **Draft** (pull direction, limit angle), **Edge Continuity** (each edge shared by two faces coloured gap / G0 / G1 / G2, tolerance slider, counts and the worst joins). Analysis shows unlit on every body, solid or surface, and keeps the section cap.
+**Features** `Patch`, `Ruled`, `Stitch`, `Unstitch`, `Thicken`, `OffsetSurface`, `Trim`, `Extend`, `Match` and the `surface` flag of Extrude / Revolve / Loft / Sweep are in the timeline with persistent face names and in the `.kwf` (older files read unchanged). Details, sources and limits: `docs/surface-report.md`.
 
 ## 5. Assemblies (Design workspace)
 * **Components inside the project:** New (empty) Component, Component from Body (copies the feature chain that builds the body), Component from Design, Insert from a `.kwf`; activate a component to edit it in place and finish it; copies share a part; sub-assemblies (group components, their joints and groups go with them); stored in the project file (`assembly.cbor`; files of the first version still open).
@@ -85,10 +92,10 @@ Realtime PBR viewport (ambient occlusion, edge lines, picking buffer), CPU/GPU p
 * **kw-math / kw-nurbs:** transforms, frames, NURBS curves and surfaces, fitting, analytic surfaces, intersection helpers, uniform scaling of all surface and curve kinds.
 * **kw-brep:** B-rep topology, validation, mass properties, copy with transform/scale.
 * **kw-ssi / kw-boolean:** surface–surface intersection and Booleans (analytic and free-form), healing, face merging.
-* **kw-model:** extrude, revolve, sweep, loft, shell, offset, draft. **kw-blend:** fillet, chamfer, variable radius, tangent chains, vertex blends.
+* **kw-model:** extrude, revolve, sweep, loft, shell, offset, draft; surfaces (sheet builders, Coons patches, ruled surfaces, stitch / unstitch, offset, thicken, trim, extend, match). **kw-analysis:** curvature, zebra, draft and edge continuity. kw-brep also holds the sewing (`sew`); kw-nurbs surface interpolation, collocation and extension. **kw-blend:** fillet, chamfer, variable radius, tangent chains, vertex blends.
 * **kw-tess:** tessellation. **kw-step / kw-iges / kw-io / kw-dxf:** file formats (kw-dxf also writes text, line types and layer weights). **kw-drawing:** sheets, projection and hidden lines, sections, details, dimensions, annotation, parts lists, PDF and DXF writers.
 * **kw-sketch:** sketch model, constraint solver, planar arrangement, curves, text. **kw-expr:** unit-aware expression language. **kw-feature:** the parametric engine (timeline, evaluation, naming, parameters, sheet-metal and Form features, regions). **kw-script:** scripting. **kw-store:** extra project data. **kw-assembly, kw-sheet, kw-subd:** engines behind the three UIs above.
 * **kw-cam / kw-gsim / kw-fem / kw-mesh3d / kw-ecad / kw-fabcheck / kw-render / kw-job:** the manufacturing, simulation, electronics and rendering engines.
 
 ## 14. Known limits
-No modelled (helical) threads; assembly joints form a tree (no closed kinematic loops) and components are copies in the project (no linked files); no Surface or Mesh tabs; Form cages edited by numbers only; ellipse/spline crossings that only graze can be missed when splitting sketches; chosen regions that touch only at a corner become separate pieces of one body; CAM and FEA use the last solid only; STL import not built; drawing limits are listed in `docs/fusion-parity.md`, no collaboration.
+No modelled (helical) threads; assembly joints form a tree (no closed kinematic loops) and components are copies in the project (no linked files); no Mesh tab (surfaces are in `docs/surface-report.md`); Form cages edited by numbers only; ellipse/spline crossings that only graze can be missed when splitting sketches; chosen regions that touch only at a corner become separate pieces of one body; CAM and FEA use the last solid only; STL import not built; drawing limits are listed in `docs/fusion-parity.md`, no collaboration.

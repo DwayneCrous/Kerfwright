@@ -1,6 +1,6 @@
 # Kerfwright — Rust Technical Architecture
 
-Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions referenced here are real code in `crates/` (compiled and tested; `kw-math`, `kw-nurbs`, `kw-brep`, `kw-tess`, `kw-io`, `kw-viewer` are implemented in Phase 1, `kw-sketch` is implemented in Phase 2, the kernel crates in Phase 3, `kw-feature`/`kw-expr`/`kw-sheet`/`kw-subd`/`kw-assembly`/`kw-script` in Phase 4, `kw-drawing` (2-D drawings, added after Phase 5; see `docs/drawing-report.md`), `kw-job`/`kw-mesh3d`/`kw-fem`/`kw-cam`/`kw-gsim`/`kw-ecad`/`kw-fabcheck`/`kw-render`/`kw-store` in Phase 5 — `kw-voronoi` was cut, see `docs/phase5-report.md` — and `kw-app` is the egui application with the Rayon ⇄ Tokio bridge, see `docs/app-shell.md`); this document shows the key ones in condensed form plus the diagrams.
+Companion to `docs/01-research/` and `docs/02-PRD.md`. The Rust definitions referenced here are real code in `crates/` (compiled and tested; `kw-math`, `kw-nurbs`, `kw-brep`, `kw-tess`, `kw-io`, `kw-viewer` are implemented in Phase 1, `kw-sketch` is implemented in Phase 2, the kernel crates in Phase 3, `kw-feature`/`kw-expr`/`kw-sheet`/`kw-subd`/`kw-assembly`/`kw-script` in Phase 4, `kw-drawing` (2-D drawings, added after Phase 5; see `docs/drawing-report.md`), `kw-analysis` (surface diagnostics) and the surface modelling in `kw-model` / `kw-brep` (added later; see `docs/surface-report.md`), `kw-job`/`kw-mesh3d`/`kw-fem`/`kw-cam`/`kw-gsim`/`kw-ecad`/`kw-fabcheck`/`kw-render`/`kw-store` in Phase 5 — `kw-voronoi` was cut, see `docs/phase5-report.md` — and `kw-app` is the egui application with the Rayon ⇄ Tokio bridge, see `docs/app-shell.md`); this document shows the key ones in condensed form plus the diagrams.
 
 ## 1. Crate map and dependency direction
 ```
@@ -186,3 +186,18 @@ Rules
 * **Errors**: kernel and solver functions return `Result<_, KernelError>`; no `unwrap`/panics in shipping paths; `catch_unwind` at the evaluator boundary converts any residual panic into `EvalState::Failed` with a crash report.
 * **Testing**: `proptest` for math/topology invariants; golden `insta` snapshots for names and G-code; `criterion` benches gated in CI; `cargo-fuzz` for importers/Booleans.
 * **Observability**: `tracing` spans per DAG node, solver cluster, and frame; flame graphs from CI perf runs.
+
+## 9. Surfaces and continuity analysis (added after the drawings)
+```
+ sketch curves ─► extrude_sheet / revolve_sheet / loft_sheet / sweep_sheet ─┐
+ picked edges  ─► patch_sheet (Coons) / ruled_sheet ────────────────────────┤  BodyKind::Sheet
+ sheet         ─► trim_sheet / extend_sheet / match_boundary / offset_sheet ┤  (faces with open edges,
+ sheets        ─► stitch (kw-brep::sew Soup: weld → orient → build) ────────┤   no volume)
+ sheet         ─► thicken (offset skins + walls, sewn) ─► Solid ────────────┘
+ B-rep ──► kw-analysis::{curvature, draft, zebra} ──► per-vertex scalars ──► second vertex buffer ──► mesh.wgsl
+ B-rep ──► kw-analysis::continuity (per shared edge: gap, normal angle, curvature jump) ──► coloured overlay
+```
+A surface is a `Product::Solid` whose B-rep body has kind `Sheet`; `EvalOutput::is_sheet()` tells solid-only features to refuse it. `kw-brep::sew::Soup` is the one place that
+joins faces: bodies are read into descriptors (surface, loops of edge uses with pcurves, edges), edges are welded by geometry or kept as they are, and `build` turns faces to agree
+and makes solids or sheets. Trim, extend, offset and thicken all end in a `Soup`. The viewer gains an `Analysis` setting in `RenderSettings` and a second vertex buffer of scalars;
+the shader draws zebra, curvature and draft unlit and leaves the section cap alone.

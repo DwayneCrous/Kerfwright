@@ -1,15 +1,15 @@
 # Kerfwright vs. Fusion 360 (Design / Solid): where we are
 
 Status after round 2 (multi-body, extrude options, construction geometry, threads, sketch project / patterns / text, section
-analysis, assemblies, sheet metal, Form, and the new ribbon). **Done** = in the engine, in the UI and covered by tests against
+analysis, assemblies, sheet metal, Form, and the new ribbon), the Drawing workspace and the **SURFACE** tab with surface analysis. **Done** = in the engine, in the UI and covered by tests against
 closed forms. What is still missing is listed at the end.
 
 ## The ribbon
 Icon buttons grouped as in Fusion 360; every group has a **dropdown (`CREATE ▾`, `MODIFY ▾`, …)** that lists *all* of its commands
 with icon, name and shortcut under category headings, and the most used ones are big buttons next to it. Tabs: **SOLID**
-(CREATE, MODIFY, CONSTRUCT, INSPECT, ASSEMBLE, SELECT), **SHEET METAL**, **FORM**, **TOOLS** (inspect, appearance and parameters,
-import / export) and, while sketching, **SKETCH** (CREATE, MODIFY, PROJECT, CONSTRAINTS, OPTIONS, FINISH). SURFACE and MESH are not
-shown: nothing is behind them. A narrow window scrolls the ribbon sideways.
+(CREATE, MODIFY, CONSTRUCT, INSPECT, ASSEMBLE, SELECT), **SURFACE** (CREATE, MODIFY, INSPECT), **SHEET METAL**, **FORM**, **TOOLS** (inspect, appearance and parameters,
+import / export) and, while sketching, **SKETCH** (CREATE, MODIFY, PROJECT, CONSTRAINTS, OPTIONS, FINISH). MESH is not
+shown: nothing is behind it. A narrow window scrolls the ribbon sideways.
 
 ## Done
 | Area | What works | Tests |
@@ -28,6 +28,7 @@ shown: nothing is behind them. A narrow window scrolls the ribbon sideways.
 | **Sheet metal** | tab with L / U / Z strips and a custom strip editor, **flat pattern** with bend table (also from a recognised folded body), **DXF** export, **Refold** | volume = analytic strip volume, unfolded length = flats + bend allowances |
 | **Form** | box, cylinder, sphere, torus cages; move vertices numerically, sharp / smooth edges, scale; finished into a body of patches | box 20^3 = 8000 within 1 % |
 | **Drawings** | the **DRAWING** workspace: a sheet from the design or the assembly (ISO A0-A4 / ANSI A-E, third or first angle, title block); **base**, **projected** (aligned, drag with the parent), **section** (straight cut, hatched, cutting-plane line with arrows and letters, flip) and **detail** views, each with hidden-line removal (visible / hidden / wireframe / shaded) at a standard scale; **dimensions** (horizontal, vertical, aligned, diameter, radius, angle; tolerances; hole counts `4x`) attached to the model through persistent face names and re-found on update, centre marks and centre lines, **notes** with leaders, datum, surface-finish and **GD&T** frames; a **parts list** with balloons that follow the assembly; **PDF** and **DXF** export; a stale badge and **Update**; Undo / Redo; stored in the `.kwf` (`drawings.cbor`) | box / cylinder / plate-with-hole HLR counts, hatch area = cut area, dimension values = model, a hole 6 -> 10 mm moves view, dimension and BOM on Update, `crates/kw-drawing/tests`, `crates/kw-app/tests/shell.rs` (Drawing tests) |
+| **Surfaces** | the **SURFACE** tab. *Create:* **Extrude, Revolve, Loft (smooth or ruled), Sweep (with twist and a guide rail)** of open or closed sketch curves as sheet bodies (also *Output: Surface* in the solid dialogs), **Patch** (fill a hole bounded by three or more picked edges; four edges give one smooth Coons patch that can be tangent to the surfaces beside open edges), **Ruled Surface**. *Modify:* **Trim** (plane or a face as the tool, either side), **Extend** (carry a surface on past an open edge), **Match** (reshape a patch near an edge to G1 or G2 with a neighbouring face), **Stitch** (close surfaces into a solid), **Unstitch**, **Thicken**, **Offset Surface**. *Inspect:* **Zebra**, **Curvature** (Gaussian, mean, maximum, minimum), **Draft** analysis, **Edge Continuity** (every shared edge coloured gap / G0 / G1 / G2, with a window of counts and the worst joins). Surfaces are bodies of their own with area but no volume; their open edges are drawn in magenta; Measure gives area and free edges | closed forms for every builder (strip, tube, cylinder, cone, hemisphere, frustum, helicoid, trapezoid), cube from six loose sheets, tube + caps → box, thicken = exact volume, G1 normal angle < 2e-3 rad and G2 curvature within 5 %, trim / extend areas, continuity of a box, a fillet, a seam and a matched cap, `docs/surface-report.md` |
 | **Workflow** | timeline, parameters, undo / redo, browser, view cube, snapping, edge and face picking | `crates/kw-app/tests/shell.rs` (74 tests) |
 
 ## What fell short (be aware before relying on it)
@@ -41,8 +42,9 @@ shown: nothing is behind them. A narrow window scrolls the ribbon sideways.
 * Real mouse interaction (dragging, clicking in the 3-D view) and native file dialogs could not be driven where this was built; the logic behind each click is tested through the same code paths and needs a hand test.
 
 * **Drawings** (details in `docs/drawing-report.md`): section cuts are straight lines (no offset / aligned / broken-out), a detail of a section view and dimensions on section and detail views are not offered, there are no break, auxiliary or ordinate / baseline views, dimensions in an **assembly** drawing are fixed in space (they do not follow the model), GD&T symbols are placed but not checked, no automatic balloons, one parts list per sheet. A section's cut outline is read from the tessellation (curved cut edges are polylines at about 1e-4 of the part size) because the kernel's Boolean cannot split a face that has a hole in it. Mouse flows are driven through synthetic pointer events in the tests; a hand test with a real mouse is still due.
+* **Surfaces** (details in `docs/surface-report.md`): surfaces are bodies of their own, and Booleans, fillets and shells refuse them (stitch them closed or thicken them). Offset and Thicken need a smooth surface (faces meeting at a crease are refused) and refit free-form surfaces to about 1e-7 of the size instead of offsetting them exactly. Patch is tangent only on four-sided boundaries and only along open edges, and fades near the corners; other boundaries are split about their centre with G0 seams. Trim cuts with a plane or one face and refuses a cut through a vertex; Extend works on edges that run along a parameter line and only continues the surface naturally; Match reshapes non-rational NURBS patches (Patch and Offset make them), exact in the middle of an edge and fading at its ends, G2 within 5 % in the test, not exact. Sewing is not shared with the IGES importer. Continuity is judged on shared edges only (stitch first). This is not a Class-A tool: no G3, no control-point editing.
 
 ## Still missing
-* Surface and Mesh tabs, guide-rail sweeps, twist, Split Face, pattern of bodies / faces / along a path, sketch tangent arc / conic / break / scale.
-* Curvature / zebra / draft analysis, per-body textures, STL / 3MF import, scripting UI, autosave / version history, background evaluation thread, contact solving and kinematic loops (closed chains) in assemblies, assemblies linked to external files.
+* Mesh tab (mesh bodies, reduction, repair), Split Face, pattern of bodies / faces / along a path, sketch tangent arc / conic / break / scale.
+* Per-body textures, STL / 3MF import, scripting UI, autosave / version history, background evaluation thread, contact solving and kinematic loops (closed chains) in assemblies, assemblies linked to external files.
 * Sheet-metal flanges added to a body's edges (the strip builder makes the whole part), hems, corner reliefs, rip.

@@ -26,6 +26,7 @@ crates/
                elevation, Bézier extraction, fitting, closest point), analytic geometry
   kw-brep      slotmap B-rep (coedge + radial ring), validation, primitive builders, shape history
   kw-tess      crack-free edge-first tessellator
+  kw-analysis  surface diagnostics: curvature, draft angle, zebra stripes, edge continuity (G0 / G1 / G2)
   kw-io        STL / OBJ+MTL / glTF / GLB writers
   kw-viewer    wgpu viewer (PBR, edges, ID-buffer picking); windowed + headless
   kw-sketch    sketch entities, residual library + analytic Jacobians, DM decomposition,
@@ -35,7 +36,7 @@ crates/
   kw-sketcher  egui sketcher application (binary)
   kw-ssi       surface–surface intersection (exact quadric cases + certified level-set tracing, signed-distance field for free-form surfaces, pcurves on both surfaces)
   kw-boolean   union / intersect / subtract (imprint, arrangement, classification, stitching, ShapeHistory)
-  kw-model     profiles → extrude / revolve / sweep / loft (open and closed); shell, offset, draft; rebuild engine
+  kw-model     profiles → extrude / revolve / sweep / loft (open and closed); shell, offset, draft; rebuild engine; surfaces: sheet builders, Coons patch, ruled, stitch, offset, thicken, trim, extend, match
   kw-blend     constant- and variable-radius (any law) fillets, tangent chains, vertex blends, chamfers (swept-tool Booleans)
   kw-step      ISO 10303-21 parser, AP203/214/242 B-rep import and export (`step_tool` example for oracle checks)
   kw-iges      IGES 5.3 import (trimmed surfaces → sewn solids)
@@ -81,5 +82,6 @@ scripts/phase5_acceptance.sh                           # every automated Phase 5
 * Phase 1 is complete against its automated criteria; the exceptions (published Piegl–Tiller examples beyond Ex. 2.3, opening exports in third-party viewers, "reference GPU" undefined) are listed in the Phase 1 report.
 * Phase 4 results (details and caveats in [`docs/phase4-report.md`](docs/phase4-report.md)): naming corpus 1 716 scenarios, 0 silent wrong resolutions, 99.9 % correct; identical geometry and names on 1 / 4 / 32 threads; no-op edits re-execute nothing; cold replay of a 200-feature model of eight parts 0.34 s with a 53 ms tail edit, but **8.7 s / 0.2 s for one linear chain of 100 Booleans**; timeline refusals judged like an independent oracle in 100 % of 2 800+ cases; sheet-metal flat lengths exact to 1e-14 mm; SubD within 0.01 mm of the limit surface with 0.4–1.4° worst tangent mismatch at extraordinary vertices. The timeline UI was headless (engine + API) when Phase 4 was done; the application now has one (see below).
 * Phase 5 results (details and caveats in [`docs/phase5-report.md`](docs/phase5-report.md)): adaptive clearing 1.010 × target engagement on 50 seeded pockets; 0 gouges and 0 holder collisions on 21 parts; tri-dexel volumes within 0.13 %; FK(IK) 2.6e-12 on 5 machines; five dialects replay 50 five-axis programs; TET10 benchmarks within 0.1–1.8 %; 100 k DOF in 3.6 s and 1 M DOF PCG in 81 s; SIMP MBB 216.81; 1 023/1 023 nets routed with 0 DRC violations on 20 boards; STEP placement error 8e-8 mm; 1 M triangles at 2.6 ms p95 (1080p); path tracer 0.8 % relative MSE at 16 spp, denoised 30.5 dB at 64 spp.
+* Surfaces (the SURFACE tab, surface analysis, continuity): results, sources and limits in [`docs/surface-report.md`](docs/surface-report.md); `scripts/surface_acceptance.sh` runs its checks and takes the screenshots.
 * Statements about proprietary kernels (ASM, Parasolid, ACIS) are labelled **[Public]** or **[Inferred]** in the research docs; nothing here is derived from Autodesk code or binaries.
 * Performance numbers in the PRD are targets; measured Phase 1 numbers are in the report.
