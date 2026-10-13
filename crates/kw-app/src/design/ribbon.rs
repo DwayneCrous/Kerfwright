@@ -187,6 +187,22 @@ impl DesignWorkspace {
         )
         .active(dlg("LOFT"))
         .enabled_if(cx.sketches >= 2, "it needs at least two profile sketches");
+        let patch = it(
+            "surf_patch",
+            Icon::Plane,
+            "Patch",
+            "Fill a hole: pick the edges around it, optionally tangent to the surfaces they belong to",
+        )
+        .active(dlg("PATCH"))
+        .enabled_if(cx.has_body, "there are no edges to fill between yet");
+        let ruled = it(
+            "surf_ruled",
+            Icon::Loft,
+            "Ruled Surface",
+            "Straight lines between two picked edges",
+        )
+        .active(dlg("RULED"))
+        .enabled_if(cx.has_body, "there are no edges to join yet");
         if let Some(id) = rb::menu_group(
             ui,
             "CREATE",
@@ -195,11 +211,13 @@ impl DesignWorkspace {
                 revolve.clone().into(),
                 sweep.clone().into(),
                 loft.clone().into(),
+                patch.clone().into(),
+                ruled.clone().into(),
             ],
-            &[Section::new(
-                "FROM CURVES",
-                vec![extrude, revolve, sweep, loft],
-            )],
+            &[
+                Section::new("FROM CURVES", vec![extrude, revolve, sweep, loft]),
+                Section::new("FROM EDGES", vec![patch, ruled]),
+            ],
         ) {
             picked.push(id);
         }
@@ -1130,6 +1148,8 @@ impl DesignWorkspace {
                 twist: String::new(),
                 guide: None,
             },
+            "surf_patch" => Tool::Patch { tangent: false },
+            "surf_ruled" => Tool::Ruled,
             "surf_loft" => Tool::Loft {
                 sketches: vec![None, None],
                 op: BodyOp::New,

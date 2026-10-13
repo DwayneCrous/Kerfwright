@@ -16,8 +16,9 @@ use kw_brep::{BRep, BodyId, BuildResult, CopyOptions, EdgeId, EntityRef, FaceId,
 use kw_expr::{Dim, Param, Quantity};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
 use kw_model::{
-    draft_faces, extrude, extrude_sheet, loft, loft_sheet, offset_body, revolve_sheet, shell,
-    sweep, sweep_sheet, Chain, Profile, ProfileLoop, SweepOptions,
+    draft_faces, extrude, extrude_sheet, loft, loft_sheet, offset_body, patch_sheet, revolve_sheet,
+    ruled_sheet, shell, sweep, sweep_sheet, Chain, PatchEdge, Profile, ProfileEdge, ProfileLoop,
+    SweepOptions,
 };
 use kw_nurbs::Curve3;
 use kw_nurbs::CurveGeom;
@@ -1049,6 +1050,31 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             sess.adopt(r);
             finish_with_op(id, inp, sess, w.op, notes)
         }
+        FeatureSpec::Patch(p) => {
+            if p.edges.len() < 3 {
+                return Err(EvalError::Reference(
+                    "a patch needs a closed loop of at least three edges".into(),
+                ));
+            }
+            let mut found = Vec::new();
+            for e in &p.edges {
+                found.push(boundary_curve(inp, e, &mut notes)?);
+            }
+            let edges = order_loop(found)?;
+            let mut sess = Session::new(id, None);
+            let r = patch_sheet(&mut sess.rep, &edges).map_err(|e| kernel("patch", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
+        FeatureSpec::Ruled(r) => {
+            let a = boundary_curve(inp, &r.a, &mut notes)?;
+            let b = boundary_curve(inp, &r.b, &mut notes)?;
+            let mut sess = Session::new(id, None);
+            let built =
+                ruled_sheet(&mut sess.rep, &a.edge, &b.edge).map_err(|e| kernel("ruled", e))?;
+            sess.adopt(built);
+            sess.finish(None, notes)
+        }
         FeatureSpec::Fillet(f) => {
             let b = body_of(inp, "fillet")?;
             let radius = length(&f.radius)?;
@@ -1729,6 +1755,172 @@ fn finish_with_op(
     let mut s2 = Session::new(id, Some(prev));
     s2.apply(built, tool_names, op)?;
     s2.finish(None, notes)
+}
+
+/// The open edges of a face in loop order.
+fn free_edges_of(rep: &BRep, body: BodyId, face: FaceId) -> Vec<EdgeId> {
+    let free = rep.free_edges(body);
+    let mut out: Vec<EdgeId> = Vec::new();
+    for lp in &rep.faces[face].loops {
+        for co in rep.loop_coedges(*lp) {
+            let e = rep.coedges[co].edge;
+            if free.contains(&e) && !out.contains(&e) {
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// How to name `edge` of the body of `out` as the boundary of a surface: by its two faces, or, for an
+/// open edge, by its face and its place among that face's open edges.
+pub fn boundary_ref(out: &EvalOutput, edge: EdgeId) -> Result<BoundaryRef, String> {
+    let (Some(rep), Some(body)) = (out.brep(), out.body()) else {
+        return Err("there is no body".into());
+    };
+    let faces = rep.faces_around_edge(edge);
+    let name = |f: FaceId| {
+        out.names
+            .reference_to(rep, f)
+            .ok_or_else(|| "a face next to the edge has no persistent name".to_string())
+    };
+    match faces.as_slice() {
+        [f] => {
+            let index = free_edges_of(rep, body, *f)
+                .iter()
+                .position(|e| *e == edge)
+                .ok_or("that edge is not an open edge of its face")?;
+            Ok(BoundaryRef::Free {
+                face: name(*f)?,
+                index: index as u32,
+            })
+        }
+        [a, b] => Ok(BoundaryRef::Shared(EdgeRef {
+            faces: [name(*a)?, name(*b)?],
+        })),
+        _ => Err("an edge must have one or two faces".into()),
+    }
+}
+
+struct Boundary {
+    edge: ProfileEdge,
+    neighbour: Option<kw_model::NormalFn>,
+}
+
+/// A boundary edge as a curve (running from the start of the edge to its end) and, if the surface is
+/// to be tangent to the face it belongs to, that face's normal.
+fn boundary_curve(
+    inp: &Inputs,
+    be: &BoundaryEdge,
+    notes: &mut Vec<Resolution>,
+) -> Result<Boundary, EvalError> {
+    let src = inp.get(be.source)?;
+    let (Some(rep), Some(body)) = (src.brep(), src.body()) else {
+        return Err(EvalError::Dependency(format!(
+            "{} has no body to take an edge from",
+            be.source
+        )));
+    };
+    let (edge, face) = match &be.edge {
+        BoundaryRef::Shared(r) => {
+            if be.tangent {
+                return Err(EvalError::Reference(
+                    "only an open edge of a surface can be made tangent: an edge between two faces has two sides".into(),
+                ));
+            }
+            (resolve_edges(src, std::slice::from_ref(r), notes)?[0], None)
+        }
+        BoundaryRef::Free { face, index } => {
+            let f = resolve_face(src, face, notes)?;
+            let e = *free_edges_of(rep, body, f)
+                .get(*index as usize)
+                .ok_or_else(|| {
+                    EvalError::Reference("the face has no open edge at that place".into())
+                })?;
+            (e, Some(f))
+        }
+    };
+    let ed = &rep.edges[edge];
+    let curve = ed
+        .curve
+        .map(|c| rep.curves[c].clone())
+        .ok_or_else(|| EvalError::Reference("that edge is a single point".into()))?;
+    let neighbour = match (face, be.tangent) {
+        (Some(f), true) => {
+            let fc = &rep.faces[f];
+            let surface = rep.surfaces[fc.surface].clone();
+            let sign = if fc.sense == kw_brep::Sense::Forward {
+                1.0
+            } else {
+                -1.0
+            };
+            // a point inside the face, to tell which way is out of it
+            let inside = rep
+                .face_bbox(f)
+                .map(|b| (b.min.coords + b.max.coords) * 0.5);
+            let nf: kw_model::NormalFn = Arc::new(move |p: &Point3<f64>, b: &Vector3<f64>| {
+                use kw_nurbs::Surface;
+                let uv = kw_nurbs::proj::surface_param_of(&surface, p, None);
+                let n = surface.normal_at(uv.u, uv.v) * sign;
+                let towards = inside? - p.coords;
+                let in_plane = towards - n * n.dot(&towards);
+                let across = in_plane - b * b.dot(&in_plane);
+                let out = match across.try_normalize(1e-9) {
+                    Some(a) => -a,
+                    // the edge runs through the middle of the face: no side is better than another
+                    None => n.cross(b).try_normalize(1e-300)?,
+                };
+                Some((n, out))
+            });
+            Some(nf)
+        }
+        _ => None,
+    };
+    Ok(Boundary {
+        edge: ProfileEdge::new(curve, ed.param_range),
+        neighbour,
+    })
+}
+
+/// Put the boundary edges in loop order, each walked from where the last one ended.
+fn order_loop(mut left: Vec<Boundary>) -> Result<Vec<PatchEdge>, EvalError> {
+    let size: f64 = left
+        .iter()
+        .map(|b| (b.edge.end() - b.edge.start()).norm())
+        .sum();
+    let tol = 1e-6 * (1.0 + size);
+    let first = left.remove(0);
+    let start = first.edge.start();
+    let mut end = first.edge.end();
+    let mut out = vec![PatchEdge {
+        edge: first.edge,
+        neighbour: first.neighbour,
+    }];
+    while !left.is_empty() {
+        let next = left
+            .iter()
+            .position(|b| (b.edge.start() - end).norm() < tol || (b.edge.end() - end).norm() < tol);
+        let Some(i) = next else {
+            return Err(EvalError::Reference(
+                "the selected edges do not form one closed loop".into(),
+            ));
+        };
+        let mut b = left.remove(i);
+        if (b.edge.start() - end).norm() >= tol {
+            b.edge.reversed = !b.edge.reversed;
+        }
+        end = b.edge.end();
+        out.push(PatchEdge {
+            edge: b.edge,
+            neighbour: b.neighbour,
+        });
+    }
+    if (end - start).norm() >= tol {
+        return Err(EvalError::Reference(
+            "the selected edges do not close a loop".into(),
+        ));
+    }
+    Ok(out)
 }
 
 /// A surface is always a body of its own: it cannot be joined to or cut from a solid.

@@ -223,7 +223,7 @@ fn interpolate_points(interp: &Interp, pts: &[Point3<f64>]) -> Result<NurbsCurve
     NurbsCurve::new_polynomial(interp.knots.clone(), cp).map_err(|e| bad(format!("{e:?}")))
 }
 
-fn line_pc(o: (f64, f64), d: (f64, f64)) -> CurveGeom {
+pub(crate) fn line_pc(o: (f64, f64), d: (f64, f64)) -> CurveGeom {
     CurveGeom::Line(Line {
         origin: Point3::new(o.0, o.1, 0.0),
         dir: Vector3::new(d.0, d.1, 0.0),

@@ -490,6 +490,7 @@ impl DesignWorkspace {
                             doc: &doc,
                             base: None,
                             picks: &[],
+                            boundary: &[],
                             hole_plane: self.hole_plane.clone(),
                         };
                         return dlg.tool.spec(&ctx, dlg.editing.as_ref().map(|(_, s)| s));
@@ -497,10 +498,20 @@ impl DesignWorkspace {
                 }
             }
         };
+        // a surface bounded by edges may take them from several bodies
+        let multi = matches!(dlg.tool, Tool::Patch { .. } | Tool::Ruled);
+        let mut boundary: Vec<(FeatureId, kw_feature::BoundaryRef)> = Vec::new();
         let mut picked_body: Option<usize> = None;
         let mut local: Vec<Pick> = Vec::new();
         for p in &self.model.picks {
             if let Some((i, lp)) = bodies.origin(*p) {
+                if multi {
+                    if let Pick::Edge(e) = lp {
+                        let body = &bodies.list[i];
+                        boundary.push((body.head, kw_feature::ops::boundary_ref(&body.output, e)?));
+                    }
+                    continue;
+                }
                 if picked_body.is_some_and(|b| b != i) {
                     return Err("pick faces and edges of one body only".into());
                 }
@@ -516,6 +527,7 @@ impl DesignWorkspace {
             doc: &doc,
             base: body.output.brep().map(|b| (b, &body.output.names)),
             picks: &local,
+            boundary: &boundary,
             hole_plane: self.hole_plane.clone(),
         };
         let orig = dlg.editing.as_ref().map(|(_, s)| s);

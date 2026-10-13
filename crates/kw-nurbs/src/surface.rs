@@ -1,7 +1,7 @@
-use crate::curve::{NurbsCurve, NurbsError};
+use crate::curve::{averaged_knots, chord_length_params, NurbsCurve, NurbsError};
 use crate::hom::{binom, insert_knot_once, Hom};
 use crate::knots::KnotVector;
-use nalgebra::{Point3, Vector3};
+use nalgebra::{DMatrix, Point3, Vector3};
 
 /// Result of a closest-point query on a surface.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +51,112 @@ impl NurbsSurface {
             points,
             weights,
         })
+    }
+
+    /// Global tensor-product interpolation of a grid of points: `grid[i][j]` is the point at the
+    /// parameters `(u_i, v_j)`, the surface has degree `du` by `dv`, and its domain is `[0, 1]²`.
+    /// The parameters are chord lengths averaged over the rows and columns (Piegl & Tiller A9.4).
+    pub fn interpolate(
+        grid: &[Vec<Point3<f64>>],
+        du: usize,
+        dv: usize,
+    ) -> Result<NurbsSurface, NurbsError> {
+        let (nu, nv) = Self::grid_size(grid)?;
+        let mut pu = vec![0.0; nu];
+        for j in 0..nv {
+            let col: Vec<Point3<f64>> = (0..nu).map(|i| grid[i][j]).collect();
+            for (a, b) in pu.iter_mut().zip(chord_length_params(&col)) {
+                *a += b / nv as f64;
+            }
+        }
+        let mut pv = vec![0.0; nv];
+        for row in grid {
+            for (a, b) in pv.iter_mut().zip(chord_length_params(row)) {
+                *a += b / nu as f64;
+            }
+        }
+        Self::interpolate_at(grid, &pu, &pv, du, dv)
+    }
+
+    /// Like [`interpolate`](Self::interpolate) but with evenly spaced parameters, so that a boundary
+    /// row or column depends only on its own points: two surfaces sharing a boundary sampled the same
+    /// way share that boundary curve exactly.
+    pub fn interpolate_uniform(
+        grid: &[Vec<Point3<f64>>],
+        du: usize,
+        dv: usize,
+    ) -> Result<NurbsSurface, NurbsError> {
+        let (nu, nv) = Self::grid_size(grid)?;
+        let even = |n: usize| {
+            (0..n)
+                .map(|i| i as f64 / (n - 1) as f64)
+                .collect::<Vec<_>>()
+        };
+        Self::interpolate_at(grid, &even(nu), &even(nv), du, dv)
+    }
+
+    fn grid_size(grid: &[Vec<Point3<f64>>]) -> Result<(usize, usize), NurbsError> {
+        let nu = grid.len();
+        let nv = grid.first().map_or(0, |r| r.len());
+        if grid.iter().any(|r| r.len() != nv) {
+            return Err(NurbsError::InvalidArgument(
+                "the grid rows differ in length",
+            ));
+        }
+        Ok((nu, nv))
+    }
+
+    fn interpolate_at(
+        grid: &[Vec<Point3<f64>>],
+        pu: &[f64],
+        pv: &[f64],
+        du: usize,
+        dv: usize,
+    ) -> Result<NurbsSurface, NurbsError> {
+        let (nu, nv) = (pu.len(), pv.len());
+        if du == 0 || dv == 0 {
+            return Err(NurbsError::InvalidArgument("degree"));
+        }
+        if nu < du + 1 || nv < dv + 1 {
+            return Err(NurbsError::NotEnoughPoints {
+                need: (du + 1).max(dv + 1),
+                got: nu.min(nv),
+            });
+        }
+        let ku = KnotVector::new(du, averaged_knots(pu, du))
+            .map_err(|_| NurbsError::InvalidArgument("knots"))?;
+        let kv = KnotVector::new(dv, averaged_knots(pv, dv))
+            .map_err(|_| NurbsError::InvalidArgument("knots"))?;
+        let matrix = |k: &KnotVector, p: &[f64], d: usize| {
+            let n = p.len();
+            let mut a = DMatrix::<f64>::zeros(n, n);
+            for (r, &t) in p.iter().enumerate() {
+                let span = k.find_span(t);
+                for (j, b) in k.basis_funs(span, t).iter().enumerate() {
+                    a[(r, span - d + j)] = *b;
+                }
+            }
+            a.lu()
+        };
+        let (lu_u, lu_v) = (matrix(&ku, pu, du), matrix(&kv, pv, dv));
+        // first along u for every column of the grid, then along v for every row of the result
+        let mut mid = vec![Point3::origin(); nu * nv];
+        for j in 0..nv {
+            let rhs = DMatrix::from_fn(nu, 3, |i, c| grid[i][j][c]);
+            let sol = lu_u.solve(&rhs).ok_or(NurbsError::SingularSystem)?;
+            for i in 0..nu {
+                mid[i * nv + j] = Point3::new(sol[(i, 0)], sol[(i, 1)], sol[(i, 2)]);
+            }
+        }
+        let mut pts = vec![Point3::origin(); nu * nv];
+        for i in 0..nu {
+            let rhs = DMatrix::from_fn(nv, 3, |j, c| mid[i * nv + j][c]);
+            let sol = lu_v.solve(&rhs).ok_or(NurbsError::SingularSystem)?;
+            for j in 0..nv {
+                pts[i * nv + j] = Point3::new(sol[(j, 0)], sol[(j, 1)], sol[(j, 2)]);
+            }
+        }
+        NurbsSurface::new(ku, kv, pts, vec![1.0; nu * nv])
     }
 
     pub fn knots_u(&self) -> &KnotVector {

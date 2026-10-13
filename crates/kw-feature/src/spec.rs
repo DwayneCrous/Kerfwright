@@ -183,6 +183,38 @@ pub struct SweepSpec {
     pub guide: Option<FeatureId>,
 }
 
+/// An edge picked as the boundary of a surface: one between two named faces, or an open edge of a
+/// surface, named by its face and its place among that face's open edges.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BoundaryRef {
+    Shared(EdgeRef),
+    Free { face: Reference, index: u32 },
+}
+
+/// A boundary edge of a patch or ruled surface, with the feature whose body it is on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundaryEdge {
+    /// The feature that made the body the edge is on (the body keeps living; the surface is a new one).
+    pub source: FeatureId,
+    pub edge: BoundaryRef,
+    /// Make the surface tangent to the face this open edge belongs to.
+    #[serde(default)]
+    pub tangent: bool,
+}
+
+/// A surface filling a closed loop of edges.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchSpec {
+    pub edges: Vec<BoundaryEdge>,
+}
+
+/// A surface of straight lines between two edges.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuledSpec {
+    pub a: BoundaryEdge,
+    pub b: BoundaryEdge,
+}
+
 /// The edges shared by two faces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EdgeRef {
@@ -508,6 +540,8 @@ pub enum FeatureSpec {
     Revolve(RevolveSpec),
     Loft(LoftSpec),
     Sweep(SweepSpec),
+    Patch(PatchSpec),
+    Ruled(RuledSpec),
     Fillet(FilletSpec),
     Chamfer(ChamferSpec),
     VariableFillet(VariableFilletSpec),
@@ -560,6 +594,8 @@ impl FeatureSpec {
             FeatureSpec::Revolve(_) => "Revolve",
             FeatureSpec::Loft(_) => "Loft",
             FeatureSpec::Sweep(_) => "Sweep",
+            FeatureSpec::Patch(_) => "Patch",
+            FeatureSpec::Ruled(_) => "Ruled",
             FeatureSpec::Fillet(_) => "Fillet",
             FeatureSpec::Chamfer(_) => "Chamfer",
             FeatureSpec::VariableFillet(_) => "VariableFillet",
@@ -679,7 +715,10 @@ impl FeatureSpec {
                     f(p);
                 }
             }
-            FeatureSpec::Loft(_) | FeatureSpec::Combine(_) => {}
+            FeatureSpec::Loft(_)
+            | FeatureSpec::Combine(_)
+            | FeatureSpec::Patch(_)
+            | FeatureSpec::Ruled(_) => {}
             FeatureSpec::Fillet(x) => f(&mut x.radius),
             FeatureSpec::Chamfer(x) => {
                 f(&mut x.d1);
@@ -916,6 +955,8 @@ impl FeatureSpec {
             FeatureSpec::Parameter { .. }
             | FeatureSpec::DatumPlane(_)
             | FeatureSpec::Combine(_)
+            | FeatureSpec::Patch(_)
+            | FeatureSpec::Ruled(_)
             | FeatureSpec::SheetMetal(_)
             | FeatureSpec::Import(_)
             | FeatureSpec::Subd(_) => false,
@@ -1022,6 +1063,11 @@ impl FeatureSpec {
             FeatureSpec::Combine(x) => {
                 v.push(x.target);
                 v.push(x.tool);
+            }
+            FeatureSpec::Patch(x) => v.extend(x.edges.iter().map(|e| e.source)),
+            FeatureSpec::Ruled(x) => {
+                v.push(x.a.source);
+                v.push(x.b.source);
             }
             FeatureSpec::Hole(x) => plane_refs(&x.plane, &mut v),
             FeatureSpec::LinearPattern(x) => v.push(x.source),

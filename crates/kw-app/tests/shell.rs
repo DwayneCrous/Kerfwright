@@ -7605,6 +7605,7 @@ fn the_surface_dialogs_build_surface_specs_and_keep_the_operation_new() {
         doc: &doc,
         base: None,
         picks: &[],
+        boundary: &[],
         hole_plane: None,
     };
     // the operation is forced to New whatever the dialog held
@@ -7671,4 +7672,120 @@ fn the_surface_dialogs_build_surface_specs_and_keep_the_operation_new() {
         Ok(FeatureSpec::Loft(l)) => assert!(!l.surface && !l.ruled),
         t => panic!("{t:?}"),
     }
+}
+
+/// A 30 x 20 rectangle on XY, extruded 10 mm into an open tube through the Surface tab's dialog.
+fn open_tube(h: &mut Harness) {
+    sketch_only(
+        h,
+        geom::origin_spec(0),
+        geom::origin_frame(0),
+        rectangle(30.0, 20.0),
+    );
+    let sk = proj(h)
+        .document()
+        .features
+        .iter()
+        .rev()
+        .find(|f| matches!(f.spec, kw_feature::FeatureSpec::Sketch(_)))
+        .unwrap()
+        .id;
+    run_command(h, "surf_extrude");
+    if let Some(Tool::Extrude { sketch, depth, .. }) =
+        h.app.design.dialog.as_mut().map(|d| &mut d.tool)
+    {
+        *sketch = Some(sk);
+        *depth = "10 mm".into();
+    }
+    commit(h);
+}
+
+/// The open edges of the only body that lie at the height `z`.
+fn rim_edges(h: &mut Harness, z: f64) -> Vec<kw_brep::EdgeId> {
+    let ev = proj(h).evaluation();
+    let (_, out) = ev.final_body().unwrap();
+    let rep = out.brep().unwrap();
+    let free = rep.free_edges(out.body().unwrap());
+    free.into_iter()
+        .filter(|e| {
+            let ed = &rep.edges[*e];
+            (rep.vertices[ed.start].point.z - z).abs() < 1e-9
+                && (rep.vertices[ed.end].point.z - z).abs() < 1e-9
+        })
+        .collect()
+}
+
+#[test]
+fn the_patch_tool_caps_the_rim_of_a_surface_and_the_ruled_tool_joins_two_edges() {
+    let (mut h, _d) = design_harness("patch_tool");
+    open_tube(&mut h);
+    let top = rim_edges(&mut h, 10.0);
+    assert_eq!(top.len(), 4);
+    // Patch: click the four edges of the rim
+    run_command(&mut h, "surf_patch");
+    assert!(matches!(
+        h.app.design.dialog.as_ref().map(|d| &d.tool),
+        Some(Tool::Patch { .. })
+    ));
+    for e in &top {
+        click(&mut h, Some(Pick::Edge(*e)));
+        h.frame();
+    }
+    assert_eq!(h.app.design.model.picks.len(), 4);
+    commit(&mut h);
+    let bodies = proj(&mut h).document().heads().len();
+    assert_eq!(bodies, 2, "the tube and the cap are separate bodies");
+    let ev = proj(&mut h).evaluation();
+    let (_, cap) = ev.final_body().unwrap();
+    assert!(cap.is_sheet());
+    let area = cap.brep().unwrap().area(cap.body().unwrap()).unwrap();
+    assert!((area - 600.0).abs() < 1e-3, "{area}");
+    // the browser lists it as a surface and Measure gives its area
+    let infos = kw_app::bodies::summaries(&proj(&mut h).document());
+    assert_eq!(infos.len(), 2);
+
+    // Ruled: two edges of the tube's rim, opposite sides: a 30 x 20 plane
+    let (mut h, _d) = design_harness("ruled_tool");
+    open_tube(&mut h);
+    let ev = proj(&mut h).evaluation();
+    let (_, out) = ev.final_body().unwrap();
+    let rep = out.brep().unwrap();
+    let top_edges = rim_edges(&mut h, 10.0);
+    // the two long sides (parallel to x)
+    let long: Vec<_> = top_edges
+        .iter()
+        .copied()
+        .filter(|e| {
+            let ed = &rep.edges[*e];
+            (rep.vertices[ed.start].point.y - rep.vertices[ed.end].point.y).abs() < 1e-9
+        })
+        .collect();
+    assert_eq!(long.len(), 2);
+    run_command(&mut h, "surf_ruled");
+    for e in &long {
+        click(&mut h, Some(Pick::Edge(*e)));
+        h.frame();
+    }
+    commit(&mut h);
+    let ev = proj(&mut h).evaluation();
+    let (_, s) = ev.final_body().unwrap();
+    assert!(s.is_sheet());
+    let area = s.brep().unwrap().area(s.body().unwrap()).unwrap();
+    assert!((area - 600.0).abs() < 1e-6, "{area}");
+}
+
+#[test]
+fn a_patch_with_too_few_edges_says_what_to_do() {
+    let (mut h, _d) = design_harness("patch_few");
+    open_tube(&mut h);
+    run_command(&mut h, "surf_patch");
+    h.frame();
+    let err = h
+        .app
+        .design
+        .preview
+        .as_ref()
+        .and_then(|p| p.error.clone())
+        .unwrap_or_default();
+    assert!(err.contains("surround the hole"), "{err:?}");
 }

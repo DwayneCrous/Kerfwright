@@ -21,6 +21,9 @@ pub struct BuildCtx<'a> {
     /// The solid the new feature will modify, with its face names.
     pub base: Option<(&'a Arc<BRep>, &'a NameMap)>,
     pub picks: &'a [Pick],
+    /// The edges picked for a surface (Patch, Ruled), each with the feature whose body it is on: they may
+    /// belong to different bodies.
+    pub boundary: &'a [(FeatureId, kw_feature::BoundaryRef)],
     /// Plane picked for a hole, and the spot on it (plane coordinates).
     pub hole_plane: Option<PlaneSpec>,
 }
@@ -306,6 +309,13 @@ pub enum Tool {
         /// A sketch whose first curve guides the profile's orientation and scale.
         guide: Option<FeatureId>,
     },
+    /// A surface filling the loop of edges picked in the view.
+    Patch {
+        /// Leave each open edge tangent to the surface it belongs to.
+        tangent: bool,
+    },
+    /// A surface of straight lines between two picked edges.
+    Ruled,
     /// Tilt the picked faces about the neutral plane `axis = position`; `axis` is the pull direction.
     Draft {
         angle: String,
@@ -621,6 +631,8 @@ impl Tool {
             Tool::Combine { .. } => "COMBINE",
             Tool::Loft { .. } => "LOFT",
             Tool::Sweep { .. } => "SWEEP",
+            Tool::Patch { .. } => "PATCH",
+            Tool::Ruled => "RULED SURFACE",
             Tool::Draft { .. } => "DRAFT",
             Tool::Thread { .. } => "THREAD",
             Tool::SheetMetal { .. } => "SHEET METAL",
@@ -654,6 +666,8 @@ impl Tool {
             Tool::Combine { .. } => "Combine",
             Tool::Loft { .. } => "Loft",
             Tool::Sweep { .. } => "Sweep",
+            Tool::Patch { .. } => "Patch",
+            Tool::Ruled => "Ruled",
             Tool::Draft { .. } => "Draft",
             Tool::Thread { .. } => "Thread",
             Tool::SheetMetal { .. } => "Sheet Metal",
@@ -699,6 +713,8 @@ impl Tool {
             Tool::Fillet { .. }
                 | Tool::Chamfer { .. }
                 | Tool::VariableFillet { .. }
+                | Tool::Patch { .. }
+                | Tool::Ruled
                 | Tool::Revolve {
                     axis_edge: true,
                     ..
@@ -855,6 +871,10 @@ impl Tool {
                 surface: x.surface,
                 ruled: x.ruled,
             },
+            FeatureSpec::Patch(x) => Tool::Patch {
+                tangent: x.edges.iter().any(|e| e.tangent),
+            },
+            FeatureSpec::Ruled(_) => Tool::Ruled,
             FeatureSpec::Sweep(x) => Tool::Sweep {
                 profile: Some(x.profile),
                 path: Some(x.path),
@@ -1508,6 +1528,51 @@ impl Tool {
                 op: if *surface { BodyOp::New } else { *op },
                 base: None,
             }),
+            Tool::Patch { tangent } => {
+                let make =
+                    |source: FeatureId, edge: &kw_feature::BoundaryRef| kw_feature::BoundaryEdge {
+                        source,
+                        edge: edge.clone(),
+                        tangent: *tangent && matches!(edge, kw_feature::BoundaryRef::Free { .. }),
+                    };
+                let edges: Vec<_> = if ctx.boundary.is_empty() {
+                    match orig {
+                        Some(FeatureSpec::Patch(o)) => {
+                            o.edges.iter().map(|e| make(e.source, &e.edge)).collect()
+                        }
+                        _ => Vec::new(),
+                    }
+                } else {
+                    ctx.boundary.iter().map(|(s, e)| make(*s, e)).collect()
+                };
+                if edges.len() < 3 {
+                    return Err(
+                        "click the edges that surround the hole: a patch needs at least three"
+                            .into(),
+                    );
+                }
+                FeatureSpec::Patch(kw_feature::PatchSpec { edges })
+            }
+            Tool::Ruled => {
+                let pair: Vec<kw_feature::BoundaryEdge> = if ctx.boundary.is_empty() {
+                    match orig {
+                        Some(FeatureSpec::Ruled(o)) => vec![o.a.clone(), o.b.clone()],
+                        _ => Vec::new(),
+                    }
+                } else {
+                    ctx.boundary
+                        .iter()
+                        .map(|(source, edge)| kw_feature::BoundaryEdge {
+                            source: *source,
+                            edge: edge.clone(),
+                            tangent: false,
+                        })
+                        .collect()
+                };
+                let [a, b] = <[kw_feature::BoundaryEdge; 2]>::try_from(pair)
+                    .map_err(|_| "click exactly two edges".to_string())?;
+                FeatureSpec::Ruled(kw_feature::RuledSpec { a, b })
+            }
             Tool::Draft {
                 angle,
                 axis,
@@ -2314,6 +2379,35 @@ impl Tool {
                     egui::RichText::new("The path is the first line, arc or spline of its sketch.")
                         .color(TEXT_WEAK)
                         .size(10.5),
+                );
+            }
+            Tool::Patch { tangent } => {
+                let n = picks.iter().filter(|p| matches!(p, Pick::Edge(_))).count();
+                row(ui, "Edges", |ui| {
+                    ui.label(format!("{n} selected"));
+                });
+                row(ui, "", |ui| {
+                    ui.checkbox(tangent, "Tangent to the surfaces they belong to");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Click the edges around the hole (Shift adds): three or more, closing a loop. Four edges give one smooth patch; other counts are split about the centre. Only open edges of a surface can be tangent.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Ruled => {
+                let n = picks.iter().filter(|p| matches!(p, Pick::Edge(_))).count();
+                row(ui, "Edges", |ui| {
+                    ui.label(format!("{n} of 2 selected"));
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Click two edges: straight lines join their corresponding points.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
                 );
             }
             Tool::Draft {

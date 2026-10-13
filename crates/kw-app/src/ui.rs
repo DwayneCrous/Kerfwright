@@ -643,6 +643,76 @@ impl KerfwrightApp {
                     self.design.analysis = Some(AnalysisState::new(AKind::Zebra));
                 }
             }
+            "patch" | "patch-zebra" => {
+                // a rounded box of surface: an open tube capped by a patch tangent to its four walls
+                use kw_expr::Param;
+                use kw_feature::{
+                    BodyOp, BoundaryEdge, ExtrudeSpec, FeatureSpec, PatchSpec, PlaneSpec,
+                };
+                let mm = Param::length;
+                let tube = self.design.model.edit(project, |d| {
+                    let s = d.add_rect_sketch(
+                        "Outline",
+                        PlaneSpec::Xy(mm(0.0)),
+                        mm(0.0),
+                        mm(0.0),
+                        mm(30.0),
+                        mm(20.0),
+                    )?;
+                    d.add(
+                        "Tube",
+                        FeatureSpec::Extrude(ExtrudeSpec {
+                            surface: true,
+                            sketch: s,
+                            depth: mm(14.0),
+                            symmetric: false,
+                            flip: false,
+                            op: BodyOp::New,
+                            base: None,
+                            extent: Default::default(),
+                        }),
+                    )
+                });
+                if let Some(tube) = tube {
+                    let ev = project.evaluation();
+                    if let Some(out) = ev.output(tube) {
+                        let edges: Vec<BoundaryEdge> = out
+                            .brep()
+                            .zip(out.body())
+                            .map(|(rep, body)| {
+                                rep.free_edges(body)
+                                    .into_iter()
+                                    .filter(|e| {
+                                        let ed = &rep.edges[*e];
+                                        (rep.vertices[ed.start].point.z - 14.0).abs() < 1e-9
+                                            && (rep.vertices[ed.end].point.z - 14.0).abs() < 1e-9
+                                    })
+                                    .filter_map(|e| {
+                                        kw_feature::ops::boundary_ref(out, e).ok().map(|edge| {
+                                            BoundaryEdge {
+                                                source: tube,
+                                                tangent: matches!(
+                                                    edge,
+                                                    kw_feature::BoundaryRef::Free { .. }
+                                                ),
+                                                edge,
+                                            }
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let _ = self.design.model.edit(project, |d| {
+                            d.add("Cap", FeatureSpec::Patch(PatchSpec { edges }))
+                        });
+                    }
+                }
+                self.design.ribbon_tab = 1;
+                if what == "patch-zebra" {
+                    use crate::design::analysis::{AKind, AnalysisState};
+                    self.design.analysis = Some(AnalysisState::new(AKind::Zebra));
+                }
+            }
             "construct" => {
                 use crate::design::tools::{PlaneInput, PointInput};
                 let pt = |x: &str, y: &str, z: &str| PointInput {

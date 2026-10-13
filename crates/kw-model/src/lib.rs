@@ -10,6 +10,7 @@
 
 mod extrude;
 mod offset;
+mod patch;
 mod profile;
 mod rebuild;
 mod revolve;
@@ -17,6 +18,7 @@ mod skin;
 
 pub use extrude::{extrude, extrude_sheet, ExtrudeOptions};
 pub use offset::{draft_faces, offset_body, shell};
+pub use patch::{loftable, patch_sheet, ruled_sheet, NormalFn, PatchEdge};
 pub use profile::{Chain, ModelError, Profile, ProfileEdge, ProfileLoop};
 pub use rebuild::{rebuild, Rebuilt};
 pub use revolve::{revolve, revolve_sheet};
