@@ -2207,6 +2207,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kw-drawing"
+version = "0.0.1"
+dependencies = [
+ "ciborium",
+ "dxf",
+ "kw-dxf",
+ "serde",
+]
+
+[[package]]
 name = "kw-dxf"
 version = "0.0.1"
 dependencies = [
@@ -2478,6 +2488,7 @@ version = "0.0.1"
 dependencies = [
  "ciborium",
  "kw-cam",
+ "kw-drawing",
  "kw-ecad",
  "kw-feature",
  "kw-fem",

@@ -14,3 +14,4 @@ kw-feature.workspace = true
 kw-cam.workspace = true
 kw-fem.workspace = true
 kw-ecad.workspace = true
+kw-drawing.workspace = true

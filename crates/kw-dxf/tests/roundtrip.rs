@@ -606,3 +606,58 @@ fn we_read_files_written_by_the_dxf_crate() {
     );
     assert!(matches!(&doc.entities[1], DxfEntity::Circle { r, .. } if close(*r, 3.0)));
 }
+
+#[test]
+fn text_round_trips_and_the_dxf_crate_reads_it() {
+    use dxf::entities::EntityType as E;
+    let doc = DxfDoc {
+        entities: vec![DxfEntity::Text {
+            layer: "NOTES".into(),
+            p: (12.5, -3.0),
+            height: 3.5,
+            rotation: 90.0,
+            halign: 1,
+            text: "SCALE 1:2".into(),
+        }],
+    };
+    let text = write(&doc);
+    assert_eq!(parse(&text).unwrap(), doc);
+    let d = dxf::Drawing::load(&mut Cursor::new(text.as_bytes())).unwrap();
+    let E::Text(t) = &d.entities().next().unwrap().specific else {
+        panic!("not text")
+    };
+    assert_eq!(t.value, "SCALE 1:2");
+    assert!(close(t.text_height, 3.5) && close(t.rotation, 90.0));
+}
+
+#[test]
+fn layer_styles_linetypes_and_extents_are_written() {
+    use kw_dxf::{write_with_layers, LayerDef};
+    let doc = DxfDoc {
+        entities: vec![
+            DxfEntity::Line {
+                layer: "HIDDEN".into(),
+                a: (0.0, 0.0),
+                b: (30.0, 10.0),
+            },
+            DxfEntity::Circle {
+                layer: "OTHER".into(),
+                c: (50.0, 50.0),
+                r: 5.0,
+            },
+        ],
+    };
+    let text = write_with_layers(&doc, &[LayerDef::new("HIDDEN", 8, "HIDDEN", 25)]);
+    let d = dxf::Drawing::load(&mut Cursor::new(text.as_bytes())).unwrap();
+    let l = d.layers().find(|l| l.name == "HIDDEN").unwrap();
+    assert_eq!(l.line_type_name, "HIDDEN");
+    assert!(d
+        .line_types()
+        .any(|t| t.name == "CENTER" && t.dash_dot_space_lengths.len() == 4));
+    assert!(close(d.header.minimum_drawing_extents.x, 0.0));
+    assert!(close(d.header.maximum_drawing_extents.x, 55.0));
+    assert!(close(d.header.maximum_drawing_extents.y, 55.0));
+    // layers the caller did not describe are still defined
+    assert!(d.layers().any(|l| l.name == "OTHER"));
+    assert_eq!(parse(&text).unwrap(), doc);
+}

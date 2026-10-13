@@ -1,0 +1,18 @@
+[package]
+name = "kw-drawing"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+serde.workspace = true
+ciborium.workspace = true
+kw-dxf.workspace = true
+
+[dev-dependencies]
+dxf = "0.6"
+ciborium.workspace = true
+

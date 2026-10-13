@@ -41,6 +41,16 @@ pub enum DxfEntity {
         closed: bool,
         verts: Vec<(f64, f64, f64)>,
     },
+    /// Single-line text. `rotation` is in degrees; `halign` is the DXF group-72 code
+    /// (0 left, 1 centre, 2 right).
+    Text {
+        layer: String,
+        p: P2,
+        height: f64,
+        rotation: f64,
+        halign: u8,
+        text: String,
+    },
     /// `fit` holds the interpolation points (group 11) when the curve is a fit-point spline.
     Spline {
         layer: String,
@@ -62,6 +72,7 @@ impl DxfEntity {
             | DxfEntity::Arc { layer, .. }
             | DxfEntity::Ellipse { layer, .. }
             | DxfEntity::LwPolyline { layer, .. }
+            | DxfEntity::Text { layer, .. }
             | DxfEntity::Spline { layer, .. } => layer,
         }
     }
@@ -71,6 +82,41 @@ impl DxfEntity {
 pub struct DxfDoc {
     pub entities: Vec<DxfEntity>,
 }
+
+/// Style of one layer in the `LAYER` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerDef {
+    pub name: String,
+    /// AutoCAD colour index (7 is white / black).
+    pub color: i32,
+    /// `CONTINUOUS`, `HIDDEN`, `CENTER` or `PHANTOM`.
+    pub linetype: String,
+    /// Line weight in hundredths of a millimetre (0 = default).
+    pub lineweight: i32,
+}
+
+impl LayerDef {
+    pub fn new(name: &str, color: i32, linetype: &str, lineweight: i32) -> Self {
+        LayerDef {
+            name: name.into(),
+            color,
+            linetype: linetype.into(),
+            lineweight,
+        }
+    }
+}
+
+/// Dash patterns (mm; positive = dash, negative = gap) of the linetypes the writer defines.
+const LINETYPES: [(&str, &str, &[f64]); 4] = [
+    ("CONTINUOUS", "Solid line", &[]),
+    ("HIDDEN", "Hidden __ __ __", &[3.0, -1.5]),
+    ("CENTER", "Center ____ _ ____ _", &[12.0, -2.0, 2.0, -2.0]),
+    (
+        "PHANTOM",
+        "Phantom ____ _ _ ____",
+        &[12.0, -2.0, 2.0, -2.0, 2.0, -2.0],
+    ),
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DxfError {
@@ -125,6 +171,44 @@ impl W {
 
 /// Serialise to ASCII DXF text.
 pub fn write(doc: &DxfDoc) -> String {
+    write_with_layers(doc, &[])
+}
+
+/// Conservative drawing extents of the entities (circles and arcs count as full circles).
+fn extents(doc: &DxfDoc) -> Option<(P2, P2)> {
+    let mut lo = (f64::INFINITY, f64::INFINITY);
+    let mut hi = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut add = |p: P2, r: f64| {
+        lo = (lo.0.min(p.0 - r), lo.1.min(p.1 - r));
+        hi = (hi.0.max(p.0 + r), hi.1.max(p.1 + r));
+    };
+    for e in &doc.entities {
+        match e {
+            DxfEntity::Point { p, .. } | DxfEntity::Text { p, .. } => add(*p, 0.0),
+            DxfEntity::Line { a, b, .. } => {
+                add(*a, 0.0);
+                add(*b, 0.0);
+            }
+            DxfEntity::Circle { c, r, .. } | DxfEntity::Arc { c, r, .. } => add(*c, *r),
+            DxfEntity::Ellipse { c, major, .. } => add(*c, major.0.hypot(major.1)),
+            DxfEntity::LwPolyline { verts, .. } => {
+                for v in verts {
+                    add((v.0, v.1), 0.0);
+                }
+            }
+            DxfEntity::Spline { ctrl, fit, .. } => {
+                for p in ctrl.iter().chain(fit) {
+                    add(*p, 0.0);
+                }
+            }
+        }
+    }
+    (lo.0.is_finite() && hi.0.is_finite()).then_some((lo, hi))
+}
+
+/// Serialise with explicit layer styles (colour, linetype, line weight). Layers used by
+/// entities but not listed get colour 7 and `CONTINUOUS`.
+pub fn write_with_layers(doc: &DxfDoc, defs: &[LayerDef]) -> String {
     let mut w = W {
         out: String::new(),
         handle: 0,
@@ -135,25 +219,55 @@ pub fn write(doc: &DxfDoc) -> String {
     w.pair(1, "AC1015");
     w.pair(9, "$INSUNITS");
     w.pair(70, 4);
+    if let Some((lo, hi)) = extents(doc) {
+        w.pair(9, "$EXTMIN");
+        w.pt(10, lo);
+        w.pair(9, "$EXTMAX");
+        w.pt(10, hi);
+    }
     w.pair(0, "ENDSEC");
 
-    let mut layers: Vec<&str> = vec!["0"];
+    let mut layers: Vec<LayerDef> = vec![LayerDef::new("0", 7, "CONTINUOUS", 0)];
+    for d in defs {
+        if !layers.iter().any(|l| l.name == d.name) {
+            layers.push(d.clone());
+        }
+    }
     for e in &doc.entities {
-        if !layers.contains(&e.layer()) {
-            layers.push(e.layer());
+        if !layers.iter().any(|l| l.name == e.layer()) {
+            layers.push(LayerDef::new(e.layer(), 7, "CONTINUOUS", 0));
         }
     }
     w.pair(0, "SECTION");
     w.pair(2, "TABLES");
     w.pair(0, "TABLE");
+    w.pair(2, "LTYPE");
+    w.pair(70, LINETYPES.len());
+    for (name, desc, dashes) in LINETYPES {
+        w.pair(0, "LTYPE");
+        w.pair(2, name);
+        w.pair(70, 0);
+        w.pair(3, desc);
+        w.pair(72, 65);
+        w.pair(73, dashes.len());
+        w.pair(40, dashes.iter().map(|d| d.abs()).sum::<f64>());
+        for d in dashes {
+            w.pair(49, d);
+        }
+    }
+    w.pair(0, "ENDTAB");
+    w.pair(0, "TABLE");
     w.pair(2, "LAYER");
     w.pair(70, layers.len());
     for l in &layers {
         w.pair(0, "LAYER");
-        w.pair(2, l);
+        w.pair(2, &l.name);
         w.pair(70, 0);
-        w.pair(62, 7);
-        w.pair(6, "CONTINUOUS");
+        w.pair(62, l.color);
+        w.pair(6, &l.linetype);
+        if l.lineweight > 0 {
+            w.pair(370, l.lineweight);
+        }
     }
     w.pair(0, "ENDTAB");
     w.pair(0, "ENDSEC");
@@ -222,6 +336,26 @@ pub fn write(doc: &DxfDoc) -> String {
                     if *b != 0.0 {
                         w.pair(42, b);
                     }
+                }
+            }
+            DxfEntity::Text {
+                layer,
+                p,
+                height,
+                rotation,
+                halign,
+                text,
+            } => {
+                w.start("TEXT", layer);
+                w.pt(10, *p);
+                w.pair(40, height);
+                w.pair(1, text);
+                if *rotation != 0.0 {
+                    w.pair(50, rotation);
+                }
+                if *halign != 0 {
+                    w.pair(72, halign);
+                    w.pt(11, *p);
                 }
             }
             DxfEntity::Spline {
@@ -437,6 +571,17 @@ fn parse_entity(kind: &str, body: &[(i32, String, usize)]) -> Result<Option<DxfE
                 verts,
             }
         }
+        "TEXT" => DxfEntity::Text {
+            layer,
+            p: pt(10, "TEXT")?,
+            height: get(body, 40, "TEXT")?,
+            rotation: opt(body, 50, 0.0)?,
+            halign: opt(body, 72, 0.0)? as u8,
+            text: first(body, 1)
+                .ok_or(DxfError::Incomplete { entity: "TEXT" })?
+                .1
+                .clone(),
+        },
         "SPLINE" => {
             let flags = opt(body, 70, 0.0)? as i64;
             let degree = uint(first(body, 71).ok_or(DxfError::Incomplete { entity: "SPLINE" })?)?;

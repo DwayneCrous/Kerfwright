@@ -3,6 +3,7 @@
 //! and boundary conditions by geometry-face tag) and `board.cbor` (the whole printed circuit board).
 
 use kw_cam::{Tool, Toolpath};
+use kw_drawing::DrawingSet;
 use kw_ecad::Board;
 use kw_feature::kwf::KwfFile;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const CAM_ENTRY: &str = "cam.cbor";
 pub const FEA_ENTRY: &str = "fea.cbor";
 pub const BOARD_ENTRY: &str = "board.cbor";
+pub const DRAWING_ENTRY: &str = "drawings.cbor";
 
 fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     let mut out = Vec::new();
@@ -80,3 +82,9 @@ macro_rules! entry {
 entry!(CamSetup, CAM_ENTRY, attach_cam, cam_from_file);
 entry!(FeaStudy, FEA_ENTRY, attach_fea, fea_from_file);
 entry!(Board, BOARD_ENTRY, attach_board, board_from_file);
+entry!(
+    DrawingSet,
+    DRAWING_ENTRY,
+    attach_drawings,
+    drawings_from_file
+);

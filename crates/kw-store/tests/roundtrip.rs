@@ -71,3 +71,19 @@ fn cam_fea_and_board_entries_round_trip_through_a_kwf_file() {
             && board_from_file(&empty).is_none()
     );
 }
+
+#[test]
+fn drawings_round_trip_through_a_kwf_file_and_old_files_have_none() {
+    use kw_drawing::{DrawingSet, PaperSize, SheetFormat};
+    let mut file = KwfFile::new(Document::new());
+    assert!(drawings_from_file(&file).is_none());
+    let mut set = DrawingSet::default();
+    let i = set.add_sheet("Sheet 1", SheetFormat::iso(PaperSize::A3));
+    set.sheets[i].title.title = "Bracket".into();
+    attach_drawings(&mut file, &set);
+    let bytes = file.to_bytes().unwrap();
+    let back = KwfFile::from_bytes(&bytes).unwrap();
+    assert_eq!(drawings_from_file(&back).unwrap().unwrap(), set);
+    // saving is deterministic
+    assert_eq!(bytes, back.to_bytes().unwrap());
+}

@@ -31,6 +31,7 @@ members = [
     "crates/kw-fabcheck",
     "crates/kw-render",
     "crates/kw-store",
+    "crates/kw-drawing",
     "crates/kw-app",
 ]
 
@@ -89,6 +90,7 @@ kw-ecad = { path = "crates/kw-ecad" }
 kw-fabcheck = { path = "crates/kw-fabcheck" }
 kw-render = { path = "crates/kw-render" }
 kw-store = { path = "crates/kw-store" }
+kw-drawing = { path = "crates/kw-drawing" }
 kw-viewer = { path = "crates/kw-viewer" }
 
 [profile.release]

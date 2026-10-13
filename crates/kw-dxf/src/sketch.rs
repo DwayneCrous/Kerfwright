@@ -295,6 +295,8 @@ pub fn import_sketch(doc: &DxfDoc, opts: &ImportOptions) -> Sketch {
                     im.mark(id, layer);
                 }
             }
+            // text carries no sketch geometry
+            DxfEntity::Text { .. } => {}
         }
     }
     im.sk
