@@ -118,6 +118,9 @@ pub struct DrawingWorkspace {
     cands: Vec<kw_drawing::snap::Cand>,
     cands_view: Option<u64>,
     drag_annot: Option<u64>,
+    /// Views whose model has changed since they were made (checked every few frames).
+    stale: Vec<u64>,
+    stale_tick: u32,
     /// Ribbon button ids to run next frame.
     pub requests: Vec<&'static str>,
 }
@@ -140,6 +143,8 @@ impl Default for DrawingWorkspace {
             cands: Vec::new(),
             cands_view: None,
             drag_annot: None,
+            stale: Vec::new(),
+            stale_tick: 0,
             requests: Vec::new(),
         }
     }
@@ -176,6 +181,55 @@ impl DrawingWorkspace {
     /// The screen position of a point on the sheet (mm), as drawn last.
     pub fn screen_of(&self, p: [f64; 2]) -> eframe::egui::Pos2 {
         self.view.to_screen(self.rect, (p[0], p[1]))
+    }
+
+    /// The views (of every sheet) made from a model that has since changed. A view still being
+    /// generated is not out of date.
+    pub fn stale_views(&self, project: &mut Project) -> Vec<u64> {
+        let mut hashes: Vec<(ViewSource, Option<u64>)> = Vec::new();
+        let mut out = Vec::new();
+        let views: Vec<(u64, ViewSource, Option<u64>)> = project
+            .drawings
+            .sheets
+            .iter()
+            .flat_map(|s| s.views.iter())
+            .map(|v| {
+                (
+                    v.id,
+                    v.source.clone(),
+                    v.cache.as_ref().map(|c| c.source_hash),
+                )
+            })
+            .collect();
+        for (id, source, made) in views {
+            let Some(made) = made else { continue };
+            if !hashes.iter().any(|(w, _)| *w == source) {
+                let h = current_hash(project, &source);
+                hashes.push((source.clone(), h));
+            }
+            let now = hashes
+                .iter()
+                .find(|(w, _)| *w == source)
+                .and_then(|(_, h)| *h);
+            if now.is_some_and(|n| n != made) {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// Is any view of the sheet out of date (as of the last check)?
+    pub fn sheet_is_stale(&self, project: &Project, sheet: usize) -> bool {
+        project
+            .drawings
+            .sheets
+            .get(sheet)
+            .is_some_and(|s| s.views.iter().any(|v| self.stale.contains(&v.id)))
+    }
+
+    /// Look at the model again now (the workspace does it every few frames on its own).
+    pub fn check_stale(&mut self, project: &mut Project) {
+        self.stale = self.stale_views(project);
     }
 
     pub fn busy(&self) -> bool {
@@ -929,6 +983,7 @@ impl DrawingWorkspace {
         // the model may have changed since the views were last made: dimensions follow it
         self.refresh_dimensions(project);
         self.refresh_bom(project);
+        self.check_stale(project);
     }
 
     /// Check on the background job; start the next batch if views are waiting.
@@ -1042,6 +1097,10 @@ impl DrawingWorkspace {
         use eframe::egui;
         self.poll(project);
         self.run_requests(project, dialogs);
+        self.stale_tick = self.stale_tick.wrapping_add(1);
+        if self.stale_tick % 8 == 1 {
+            self.check_stale(project);
+        }
         if self.busy() {
             ui.ctx().request_repaint();
         }
@@ -1235,7 +1294,7 @@ impl DrawingWorkspace {
                     Icon::Finish,
                     "Update",
                     has_sheet && !self.busy(),
-                    self.busy(),
+                    self.busy() || !self.stale.is_empty(),
                     "Make the views again from the model as it is now",
                 )
                 .clicked()

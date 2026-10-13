@@ -7203,3 +7203,193 @@ fn a_design_without_an_assembly_lists_its_bodies() {
     );
     assert_eq!(rows[0].size.map(|x| x.round()), [60.0, 40.0, 10.0]);
 }
+
+// ------------------------------------------------------------------------------------ associativity: stale and update
+
+fn stale_now(h: &mut Harness) -> Vec<u64> {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.check_stale(project);
+    h.app.drawing.stale_views(project)
+}
+
+#[test]
+fn a_model_change_marks_the_sheet_out_of_date_and_update_brings_everything_with_it() {
+    let (mut h, pl) = plate_app("dw_assoc");
+    // a dimension on the hole, a note, and the parts list
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let cands = h.app.drawing.candidates_for(project, pl.top).unwrap();
+        let c = cands
+            .iter()
+            .find(|c| matches!(c.kind, kw_drawing::snap::CandKind::Circle))
+            .unwrap()
+            .clone();
+        h.app
+            .drawing
+            .add_dimension(project, pl.top, DimKind::Diameter, &[c], 0.0, 0.8)
+            .unwrap();
+        h.app.drawing.add_bom(project).unwrap();
+    }
+    assert!(
+        stale_now(&mut h).is_empty(),
+        "a fresh drawing is up to date"
+    );
+    let volume_before = boms_of(&mut h)[0].1[0].volume;
+    let scale = dw_project(&mut h).drawings.sheets[0]
+        .view(pl.top)
+        .unwrap()
+        .scale;
+    // the holes get bigger in the design
+    change_hole_diameter(&mut h, pl.hole, 10.0);
+    let stale = stale_now(&mut h);
+    assert!(
+        stale.contains(&pl.top) && stale.contains(&pl.front),
+        "both views: {stale:?}"
+    );
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        assert!(h.app.drawing.sheet_is_stale(project, 0));
+    }
+    // nothing has moved on the sheet yet: it still shows what it was made from
+    let v = dw_project(&mut h).drawings.sheets[0]
+        .view(pl.top)
+        .unwrap()
+        .clone();
+    assert!(v
+        .cache
+        .as_ref()
+        .unwrap()
+        .marks
+        .iter()
+        .any(|(_, r)| (r - 3.0 * scale).abs() < 1e-6));
+    assert_eq!(dims_of(&mut h)[0].value, 6.0);
+    assert_eq!(boms_of(&mut h)[0].1[0].volume, volume_before);
+    // the frames draw with the badge
+    for _ in 0..12 {
+        h.frame();
+    }
+    // Update: the geometry, the dimension, the list
+    dw_update(&mut h);
+    assert!(stale_now(&mut h).is_empty(), "up to date again");
+    let v = dw_project(&mut h).drawings.sheets[0]
+        .view(pl.top)
+        .unwrap()
+        .clone();
+    assert!(
+        v.cache
+            .as_ref()
+            .unwrap()
+            .marks
+            .iter()
+            .any(|(_, r)| (r - 5.0 * scale).abs() < 1e-6),
+        "the view shows the new hole"
+    );
+    let d = dims_of(&mut h).pop().unwrap();
+    assert_eq!((d.value, d.status), (10.0, DimStatus::Ok));
+    let volume_after = boms_of(&mut h)[0].1[0].volume;
+    let want = volume_before + 2.0 * std::f64::consts::PI * (9.0 - 25.0) * 10.0;
+    assert!(
+        (volume_after - want).abs() < 1e-3,
+        "{volume_after} vs {want}"
+    );
+    // undoing the design change makes it out of date the other way round, and Update follows
+    {
+        let p = h.app.project_mut().unwrap();
+        assert!(p.history.undo());
+    }
+    assert!(!stale_now(&mut h).is_empty());
+    dw_update(&mut h);
+    assert_eq!(dims_of(&mut h)[0].value, 6.0);
+    assert!(stale_now(&mut h).is_empty());
+}
+
+#[test]
+fn a_saved_drawing_is_out_of_date_when_it_is_opened_against_a_changed_model() {
+    let (mut h, pl) = plate_app("dw_stale_save");
+    let dir = scratch("dw_stale_out");
+    let path = dir.join("p.kwf");
+    dw_project(&mut h).save_as(&path).unwrap();
+    // reopened as saved: current
+    {
+        let mut back = kw_app::project::Project::open(&path).unwrap();
+        let dw = kw_app::drawing::DrawingWorkspace::default();
+        assert!(dw.stale_views(&mut back).is_empty());
+    }
+    // the model changes and is saved, the drawing's views are not made again
+    change_hole_diameter(&mut h, pl.hole, 8.0);
+    dw_project(&mut h).save_as(&path).unwrap();
+    let mut back = kw_app::project::Project::open(&path).unwrap();
+    let dw = kw_app::drawing::DrawingWorkspace::default();
+    let stale = dw.stale_views(&mut back);
+    assert_eq!(stale.len(), 2, "{stale:?}");
+}
+
+#[test]
+fn moving_a_component_makes_an_assembly_drawing_out_of_date() {
+    let (mut h, front) = rig_app("dw_stale_asm");
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.drawing.add_bom(project).unwrap();
+    }
+    assert!(stale_now(&mut h).is_empty());
+    h.app
+        .project_mut()
+        .unwrap()
+        .assembly
+        .as_mut()
+        .unwrap()
+        .instances[1]
+        .at
+        .t[0] += 15.0;
+    assert_eq!(stale_now(&mut h), vec![front]);
+    dw_update(&mut h);
+    assert!(stale_now(&mut h).is_empty());
+}
+
+#[test]
+fn a_dimension_that_cannot_follow_stays_flagged_through_an_update() {
+    let (mut h, pl) = plate_app("dw_stale_broken");
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let cands = h.app.drawing.candidates_for(project, pl.top).unwrap();
+        let c = cands
+            .iter()
+            .find(|c| matches!(c.kind, kw_drawing::snap::CandKind::Circle))
+            .unwrap()
+            .clone();
+        h.app
+            .drawing
+            .add_dimension(project, pl.top, DimKind::Diameter, &[c], 0.0, 0.8)
+            .unwrap();
+    }
+    h.app
+        .project_mut()
+        .unwrap()
+        .history
+        .edit(|d| d.remove(pl.hole).map(|_| ()))
+        .unwrap();
+    assert!(!stale_now(&mut h).is_empty());
+    dw_update(&mut h);
+    assert!(stale_now(&mut h).is_empty());
+    let d = dims_of(&mut h).pop().unwrap();
+    assert!(matches!(d.status, DimStatus::Broken(_)));
+    // updating again does not heal it by guessing
+    dw_update(&mut h);
+    assert!(matches!(
+        dims_of(&mut h).pop().unwrap().status,
+        DimStatus::Broken(_)
+    ));
+    for _ in 0..3 {
+        h.frame();
+    }
+}

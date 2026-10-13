@@ -224,6 +224,20 @@ impl DrawingWorkspace {
                 ));
             }
         }
+        if self.sheet_is_stale(project, self.sheet) && !self.busy() {
+            let r = Rect::from_center_size(
+                rect.center_top() + egui::vec2(0.0, 22.0),
+                egui::vec2(340.0, 26.0),
+            );
+            painter.rect_filled(r, 4.0, Color32::from_rgb(230, 130, 20));
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                "Out of date: the model has changed. Press Update.",
+                FontId::proportional(12.5),
+                Color32::WHITE,
+            );
+        }
         if self.busy() {
             painter.text(
                 rect.left_top() + egui::vec2(10.0, 10.0),

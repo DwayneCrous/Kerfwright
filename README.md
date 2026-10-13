@@ -54,8 +54,9 @@ crates/
   kw-ecad      board model, placement, router, DRC, pour, Gerber/Excellon/IDF/STEP/pick-and-place
   kw-fabcheck  two Gerber viewers + Excellon parser used to check the outputs
   kw-render    WBOIT + GTAO + edges frame, LBVH path tracer (WGSL), denoiser, f64 reference
-  kw-store     cam / fea / board entries inside the `.kwf` container
-  kw-app       the application (egui): welcome page, projects, six workspaces; Rayon ⇄ Tokio bridge, command/event types
+  kw-store     cam / fea / board / drawings entries inside the `.kwf` container
+  kw-drawing   2-D drawings: sheets, hidden-line views, sections, details, dimensions, annotation, parts list, PDF / DXF
+  kw-app       the application (egui): welcome page, projects, seven workspaces; Rayon ⇄ Tokio bridge, command/event types
 ```
 
 ## Try it

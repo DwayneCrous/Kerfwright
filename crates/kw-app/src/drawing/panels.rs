@@ -120,9 +120,33 @@ impl DrawingWorkspace {
         ui.horizontal(|ui| {
             let mut pick = None;
             for (i, s) in project.drawings.sheets.iter().enumerate() {
-                if ui.selectable_label(self.sheet == i, &s.name).clicked() {
+                let stale = s.views.iter().any(|v| self.stale.contains(&v.id));
+                let text = if stale {
+                    egui::RichText::new(format!("{} ●", s.name))
+                        .color(egui::Color32::from_rgb(230, 130, 20))
+                } else {
+                    egui::RichText::new(&s.name)
+                };
+                let r = ui.selectable_label(self.sheet == i, text);
+                if stale {
+                    r.clone().on_hover_text(
+                        "The model has changed since this sheet was made: press Update",
+                    );
+                }
+                if r.clicked() {
                     pick = Some(i);
                 }
+            }
+            if !self.stale.is_empty()
+                && !self.busy()
+                && ui
+                    .button(
+                        egui::RichText::new("Update").color(egui::Color32::from_rgb(230, 130, 20)),
+                    )
+                    .on_hover_text("Make the views, dimensions and parts list again from the model")
+                    .clicked()
+            {
+                self.requests.push("update");
             }
             if let Some(i) = pick {
                 self.sheet = i;
