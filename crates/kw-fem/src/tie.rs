@@ -319,16 +319,15 @@ pub fn tie_groups(ties: &[Tie]) -> Vec<Vec<u32>> {
 /// among the tied nodes is the penalty stiffness: large enough to hold the nodes together to about 1/scale,
 /// small enough not to ruin the conditioning.
 pub fn apply_penalty(k: &mut Csr, nd: usize, ties: &[Tie], scale: f64) {
+    // the strength comes from the matrix without any penalty, so ties that share nodes do not compound
+    let diag = k.diagonal();
     for t in ties {
         for a in 0..nd {
             let mut dofs: Vec<(usize, f64)> = vec![(nd * t.slave as usize + a, 1.0)];
             for (m, w) in t.master.iter().zip(&t.weights) {
                 dofs.push((nd * *m as usize + a, -*w));
             }
-            let big = dofs
-                .iter()
-                .map(|(d, _)| k.get(*d, *d))
-                .fold(0.0f64, f64::max);
+            let big = dofs.iter().map(|(d, _)| diag[*d]).fold(0.0f64, f64::max);
             let alpha = scale * big;
             for &(p, cp) in &dofs {
                 for &(q, cq) in &dofs {

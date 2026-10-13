@@ -12,14 +12,17 @@ pub mod assemble;
 pub mod elem;
 pub mod modal;
 pub mod model;
+pub mod nonlinear;
 pub mod reference;
 pub mod simp;
 pub mod solve;
 pub mod sparse;
 pub mod stress;
+pub mod thermal;
 pub mod tie;
 
 pub use assemble::{assemble_mass, assemble_stiffness, Structure};
-pub use model::{Fixed, Material, Model, Solution, SolverKind, TractionFn};
+pub use model::{Fixed, Material, Model, Solution, SolverKind, ThermalLoad, TractionFn};
 pub use solve::{pcg, solve_direct, Factor, PcgReport, Precond};
 pub use sparse::Csr;
+pub use thermal::ThermalModel;

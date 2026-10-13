@@ -52,12 +52,17 @@ pub struct MergedMesh {
 impl MergedMesh {
     /// The body that owns node `n`.
     pub fn body_of_node(&self, n: u32) -> usize {
-        self.node_start.partition_point(|s| *s <= n).saturating_sub(1)
+        self.node_start
+            .partition_point(|s| *s <= n)
+            .saturating_sub(1)
     }
 
     /// The body a (global) face tag belongs to, and the tag within that body.
     pub fn split_tag(&self, tag: u32) -> (usize, u32) {
-        let b = self.tag_offset.partition_point(|s| *s <= tag).saturating_sub(1);
+        let b = self
+            .tag_offset
+            .partition_point(|s| *s <= tag)
+            .saturating_sub(1);
         (b, tag - self.tag_offset[b])
     }
 }
@@ -78,11 +83,14 @@ impl Tet10Mesh {
             out.mesh
                 .elems
                 .extend(m.elems.iter().map(|e| e.map(|n| n + shift)));
-            out.elem_body.extend(std::iter::repeat_n(b as u16, m.elems.len()));
-            out.mesh.surface.extend(m.surface.iter().map(|s| SurfaceTri6 {
-                v: s.v.map(|n| n + shift),
-                tag: s.tag + tag_base,
-            }));
+            out.elem_body
+                .extend(std::iter::repeat_n(b as u16, m.elems.len()));
+            out.mesh
+                .surface
+                .extend(m.surface.iter().map(|s| SurfaceTri6 {
+                    v: s.v.map(|n| n + shift),
+                    tag: s.tag + tag_base,
+                }));
             out.mesh.n_corner += m.n_corner;
             tag_base += m.surface.iter().map(|s| s.tag + 1).max().unwrap_or(0);
         }

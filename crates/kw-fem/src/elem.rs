@@ -242,3 +242,12 @@ pub fn von_mises(s: &[f64; 6]) -> f64 {
         + 3.0 * (yz * yz + zx * zx + xy * xy))
         .sqrt()
 }
+
+/// The coordinates of the ten nodes of an element.
+pub fn element_coords_of(mesh: &kw_mesh3d::Tet10Mesh, e: &[u32; 10]) -> [P3; 10] {
+    let mut x = [[0.0; 3]; 10];
+    for i in 0..10 {
+        x[i] = mesh.nodes[e[i] as usize];
+    }
+    x
+}

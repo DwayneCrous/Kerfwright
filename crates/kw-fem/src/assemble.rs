@@ -262,6 +262,13 @@ pub fn assemble_scalar(
     element_matrix: &(dyn Fn(usize) -> Vec<f64> + Sync),
 ) -> Csr {
     let mut a = empty_csr(mesh.nodes.len(), &st.pattern, 1);
-    scatter(&mut a, &st.pattern, &st.colours, &mesh.elems, 1, element_matrix);
+    scatter(
+        &mut a,
+        &st.pattern,
+        &st.colours,
+        &mesh.elems,
+        1,
+        element_matrix,
+    );
     a
 }

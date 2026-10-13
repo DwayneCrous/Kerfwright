@@ -62,8 +62,34 @@ pub struct Model {
     pub elem_material: Vec<u16>,
     /// Bonded contacts between bodies (see [`crate::tie`]).
     pub ties: Vec<Tie>,
+    /// A temperature field loading the structure by thermal expansion.
+    pub thermal: Option<ThermalLoad>,
     /// Penalty stiffness of the ties relative to the largest diagonal entry of the tied nodes.
     pub tie_penalty: f64,
+}
+
+/// A temperature field the body has been brought to: the thermal strain `α (T − T_ref)` it would take
+/// if free is held back by the supports and neighbours, which loads the structure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermalLoad {
+    /// Temperature of every node.
+    pub temperature: Vec<f64>,
+    /// Coefficient of thermal expansion of each material (like `materials`, or one value for all).
+    pub expansion: Vec<f64>,
+    /// The temperature at which there is no thermal strain.
+    pub t_ref: f64,
+}
+
+impl ThermalLoad {
+    /// The isotropic thermal strain `[e, e, e, 0, 0, 0]` at a point with temperature `t` in element `ei`.
+    pub fn strain(&self, model: &Model, ei: usize, t: f64) -> [f64; 6] {
+        let alpha = match model.elem_material.get(ei) {
+            Some(&m) if self.expansion.len() > 1 => self.expansion[m as usize],
+            _ => self.expansion.first().copied().unwrap_or(0.0),
+        };
+        let e = alpha * (t - self.t_ref);
+        [e, e, e, 0.0, 0.0, 0.0]
+    }
 }
 
 /// Default relative penalty of the ties: holds tied nodes together to about one part in 1e5 while keeping
@@ -98,6 +124,7 @@ impl Model {
             gravity: None,
             materials: Vec::new(),
             elem_material: Vec::new(),
+            thermal: None,
             ties: Vec::new(),
             tie_penalty: DEFAULT_TIE_PENALTY,
         }
@@ -275,9 +302,38 @@ impl Model {
                     let n = elem::shape(l);
                     for i in 0..10 {
                         for a in 0..3 {
-                            f[3 * e[i] as usize + a] +=
-                                w * det.abs() * rho * g[a] * n[i];
+                            f[3 * e[i] as usize + a] += w * det.abs() * rho * g[a] * n[i];
                         }
+                    }
+                }
+            }
+        }
+        // thermal expansion: ∫ Bᵀ D ε_th dV
+        if let Some(th) = &self.thermal {
+            let table = self.elasticity_table();
+            let rule = elem::rule4();
+            for (ei, e) in mesh.elems.iter().enumerate() {
+                let d = self.elasticity_of(&table, ei);
+                let x = elem::element_coords_of(mesh, e);
+                for (l, w) in rule.points.iter().zip(&rule.weights) {
+                    let (g, det) = elem::grad(&x, l);
+                    let n = elem::shape(l);
+                    let t: f64 = (0..10).map(|i| n[i] * th.temperature[e[i] as usize]).sum();
+                    let eth = th.strain(self, ei, t);
+                    let mut sig = [0.0; 6];
+                    for r in 0..6 {
+                        for c in 0..6 {
+                            sig[r] += d[r][c] * eth[c];
+                        }
+                    }
+                    let b = elem::bmatrix(&g);
+                    let wd = w * det.abs();
+                    for i in 0..30 {
+                        let mut acc = 0.0;
+                        for r in 0..6 {
+                            acc += b[r][i] * sig[r];
+                        }
+                        f[3 * e[i / 3] as usize + i % 3] += wd * acc;
                     }
                 }
             }

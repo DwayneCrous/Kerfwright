@@ -78,7 +78,7 @@ impl Pre {
         match kind {
             Precond::Jacobi => Pre::Diag(a.diagonal().into_iter().map(|d| 1.0 / d).collect()),
             // blocks of three need a matrix of three unknowns per node
-            Precond::BlockJacobi if a.n % 3 != 0 => {
+            Precond::BlockJacobi if !a.n.is_multiple_of(3) => {
                 Pre::Diag(a.diagonal().into_iter().map(|d| 1.0 / d).collect())
             }
             Precond::BlockJacobi => {

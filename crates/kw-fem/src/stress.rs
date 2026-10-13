@@ -27,7 +27,18 @@ pub fn nodal_stress(model: &Model, u: &[f64]) -> Vec<[f64; 6]> {
         }
         for (l, w) in rule.points.iter().zip(&rule.weights) {
             let (_, det) = elem::grad(&x, l);
-            let s = elem::stress_at(&x, &ue, &d, l);
+            let mut s = elem::stress_at(&x, &ue, &d, l);
+            // the stress follows the elastic strain: the thermal strain does not stress the body
+            if let Some(th) = &model.thermal {
+                let nn = elem::shape(l);
+                let t: f64 = (0..10).map(|i| nn[i] * th.temperature[e[i] as usize]).sum();
+                let eth = th.strain(model, ei, t);
+                for r in 0..6 {
+                    for c in 0..6 {
+                        s[r] -= d[r][c] * eth[c];
+                    }
+                }
+            }
             let nn = elem::shape(l);
             let wd = w * det.abs();
             for i in 0..10 {
