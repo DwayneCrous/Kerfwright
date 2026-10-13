@@ -15,6 +15,7 @@ kw-math.workspace = true
 kw-brep.workspace = true
 kw-nurbs.workspace = true
 kw-tess.workspace = true
+kw-feature.workspace = true
 
 [dev-dependencies]
 dxf = "0.6"

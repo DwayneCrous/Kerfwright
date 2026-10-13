@@ -1,6 +1,7 @@
 //! The persisted drawing model. Everything has serde defaults so files written by older
 //! versions keep reading as fields are added.
 
+use crate::annot::Annotation;
 use crate::scene::{Scene2d, P};
 use crate::sheet::{SheetFormat, TitleBlock};
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,12 @@ pub struct ViewCache {
     /// with view coordinates `(u, v)` is drawn at `(u, v) * scale - centre` from the view origin.
     #[serde(default)]
     pub centre: P,
+    /// Circles drawn face-on: centre and radius, relative to the view origin (centre marks).
+    #[serde(default)]
+    pub marks: Vec<(P, f64)>,
+    /// Axes of cylinders seen from the side, relative to the view origin (centre lines).
+    #[serde(default)]
+    pub axes: Vec<(P, P)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,6 +125,13 @@ pub struct View {
     pub label: String,
     #[serde(default)]
     pub cache: Option<ViewCache>,
+    /// Draw centre marks and centre lines on circles and cylinders.
+    #[serde(default = "yes")]
+    pub center_marks: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +142,9 @@ pub struct Sheet {
     pub title: TitleBlock,
     #[serde(default)]
     pub views: Vec<View>,
+    /// Dimensions, notes and symbols.
+    #[serde(default)]
+    pub annots: Vec<Annotation>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -153,6 +170,7 @@ impl DrawingSet {
                 ..TitleBlock::default()
             },
             views: Vec::new(),
+            annots: Vec::new(),
         });
         self.sheets.len() - 1
     }

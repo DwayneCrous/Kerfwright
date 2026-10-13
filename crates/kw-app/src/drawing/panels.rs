@@ -17,6 +17,30 @@ fn view_name(v: &kw_drawing::View) -> String {
     format!("{kind} - {}", orientation_name(v.orientation))
 }
 
+/// How an annotation is listed, and whether it needs attention.
+fn annot_name(a: &kw_drawing::Annotation, units: kw_drawing::Units) -> (String, bool) {
+    use kw_drawing::AnnotKind as K;
+    match &a.kind {
+        K::Dimension(d) => {
+            let t = kw_drawing::dim::dim_text(d, units);
+            let shown = if t.main.is_empty() {
+                t.upper.unwrap_or_default()
+            } else {
+                t.main
+            };
+            let bad = matches!(d.status, kw_drawing::DimStatus::Broken(_));
+            (
+                format!("Dimension {shown}{}", if bad { "  (broken)" } else { "" }),
+                bad,
+            )
+        }
+        K::Note { text, .. } => (format!("Note {}", text.lines().next().unwrap_or("")), false),
+        K::Datum { letter, .. } => (format!("Datum {letter}"), false),
+        K::Surface { value, .. } => (format!("Finish {value}"), false),
+        K::Fcf { symbol, .. } => (format!("Frame - {}", symbol.name()), false),
+    }
+}
+
 impl DrawingWorkspace {
     pub(super) fn browser_ui(&mut self, ui: &mut egui::Ui, project: &mut Project) {
         ui.add_space(4.0);
@@ -37,6 +61,20 @@ impl DrawingWorkspace {
                     .id_salt(("dw_sheet", i))
                     .default_open(true)
                     .show(ui, |ui| {
+                        for a in &s.annots {
+                            let sel = self.selected_annot == Some(a.id);
+                            let (name, bad) = annot_name(a, s.format.units);
+                            let text = egui::RichText::new(name).color(if bad {
+                                BAD
+                            } else {
+                                ui.visuals().text_color()
+                            });
+                            if ui.selectable_label(sel, text).clicked() {
+                                self.selected_annot = Some(a.id);
+                                self.selected = None;
+                                self.sheet = i;
+                            }
+                        }
                         for v in &s.views {
                             let sel = self.selected == Some(v.id);
                             let pending = if v.cache.is_none() { "  ..." } else { "" };
@@ -45,6 +83,7 @@ impl DrawingWorkspace {
                                 .clicked()
                             {
                                 self.selected = Some(v.id);
+                                self.selected_annot = None;
                                 self.sheet = i;
                             }
                         }
@@ -124,6 +163,10 @@ impl DrawingWorkspace {
             project.mark_extras_dirty();
         }
         ui.add_space(8.0);
+        if let Some(aid) = self.selected_annot {
+            self.annot_props_ui(ui, project, aid);
+            return;
+        }
         let Some(id) = self.selected else {
             return;
         };
@@ -344,5 +387,238 @@ impl DrawingWorkspace {
             }
         }
         self.dialog = if keep { Some(dialog) } else { None };
+    }
+}
+
+impl DrawingWorkspace {
+    /// The editor of the selected dimension, note or symbol.
+    fn annot_props_ui(&mut self, ui: &mut egui::Ui, project: &mut Project, id: u64) {
+        use kw_drawing::{AnnotKind as K, Gdt, Tolerance};
+        let sheet = self.sheet;
+        let Some(a) = project.drawings.sheets[sheet]
+            .annots
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+        else {
+            self.selected_annot = None;
+            return;
+        };
+        let units = project.drawings.sheets[sheet].format.units;
+        let mut kind = a.kind.clone();
+        let mut start_edit = false;
+        let mut changed = false;
+        let mut delete = false;
+        let text_field =
+            |ui: &mut egui::Ui, v: &mut String, start: &mut bool, ch: &mut bool, w: f32| {
+                let r = ui.add(egui::TextEdit::singleline(v).desired_width(w));
+                *start |= r.gained_focus();
+                *ch |= r.changed();
+            };
+        match &mut kind {
+            K::Dimension(d) => {
+                ui.label(egui::RichText::new("DIMENSION").size(11.5).strong());
+                ui.separator();
+                match &d.status {
+                    kw_drawing::DimStatus::Ok => {
+                        ui.label(format!(
+                            "Value {}",
+                            kw_drawing::dim::format_value(d.value, d.kind, units, d.precision)
+                        ));
+                    }
+                    kw_drawing::DimStatus::Broken(why) => {
+                        ui.label(
+                            egui::RichText::new(format!("Lost its model: {why}"))
+                                .color(BAD)
+                                .size(11.5),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "It shows the last value. Delete it and dimension again.",
+                            )
+                            .color(TEXT_WEAK)
+                            .size(11.0),
+                        );
+                    }
+                }
+                egui::Grid::new("dw_dim").num_columns(2).show(ui, |ui| {
+                    ui.label("Text");
+                    text_field(ui, &mut d.text, &mut start_edit, &mut changed, 120.0);
+                    ui.end_row();
+                    ui.label("Before");
+                    text_field(ui, &mut d.prefix, &mut start_edit, &mut changed, 120.0);
+                    ui.end_row();
+                    ui.label("After");
+                    text_field(ui, &mut d.suffix, &mut start_edit, &mut changed, 120.0);
+                    ui.end_row();
+                    ui.label("Decimals");
+                    let cur = d.precision;
+                    egui::ComboBox::from_id_salt("dw_prec")
+                        .selected_text(cur.map_or("Auto".to_string(), |p| p.to_string()))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.precision, None, "Auto");
+                            for p in 0..=4u8 {
+                                ui.selectable_value(&mut d.precision, Some(p), p.to_string());
+                            }
+                        });
+                    changed |= cur != d.precision;
+                    ui.end_row();
+                    ui.label("Tolerance");
+                    let name = |t: &Tolerance| match t {
+                        Tolerance::None => "None",
+                        Tolerance::Symmetric(_) => "Symmetric ±",
+                        Tolerance::Bilateral { .. } => "Bilateral +/-",
+                        Tolerance::Limits { .. } => "Limits",
+                    };
+                    let before = d.tolerance;
+                    egui::ComboBox::from_id_salt("dw_tol")
+                        .selected_text(name(&d.tolerance))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.tolerance, Tolerance::None, "None");
+                            ui.selectable_value(
+                                &mut d.tolerance,
+                                Tolerance::Symmetric(0.1),
+                                "Symmetric ±",
+                            );
+                            ui.selectable_value(
+                                &mut d.tolerance,
+                                Tolerance::Bilateral {
+                                    upper: 0.1,
+                                    lower: 0.1,
+                                },
+                                "Bilateral +/-",
+                            );
+                            ui.selectable_value(
+                                &mut d.tolerance,
+                                Tolerance::Limits {
+                                    upper: 0.1,
+                                    lower: 0.1,
+                                },
+                                "Limits",
+                            );
+                        });
+                    changed |=
+                        std::mem::discriminant(&before) != std::mem::discriminant(&d.tolerance);
+                    ui.end_row();
+                });
+                let drag = |ui: &mut egui::Ui, v: &mut f64, label: &str, ch: &mut bool| {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        *ch |= ui
+                            .add(egui::DragValue::new(v).speed(0.01).range(0.0..=1000.0))
+                            .changed();
+                    });
+                };
+                match &mut d.tolerance {
+                    Tolerance::None => {}
+                    Tolerance::Symmetric(t) => drag(ui, t, "±", &mut changed),
+                    Tolerance::Bilateral { upper, lower } | Tolerance::Limits { upper, lower } => {
+                        drag(ui, upper, "+", &mut changed);
+                        drag(ui, lower, "-", &mut changed);
+                    }
+                }
+            }
+            K::Note { text, height, .. } => {
+                ui.label(egui::RichText::new("NOTE").size(11.5).strong());
+                ui.separator();
+                let r = ui.add(
+                    egui::TextEdit::multiline(text)
+                        .desired_width(200.0)
+                        .desired_rows(3),
+                );
+                start_edit |= r.gained_focus();
+                changed |= r.changed();
+                ui.horizontal(|ui| {
+                    ui.label("Height");
+                    changed |= ui
+                        .add(egui::DragValue::new(height).speed(0.1).range(1.5..=20.0))
+                        .changed();
+                });
+            }
+            K::Datum { letter, .. } => {
+                ui.label(egui::RichText::new("DATUM").size(11.5).strong());
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Letter");
+                    text_field(ui, letter, &mut start_edit, &mut changed, 40.0);
+                });
+            }
+            K::Surface { value, .. } => {
+                ui.label(egui::RichText::new("SURFACE FINISH").size(11.5).strong());
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Roughness");
+                    text_field(ui, value, &mut start_edit, &mut changed, 100.0);
+                });
+            }
+            K::Fcf {
+                symbol,
+                tol,
+                datums,
+                ..
+            } => {
+                ui.label(
+                    egui::RichText::new("FEATURE CONTROL FRAME")
+                        .size(11.5)
+                        .strong(),
+                );
+                ui.separator();
+                egui::Grid::new("dw_fcf").num_columns(2).show(ui, |ui| {
+                    ui.label("Characteristic");
+                    let cur = *symbol;
+                    egui::ComboBox::from_id_salt("dw_gdt")
+                        .selected_text(symbol.name())
+                        .show_ui(ui, |ui| {
+                            for g in Gdt::ALL {
+                                ui.selectable_value(symbol, g, g.name());
+                            }
+                        });
+                    changed |= cur != *symbol;
+                    ui.end_row();
+                    ui.label("Tolerance");
+                    text_field(ui, tol, &mut start_edit, &mut changed, 100.0);
+                    ui.end_row();
+                    ui.label("Datums");
+                    let mut joined = datums.join(",");
+                    let r = ui.add(egui::TextEdit::singleline(&mut joined).desired_width(100.0));
+                    start_edit |= r.gained_focus();
+                    if r.changed() {
+                        *datums = joined
+                            .split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        changed = true;
+                    }
+                    ui.end_row();
+                });
+            }
+        }
+        ui.add_space(6.0);
+        if ui.button("Delete").clicked() {
+            delete = true;
+        }
+        if delete {
+            let _ = self.delete_annot(project, id);
+            return;
+        }
+        if start_edit {
+            project.dw_checkpoint();
+        }
+        if changed {
+            if !start_edit && !matches!(kind, K::Note { .. } | K::Datum { .. } | K::Surface { .. })
+            {
+                // a click in a combo or drag value is a step of its own
+                project.dw_checkpoint();
+            }
+            if let Some(m) = project.drawings.sheets[sheet]
+                .annots
+                .iter_mut()
+                .find(|x| x.id == id)
+            {
+                m.kind = kind;
+            }
+            project.mark_extras_dirty();
+        }
     }
 }

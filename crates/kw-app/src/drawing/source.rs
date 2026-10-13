@@ -9,6 +9,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub struct Source {
+    /// For a design: its bodies with their persistent names, which dimensions attach through.
+    pub design: Option<Arc<Bodies>>,
     pub brep: Arc<BRep>,
     pub bodies: Vec<BodyId>,
     /// Changes when the model the views are made from changes.
@@ -27,6 +29,7 @@ pub fn source_for(project: &mut Project, which: &ViewSource) -> Result<Source, S
                 brep: bodies.brep.clone(),
                 bodies: ids,
                 hash: fold(doc.content_hash()),
+                design: Some(Arc::new(bodies)),
             })
         }
         ViewSource::Assembly => {
@@ -39,6 +42,7 @@ pub fn source_for(project: &mut Project, which: &ViewSource) -> Result<Source, S
                 .pose(&mut project.engine)
                 .map_err(|e| format!("the assembly could not be posed: {e:?}"))?;
             Ok(Source {
+                design: None,
                 bodies: pose.bodies.clone(),
                 brep: Arc::new(pose.rep),
                 hash,

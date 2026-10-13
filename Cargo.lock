@@ -2215,6 +2215,7 @@ dependencies = [
  "dxf",
  "kw-brep",
  "kw-dxf",
+ "kw-feature",
  "kw-math",
  "kw-model",
  "kw-nurbs",

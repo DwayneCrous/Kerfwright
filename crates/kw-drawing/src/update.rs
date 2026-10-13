@@ -76,6 +76,8 @@ fn make(brep: &BRep, bodies: &[BodyId], s: &GenSpec) -> Result<ViewGeometry, Str
                 sources: vec![Source::None; scene.prims.len()],
                 scene,
                 centre: [g.centre[0] + c[0], g.centre[1] + c[1]],
+                marks: Vec::new(),
+                axes: Vec::new(),
                 size: [2.0 * r, 2.0 * r],
             })
         }

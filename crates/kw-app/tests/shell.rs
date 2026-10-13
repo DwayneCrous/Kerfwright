@@ -6139,3 +6139,704 @@ fn a_section_steps_aside_for_a_view_already_beside_its_parent() {
         "still level with its parent"
     );
 }
+
+// ------------------------------------------------------------------------------------ dimensions and annotations
+
+use kw_drawing::{AnnotKind, DimKind, DimStatus, Gdt};
+
+/// A 60 x 40 x 10 plate with two through holes of diameter 6, in the Drawing workspace with a
+/// top view and a front view. Returns the ids of the hole, the extrusion and the two views.
+struct Plate {
+    hole: kw_feature::FeatureId,
+    extrude: kw_feature::FeatureId,
+    top: u64,
+    front: u64,
+}
+
+fn plate_app(name: &str) -> (Harness, Plate) {
+    let dir = scratch(name);
+    let mut h = Harness::new(app_in(&dir));
+    h.app.create_project("Plate", &dir).unwrap();
+    let mm = |v: f64| kw_expr::Param::length(v);
+    let (hole, extrude) = {
+        let p = h.app.project_mut().unwrap();
+        let mut ids = None;
+        p.history
+            .edit(|d| {
+                let sk = d.add_rect_sketch(
+                    "Plate",
+                    kw_feature::PlaneSpec::Xy(mm(0.0)),
+                    mm(0.0),
+                    mm(0.0),
+                    mm(60.0),
+                    mm(40.0),
+                )?;
+                let ex = d.add_extrude("Block", sk, mm(10.0), kw_feature::BodyOp::New)?;
+                ids = Some((sk, ex));
+                Ok(())
+            })
+            .unwrap();
+        let _ = ids;
+        let ev = p.evaluation();
+        let (_, o) = ev.final_solid().unwrap();
+        let b = o.brep().unwrap();
+        let top = b
+            .body_faces(o.body().unwrap())
+            .into_iter()
+            .filter(|f| kw_app::design::geom::face_frame(b, *f).is_some_and(|fr| fr.n[2] > 0.99))
+            .max_by(|a, c| {
+                b.face_bbox(*a)
+                    .unwrap()
+                    .max
+                    .z
+                    .total_cmp(&b.face_bbox(*c).unwrap().max.z)
+            })
+            .unwrap();
+        let r = o.names.reference_to(b, top).unwrap();
+        let mut hole = None;
+        p.history
+            .edit(|d| {
+                hole = Some(d.add(
+                    "Drill",
+                    kw_feature::FeatureSpec::Hole(kw_feature::HoleSpec {
+                        plane: kw_feature::PlaneSpec::Face(r),
+                        points: vec![[mm(15.0), mm(20.0)], [mm(45.0), mm(20.0)]],
+                        kind: kw_feature::HoleKind::Simple { diameter: mm(6.0) },
+                        depth: mm(10.0),
+                        base: None,
+                        through_all: true,
+                    }),
+                )?);
+                Ok(())
+            })
+            .unwrap();
+        let ex = p
+            .document()
+            .features
+            .iter()
+            .rfind(|f| matches!(f.spec, kw_feature::FeatureSpec::Extrude(_)))
+            .unwrap()
+            .id;
+        (hole.unwrap(), ex)
+    };
+    {
+        let p = h.app.project_mut().unwrap();
+        let ev = p.evaluation();
+        assert!(
+            ev.is_clean(),
+            "the plate must evaluate: {:?}",
+            p.document()
+                .features
+                .iter()
+                .map(|f| ev.error(f.id))
+                .collect::<Vec<_>>()
+        );
+    }
+    h.app.set_workspace(Workspace::Drawing);
+    h.frame();
+    let (top, front);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let form = |o| kw_app::drawing::ViewForm {
+            orientation: o,
+            style: kw_drawing::ViewStyle::VisibleHidden,
+            assembly: false,
+            scale: None,
+        };
+        project
+            .drawings
+            .add_sheet("Sheet 1", kw_drawing::SheetFormat::default());
+        h.app.drawing.sheet = 0;
+        top = h
+            .app
+            .drawing
+            .add_base_view(project, &form(Orientation::Top), false)
+            .unwrap();
+        h.app.drawing.wait(project);
+        front = h
+            .app
+            .drawing
+            .add_base_view(project, &form(Orientation::Front), false)
+            .unwrap();
+        h.app.drawing.wait(project);
+    }
+    (
+        h,
+        Plate {
+            hole,
+            extrude,
+            top,
+            front,
+        },
+    )
+}
+
+fn change_hole_diameter(h: &mut Harness, hole: kw_feature::FeatureId, d: f64) {
+    let p = h.app.project_mut().unwrap();
+    p.history
+        .edit(|doc| {
+            let Some(kw_feature::Feature {
+                spec: kw_feature::FeatureSpec::Hole(hs),
+                ..
+            }) = doc.get(hole).cloned()
+            else {
+                panic!("not a hole")
+            };
+            let mut hs = hs;
+            hs.kind = kw_feature::HoleKind::Simple {
+                diameter: kw_expr::Param::length(d),
+            };
+            doc.replace_spec(hole, kw_feature::FeatureSpec::Hole(hs))
+        })
+        .unwrap();
+}
+
+fn dw_update(h: &mut Harness) {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.update_all(project).unwrap();
+    h.app.drawing.wait(project);
+}
+
+fn dims_of(h: &mut Harness) -> Vec<kw_drawing::Dimension> {
+    dw_project(h).drawings.sheets[0]
+        .annots
+        .iter()
+        .filter_map(|a| match &a.kind {
+            AnnotKind::Dimension(d) => Some(d.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_hole_dimension_is_tied_to_the_hole_counts_its_twin_and_follows_a_size_change() {
+    let (mut h, pl) = plate_app("dw_hole");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    // the circles the top view can dimension: both holes, both ends of each (a through hole)
+    let cands = h.app.drawing.candidates_for(project, pl.top).unwrap();
+    let circles: Vec<_> = cands
+        .iter()
+        .filter(|c| matches!(c.kind, kw_drawing::snap::CandKind::Circle))
+        .cloned()
+        .collect();
+    assert!(circles.len() >= 2, "{}", circles.len());
+    let c = circles
+        .iter()
+        .find(|c| c.circle.unwrap().0[0] < 30.0)
+        .unwrap()
+        .clone();
+    let id = h
+        .app
+        .drawing
+        .add_dimension(project, pl.top, DimKind::Diameter, &[c], 0.0, 0.8)
+        .unwrap();
+    let d = dims_of(&mut h).pop().unwrap();
+    assert_eq!(d.value, 6.0);
+    assert_eq!(d.prefix, "2×", "two holes of this size");
+    assert_eq!(d.status, DimStatus::Ok);
+    assert!(
+        matches!(d.anchors[0], kw_drawing::dim::Anchor::Circle { .. }),
+        "attached through the faces, not fixed in space"
+    );
+    // the text on the sheet
+    let sheet = &dw_project(&mut h).drawings.sheets[0];
+    assert!(sheet
+        .annotations()
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "2×Ø6")));
+    let _ = id;
+    // make the holes 10 across: the dimension follows, and so does the drawn circle
+    change_hole_diameter(&mut h, pl.hole, 10.0);
+    dw_update(&mut h);
+    let d = dims_of(&mut h).pop().unwrap();
+    assert_eq!(d.value, 10.0);
+    assert_eq!(d.status, DimStatus::Ok);
+    let v = dw_project(&mut h).drawings.sheets[0]
+        .view(pl.top)
+        .unwrap()
+        .clone();
+    assert!(
+        v.cache
+            .as_ref()
+            .unwrap()
+            .marks
+            .iter()
+            .any(|(_, r)| (r - 5.0 * v.scale).abs() < 1e-6),
+        "the view shows the new size"
+    );
+    let sheet = &dw_project(&mut h).drawings.sheets[0];
+    assert!(sheet
+        .annotations()
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "2×Ø10")));
+}
+
+#[test]
+fn linear_dimensions_measure_the_model_and_track_its_edits() {
+    let (mut h, pl) = plate_app("dw_linear");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    // the front view: the plate's thickness, between two corners on its left side
+    let cands = h.app.drawing.candidates_for(project, pl.front).unwrap();
+    let corner = |z: f64| {
+        cands
+            .iter()
+            .find(|c| {
+                matches!(c.kind, kw_drawing::snap::CandKind::Point(_))
+                    && c.p3[0].abs() < 1e-9
+                    && (c.p3[2] - z).abs() < 1e-9
+                    && c.p3[1].abs() < 1e-9
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no corner at z = {z}"))
+    };
+    h.app
+        .drawing
+        .add_dimension(
+            project,
+            pl.front,
+            DimKind::Vertical,
+            &[corner(0.0), corner(10.0)],
+            -12.0,
+            0.0,
+        )
+        .unwrap();
+    // and the plate's length along the bottom
+    let right = cands
+        .iter()
+        .find(|c| {
+            matches!(c.kind, kw_drawing::snap::CandKind::Point(_))
+                && (c.p3[0] - 60.0).abs() < 1e-9
+                && c.p3[2].abs() < 1e-9
+                && c.p3[1].abs() < 1e-9
+        })
+        .cloned()
+        .unwrap();
+    h.app
+        .drawing
+        .add_dimension(
+            project,
+            pl.front,
+            DimKind::Horizontal,
+            &[corner(0.0), right],
+            -10.0,
+            0.0,
+        )
+        .unwrap();
+    let ds = dims_of(&mut h);
+    assert_eq!((ds[0].value, ds[1].value), (10.0, 60.0));
+    // a thicker plate
+    {
+        let p = h.app.project_mut().unwrap();
+        p.history
+            .edit(|doc| {
+                let Some(kw_feature::Feature {
+                    spec: kw_feature::FeatureSpec::Extrude(e),
+                    ..
+                }) = doc.get(pl.extrude).cloned()
+                else {
+                    panic!()
+                };
+                let mut e = e;
+                e.depth = kw_expr::Param::length(25.0);
+                doc.replace_spec(pl.extrude, kw_feature::FeatureSpec::Extrude(e))
+            })
+            .unwrap();
+    }
+    dw_update(&mut h);
+    let ds = dims_of(&mut h);
+    assert_eq!(
+        (ds[0].value, ds[1].value),
+        (25.0, 60.0),
+        "{:?}",
+        ds.iter().map(|d| &d.status).collect::<Vec<_>>()
+    );
+    assert!(ds.iter().all(|d| d.status == DimStatus::Ok));
+    // the value is the model's, not the view's: changing the scale does not change it
+    let id = pl.front;
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        project.drawings.sheets[0].view_mut(id).unwrap().scale = 0.5;
+    }
+    dw_update(&mut h);
+    assert_eq!(dims_of(&mut h)[0].value, 25.0);
+}
+
+#[test]
+fn a_dimension_whose_hole_is_gone_says_so_and_keeps_its_last_value() {
+    let (mut h, pl) = plate_app("dw_broken");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let cands = h.app.drawing.candidates_for(project, pl.top).unwrap();
+    let c = cands
+        .iter()
+        .find(|c| matches!(c.kind, kw_drawing::snap::CandKind::Circle))
+        .unwrap()
+        .clone();
+    h.app
+        .drawing
+        .add_dimension(project, pl.top, DimKind::Diameter, &[c], 0.0, 0.8)
+        .unwrap();
+    {
+        let p = h.app.project_mut().unwrap();
+        p.history.edit(|d| d.remove(pl.hole).map(|_| ())).unwrap();
+    }
+    dw_update(&mut h);
+    let d = dims_of(&mut h).pop().unwrap();
+    assert!(
+        matches!(&d.status, DimStatus::Broken(m) if m.contains("no longer")),
+        "{:?}",
+        d.status
+    );
+    assert_eq!(d.value, 6.0, "the last good value stays");
+    // it is still drawn, so the user can see which one needs fixing
+    assert!(dw_project(&mut h).drawings.sheets[0]
+        .annotations()
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text.contains("Ø6"))));
+}
+
+#[test]
+fn views_carry_centre_marks_for_holes_and_centre_lines_for_their_walls() {
+    let (mut h, pl) = plate_app("dw_marks");
+    let sh = &dw_project(&mut h).drawings.sheets[0];
+    let (t, f) = (sh.view(pl.top).unwrap(), sh.view(pl.front).unwrap());
+    // seen from above: two circles of radius 3 mm x scale
+    let tm = &t.cache.as_ref().unwrap().marks;
+    assert!(
+        tm.iter()
+            .filter(|(_, r)| (r - 3.0 * t.scale).abs() < 1e-6)
+            .count()
+            >= 2,
+        "{tm:?}"
+    );
+    // seen from the front: the holes' axes
+    let fa = &f.cache.as_ref().unwrap().axes;
+    assert_eq!(fa.len(), 2, "{fa:?}");
+    assert!(fa
+        .iter()
+        .all(|(a, b)| (a[0] - b[0]).abs() < 1e-9
+            && ((b[1] - a[1]).abs() - 10.0 * f.scale).abs() < 1e-6));
+    // drawn on the sheet as centre lines, and gone when switched off
+    let sc = sh.annotations();
+    assert!(sc.prims.iter().filter(|p| p.layer == Layer::Center).count() >= 4);
+    let id = pl.top;
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    project.drawings.sheets[0]
+        .view_mut(id)
+        .unwrap()
+        .center_marks = false;
+    let before = project.drawings.sheets[0]
+        .annotations()
+        .prims
+        .iter()
+        .filter(|p| p.layer == Layer::Center)
+        .count();
+    assert!(before < sc.prims.iter().filter(|p| p.layer == Layer::Center).count());
+}
+
+#[test]
+fn notes_and_symbols_are_added_deleted_undone_and_saved() {
+    let (mut h, _pl) = plate_app("dw_notes");
+    let dir = scratch("dw_notes_out");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let dw = &mut h.app.drawing;
+    let note = dw
+        .add_note(
+            project,
+            [30.0, 200.0],
+            "BREAK ALL EDGES\n0.5 MAX",
+            Some([60.0, 150.0]),
+        )
+        .unwrap();
+    let d1 = dw.add_datum(project, [80.0, 60.0], [60.0, 60.0]).unwrap();
+    let d2 = dw.add_datum(project, [90.0, 60.0], [60.0, 70.0]).unwrap();
+    dw.add_surface(project, [100.0, 100.0], "Ra 1.6").unwrap();
+    dw.add_fcf(
+        project,
+        [120.0, 100.0],
+        Gdt::Position,
+        "Ø0.1",
+        &["A", "B"],
+        Some([60.0, 60.0]),
+    )
+    .unwrap();
+    let sheet = &project.drawings.sheets[0];
+    let letters: Vec<_> = sheet
+        .annots
+        .iter()
+        .filter_map(|a| match &a.kind {
+            AnnotKind::Datum { letter, .. } => Some(letter.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(letters, ["A", "B"], "datum letters are given in order");
+    let scene = sheet.annotations();
+    for want in ["BREAK ALL EDGES", "0.5 MAX", "Ra 1.6", "Ø0.1"] {
+        assert!(
+            scene
+                .prims
+                .iter()
+                .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == want)),
+            "{want}"
+        );
+    }
+    let path = dir.join("n.kwf");
+    project.save_as(&path).unwrap();
+    assert_eq!(
+        kw_app::project::Project::open(&path).unwrap().drawings,
+        project.drawings
+    );
+    h.app.drawing.delete_annot(project, note).unwrap();
+    h.app.drawing.delete_annot(project, d1).unwrap();
+    assert_eq!(project.drawings.sheets[0].annots.len(), 3);
+    assert!(h.app.drawing.delete_annot(project, d1).is_err());
+    h.app.undo_redo(true);
+    h.app.undo_redo(true);
+    assert_eq!(dw_project(&mut h).drawings.sheets[0].annots.len(), 5);
+    let _ = d2;
+}
+
+fn dw_click(h: &mut Harness, p: Pos2) {
+    pointer_frame(h, vec![egui::Event::PointerMoved(p)]);
+    pointer_frame(h, vec![press(p, true)]);
+    pointer_frame(h, vec![press(p, false)]);
+}
+
+fn dw_command(h: &mut Harness, id: &str) {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let mut d = ScriptedDialogs::default();
+    h.app.drawing.command(id, project, &mut d);
+    // the status line changes the layout: let it settle before aiming
+    h.frame();
+    h.frame();
+}
+
+fn dw_click_view(h: &mut Harness, view: u64, local: [f64; 2]) {
+    let p = view_pt(h, view, local);
+    dw_click(h, p);
+}
+
+/// The screen position of a point of a view given relative to the view's origin (sheet mm).
+fn view_pt(h: &mut Harness, view: u64, local: [f64; 2]) -> Pos2 {
+    let v = dw_project(h).drawings.sheets[0].view(view).unwrap().clone();
+    h.app
+        .drawing
+        .screen_of([v.pos[0] + local[0], v.pos[1] + local[1]])
+}
+
+#[test]
+fn dimension_tools_are_driven_by_clicks_on_the_model() {
+    let (mut h, pl) = plate_app("dw_dim_tools");
+    h.frame();
+    // a diameter: click the rim of a hole, then where the leader should point
+    let cands = {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.drawing.candidates_for(project, pl.top).unwrap()
+    };
+    let hole = cands
+        .iter()
+        .find(|c| matches!(c.kind, kw_drawing::snap::CandKind::Circle))
+        .unwrap()
+        .clone();
+    let scale = dw_project(&mut h).drawings.sheets[0]
+        .view(pl.top)
+        .unwrap()
+        .scale;
+    dw_command(&mut h, "dim_diameter");
+    assert!(h.app.drawing.tool.is_some());
+    let rim = view_pt(&mut h, pl.top, [hole.p2[0] + 3.0 * scale, hole.p2[1]]);
+    dw_click(&mut h, rim);
+    let away = view_pt(
+        &mut h,
+        pl.top,
+        [hole.p2[0] + 3.0 * scale + 20.0, hole.p2[1] + 20.0],
+    );
+    dw_click(&mut h, away);
+    dw_wait(&mut h);
+    let ds = dims_of(&mut h);
+    assert_eq!(ds.len(), 1, "{}", h.app.drawing.status);
+    assert_eq!((ds[0].kind, ds[0].value), (DimKind::Diameter, 6.0));
+    assert!(h.app.drawing.tool.is_none());
+    assert!(
+        (ds[0].angle - std::f64::consts::FRAC_PI_4).abs() < 0.2,
+        "the leader points where it was placed: {}",
+        ds[0].angle
+    );
+    // a linear dimension on the front view: two corners, then above them: horizontal
+    let fc = {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.drawing.candidates_for(project, pl.front).unwrap()
+    };
+    let corner = |x: f64| {
+        fc.iter()
+            .find(|c| {
+                matches!(c.kind, kw_drawing::snap::CandKind::Point(_))
+                    && (c.p3[0] - x).abs() < 1e-9
+                    && c.p3[2].abs() < 1e-9
+                    && c.p3[1].abs() < 1e-9
+            })
+            .unwrap()
+            .clone()
+    };
+    let (a, b) = (corner(0.0), corner(60.0));
+    dw_command(&mut h, "dim_linear");
+    let (pa, pb) = (
+        view_pt(&mut h, pl.front, a.p2),
+        view_pt(&mut h, pl.front, b.p2),
+    );
+    dw_click(&mut h, pa);
+    dw_click(&mut h, pb);
+    let place = view_pt(
+        &mut h,
+        pl.front,
+        [(a.p2[0] + b.p2[0]) / 2.0, a.p2[1] - 14.0],
+    );
+    dw_click(&mut h, place);
+    let ds = dims_of(&mut h);
+    assert_eq!(ds.len(), 2, "{}", h.app.drawing.status);
+    assert_eq!((ds[1].kind, ds[1].value), (DimKind::Horizontal, 60.0));
+    assert!(
+        ds[1].line_pos < a.p2[1],
+        "below the plate: {}",
+        ds[1].line_pos
+    );
+    // placed beside instead: vertical
+    let (z0, z1) = (
+        fc.iter()
+            .find(|c| {
+                matches!(c.kind, kw_drawing::snap::CandKind::Point(_))
+                    && c.p3[0].abs() < 1e-9
+                    && c.p3[2].abs() < 1e-9
+                    && c.p3[1].abs() < 1e-9
+            })
+            .unwrap()
+            .clone(),
+        fc.iter()
+            .find(|c| {
+                matches!(c.kind, kw_drawing::snap::CandKind::Point(_))
+                    && c.p3[0].abs() < 1e-9
+                    && (c.p3[2] - 10.0).abs() < 1e-9
+                    && c.p3[1].abs() < 1e-9
+            })
+            .unwrap()
+            .clone(),
+    );
+    dw_command(&mut h, "dim_linear");
+    dw_click_view(&mut h, pl.front, z0.p2);
+    dw_click_view(&mut h, pl.front, z1.p2);
+    dw_click_view(
+        &mut h,
+        pl.front,
+        [z0.p2[0] - 12.0, (z0.p2[1] + z1.p2[1]) / 2.0],
+    );
+    let ds = dims_of(&mut h);
+    assert_eq!((ds[2].kind, ds[2].value), (DimKind::Vertical, 10.0));
+    // Escape cancels a tool half way; the clicks so far made nothing
+    dw_command(&mut h, "dim_aligned");
+    dw_click_view(&mut h, pl.front, z0.p2);
+    pointer_frame(
+        &mut h,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(h.app.drawing.tool.is_none());
+    assert_eq!(dims_of(&mut h).len(), 3);
+    // each dimension is a step of its own
+    h.app.undo_redo(true);
+    assert_eq!(dims_of(&mut h).len(), 2);
+}
+
+#[test]
+fn annotations_are_selected_dragged_and_deleted_on_the_sheet() {
+    let (mut h, pl) = plate_app("dw_annot_ui");
+    h.frame();
+    let _ = pl;
+    // a note by its tool: one click places it
+    dw_command(&mut h, "note");
+    let at = h.app.drawing.screen_of([60.0, 230.0]);
+    dw_click(&mut h, at);
+    let id = h
+        .app
+        .drawing
+        .selected_annot
+        .expect("the new note is selected");
+    let pos = |h: &mut Harness| match &dw_project(h).drawings.sheets[0]
+        .annots
+        .iter()
+        .find(|a| a.id == id)
+        .unwrap()
+        .kind
+    {
+        AnnotKind::Note { pos, .. } => *pos,
+        _ => panic!(),
+    };
+    let start = pos(&mut h);
+    assert!((start[0] - 60.0).abs() < 0.5 && (start[1] - 230.0).abs() < 0.5);
+    h.app.drawing.selected_annot = None;
+    h.frame();
+    // click on it to select, drag to move
+    let on = h.app.drawing.screen_of([start[0] + 3.0, start[1] + 1.5]);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(on)]);
+    pointer_frame(&mut h, vec![press(on, true)]);
+    for k in 1..=5 {
+        pointer_frame(
+            &mut h,
+            vec![egui::Event::PointerMoved(
+                on + egui::vec2(6.0 * k as f32, 4.0 * k as f32),
+            )],
+        );
+    }
+    pointer_frame(&mut h, vec![press(on + egui::vec2(30.0, 20.0), false)]);
+    assert_eq!(h.app.drawing.selected_annot, Some(id));
+    let moved = pos(&mut h);
+    assert!(
+        moved[0] > start[0] + 2.0 && moved[1] < start[1] - 2.0,
+        "{start:?} -> {moved:?}"
+    );
+    // one drag, one undo step
+    h.app.undo_redo(true);
+    assert_eq!(pos(&mut h), start);
+    h.app.undo_redo(false);
+    // Delete removes the selection
+    h.frame();
+    pointer_frame(
+        &mut h,
+        vec![egui::Event::Key {
+            key: egui::Key::Delete,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(dw_project(&mut h).drawings.sheets[0].annots.is_empty());
+}

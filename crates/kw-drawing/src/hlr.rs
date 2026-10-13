@@ -41,6 +41,10 @@ pub struct ViewGeometry {
     pub sources: Vec<Source>,
     /// The projected point (sheet mm) that sits at the origin of `scene`.
     pub centre: P,
+    /// Circles drawn face-on (centre, radius), for centre marks.
+    pub marks: Vec<(P, f64)>,
+    /// Axes of cylinders seen from the side, for centre lines.
+    pub axes: Vec<(P, P)>,
     /// Width and height of the geometry in mm.
     pub size: P,
 }
@@ -618,8 +622,14 @@ pub fn project_clipped(
         }
     };
 
+    let mut circles: Vec<(kw_nurbs::geom::Circle, Vec<u32>)> = Vec::new();
     for d in &data {
-        edges(brep, d, &mut |src, c, own| emit(&mut scene, src, c, own));
+        edges(
+            brep,
+            d,
+            &mut |src, c, own| emit(&mut scene, src, c, own),
+            &mut |ci, own| circles.push((ci.clone(), own.to_vec())),
+        );
         if !wire {
             silhouettes(brep, d, f, &mut |src, c, own| emit(&mut scene, src, c, own));
         }
@@ -645,9 +655,58 @@ pub fn project_clipped(
         return Ok(ViewGeometry::default());
     };
     let centre = [(blo[0] + bhi[0]) / 2.0, (blo[1] + bhi[1]) / 2.0];
+    let local = |p: P| [p[0] - centre[0], p[1] - centre[1]];
+    // circles seen face-on with some of them showing: where the centre marks go
+    let mut marks: Vec<(P, f64)> = Vec::new();
+    for (ci, own) in &circles {
+        let axis = vv(&ci.frame.z);
+        if dot(axis, f.dir).abs() < 0.999 {
+            continue;
+        }
+        let ctr = v3(&ci.frame.origin);
+        let (u, w) = (vv(&ci.frame.x), vv(&ci.frame.y));
+        let shows = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)]
+            .iter()
+            .any(|(a, b)| {
+                let p = [
+                    ctr[0] + (u[0] * a + w[0] * b) * ci.radius,
+                    ctr[1] + (u[1] * a + w[1] * b) * ci.radius,
+                    ctr[2] + (u[2] * a + w[2] * b) * ci.radius,
+                ];
+                status(p, own) == St::Visible
+            });
+        if !shows {
+            continue;
+        }
+        let q = f.project(ctr).0;
+        let at = local([q[0] * o.scale, q[1] * o.scale]);
+        let r = ci.radius * o.scale;
+        if !marks
+            .iter()
+            .any(|(c, rr)| (c[0] - at[0]).hypot(c[1] - at[1]) < 1e-6 && (rr - r).abs() < 1e-6)
+        {
+            marks.push((at, r));
+        }
+    }
+    let axes: Vec<(P, P)> = if clip.is_some() || wire {
+        Vec::new()
+    } else {
+        data.iter()
+            .flat_map(|d| cylinder_axes(brep, d, f))
+            .map(|(a, b)| {
+                let (pa, pb) = (f.project(a).0, f.project(b).0);
+                (
+                    local([pa[0] * o.scale, pa[1] * o.scale]),
+                    local([pb[0] * o.scale, pb[1] * o.scale]),
+                )
+            })
+            .collect()
+    };
     Ok(ViewGeometry {
         scene: scene.placed(1.0, [-centre[0], -centre[1]]),
         sources,
+        marks,
+        axes,
         centre,
         size: [bhi[0] - blo[0], bhi[1] - blo[1]],
     })
@@ -715,7 +774,12 @@ fn shaded_fills(
 }
 
 /// The B-rep edges of one body, each as an exact curve.
-fn edges(brep: &BRep, d: &BodyData, emit: &mut dyn FnMut(Source, &Curve, &[u32])) {
+fn edges(
+    brep: &BRep,
+    d: &BodyData,
+    emit: &mut dyn FnMut(Source, &Curve, &[u32]),
+    circle: &mut dyn FnMut(&kw_nurbs::geom::Circle, &[u32]),
+) {
     let t = &d.tess;
     let face_idx: HashMap<FaceId, u32> = t
         .face_keys
@@ -805,6 +869,9 @@ fn edges(brep: &BRep, d: &BodyData, emit: &mut dyn FnMut(Source, &Curve, &[u32])
                 .iter()
                 .filter_map(|f| face_idx.get(f).map(|i| d.base + i))
                 .collect();
+            if let Some(CurveGeom::Circle(ci)) = curve {
+                circle(ci, &own);
+            }
             emit(src, &c, &own);
         }
     }
@@ -1098,4 +1165,40 @@ fn clip_triangle(t: &[V3; 3], cl: &Clip) -> Vec<[V3; 3]> {
     (1..poly.len().saturating_sub(1))
         .map(|i| [poly[0], poly[i], poly[i + 1]])
         .collect()
+}
+
+/// The axis of every cylindrical face seen from the side, from one end of the face to the other.
+fn cylinder_axes(brep: &BRep, d: &BodyData, f: &ViewFrame) -> Vec<(V3, V3)> {
+    let t = &d.tess;
+    let m = &t.mesh;
+    let mut out = Vec::new();
+    for (fi, fk) in t.face_keys.iter().enumerate() {
+        let Some(face) = brep.faces.get(*fk) else {
+            continue;
+        };
+        let Some(SurfaceGeom::Cylinder(cy)) = brep.surfaces.get(face.surface) else {
+            continue;
+        };
+        let axis = vv(&cy.frame.z);
+        if dot(axis, f.dir).abs() > 0.98 {
+            continue;
+        }
+        let o = v3(&cy.frame.origin);
+        let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
+        for tri in 0..m.triangle_count() {
+            if m.tri_face[tri] as usize != fi {
+                continue;
+            }
+            for p in m.triangle(tri) {
+                let z = dot([p.x - o[0], p.y - o[1], p.z - o[2]], axis);
+                zmin = zmin.min(z);
+                zmax = zmax.max(z);
+            }
+        }
+        if zmax - zmin > 1e-9 {
+            let at = |z: f64| [o[0] + axis[0] * z, o[1] + axis[1] * z, o[2] + axis[2] * z];
+            out.push((at(zmin), at(zmax)));
+        }
+    }
+    out
 }

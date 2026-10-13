@@ -2,7 +2,9 @@
 //! writers. Everything draws into one flat [`Scene2d`] that the canvas and the writers share.
 //! The crate has no UI and no global state.
 
+pub mod annot;
 pub mod detail;
+pub mod dim;
 pub mod dxf_out;
 pub mod hlr;
 pub mod model;
@@ -12,8 +14,11 @@ pub mod render;
 pub mod scene;
 pub mod section;
 pub mod sheet;
+pub mod snap;
 pub mod update;
 
+pub use annot::{AnnotKind, Annotation, Gdt};
+pub use dim::{DimKind, DimStatus, Dimension, PointKind, Resolved, Tolerance};
 pub use model::{
     scale_label, Align, DrawingSet, Orientation, Sheet, View, ViewCache, ViewKind, ViewSource,
     ViewStyle,

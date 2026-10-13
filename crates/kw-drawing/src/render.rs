@@ -1,5 +1,7 @@
 //! A sheet (or the whole set) as a [`Scene2d`].
 
+use crate::annot::{self, AnnotKind};
+use crate::dim;
 use crate::model::{scale_label, Sheet, View, ViewKind};
 use crate::scene::{Anchor, Layer, Scene2d, P};
 use crate::section::{cut_directions, to_sheet};
@@ -27,9 +29,16 @@ impl Sheet {
         s
     }
 
-    /// The marks on a parent view that tell where a section is cut and what a detail enlarges.
+    /// Everything drawn on the sheet besides the frame and the views: the marks that tell where a
+    /// section is cut and what a detail enlarges, centre marks, dimensions, notes and symbols.
     pub fn annotations(&self) -> Scene2d {
         let mut s = Scene2d::new();
+        for v in &self.views {
+            s.extend(annot::center_marks(v));
+        }
+        for a in &self.annots {
+            s.extend(self.annotation_scene(a));
+        }
         for v in &self.views {
             match &v.kind {
                 ViewKind::Section {
@@ -103,6 +112,21 @@ impl Sheet {
             }
         }
         s
+    }
+}
+
+impl Sheet {
+    /// One dimension, note or symbol as drawn (empty when its view has no geometry yet).
+    pub fn annotation_scene(&self, a: &crate::annot::Annotation) -> Scene2d {
+        match &a.kind {
+            AnnotKind::Dimension(d) => {
+                match self.view(d.view).and_then(|v| Some((v, v.cache.as_ref()?))) {
+                    Some((v, c)) => dim::layout(d, v, c, self.format.units),
+                    None => Scene2d::new(),
+                }
+            }
+            _ => annot::layout(a),
+        }
     }
 }
 

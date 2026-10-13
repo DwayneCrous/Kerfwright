@@ -260,7 +260,10 @@ fn section_and_detail_views_survive_a_save() {
                 source_hash: 3,
                 scene: Scene2d::new(),
                 centre: [1.5, -2.5],
+                marks: vec![],
+                axes: vec![],
             }),
+            center_marks: true,
         });
     }
     assert_eq!(DrawingSet::from_bytes(&set.to_bytes()).unwrap(), set);

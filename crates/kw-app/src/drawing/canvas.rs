@@ -1,12 +1,12 @@
 //! Painting the sheet and handling the pointer: pan, zoom, select and drag views.
 
 use super::{Drag, DrawingWorkspace, Tool};
-use crate::chrome::theme::ACCENT;
+use crate::chrome::theme::{ACCENT, BAD};
 use crate::project::Project;
 use eframe::egui::{self, epaint::TextShape, Color32, FontId, Pos2, Rect, Shape as Sh, Stroke};
 use kw_drawing::scene::{flatten, Anchor, Layer, LineStyle, Scene2d, Shape};
 use kw_drawing::section::to_sheet;
-use kw_drawing::{Align, Sheet, View, ViewKind};
+use kw_drawing::{Align, AnnotKind, DimStatus, Sheet, View, ViewKind};
 
 fn colour(l: Layer) -> Color32 {
     let [r, g, b] = l.rgb();
@@ -19,9 +19,10 @@ pub fn paint_scene(
     scene: &Scene2d,
     to: &dyn Fn([f64; 2]) -> Pos2,
     px: f64,
+    tint: Option<Color32>,
 ) {
     for pr in &scene.prims {
-        let col = colour(pr.layer);
+        let col = tint.unwrap_or_else(|| colour(pr.layer));
         let w = (pr.layer.weight() * px).clamp(0.6, 4.0) as f32;
         let stroke = Stroke::new(w, col);
         let style = pr.layer.style();
@@ -179,16 +180,26 @@ impl DrawingWorkspace {
         // the frame and title block, without the views (those are drawn one by one to show a selection)
         let sheet = &project.drawings.sheets[self.sheet];
         let frame = sheet.format.scene(&sheet.title, sheet_no, count);
-        paint_scene(&painter, &frame, &to, px);
+        paint_scene(&painter, &frame, &to, px, None);
         for v in &sheet.views {
             let Some(cache) = &v.cache else { continue };
             let placed = cache.scene.placed(1.0, v.pos);
-            paint_scene(&painter, &placed, &to, px);
+            paint_scene(&painter, &placed, &to, px, None);
             if let Some(l) = kw_drawing::render::view_label(v, &placed) {
-                paint_scene(&painter, &l, &to, px);
+                paint_scene(&painter, &l, &to, px, None);
             }
         }
-        paint_scene(&painter, &sheet.annotations(), &to, px);
+        paint_scene(&painter, &sheet.annotations(), &to, px, None);
+        // dimensions that lost their model in red, the selected annotation in the accent colour
+        for a in &sheet.annots {
+            let broken = matches!(&a.kind, AnnotKind::Dimension(d) if matches!(d.status, DimStatus::Broken(_)));
+            if broken {
+                paint_scene(&painter, &sheet.annotation_scene(a), &to, px, Some(BAD));
+            }
+            if self.selected_annot == Some(a.id) {
+                paint_scene(&painter, &sheet.annotation_scene(a), &to, px, Some(ACCENT));
+            }
+        }
         if let Some(id) = self.selected {
             if let Some((lo, hi)) = sheet.view(id).and_then(view_rect) {
                 let r = Rect::from_two_pos(
@@ -219,7 +230,7 @@ impl DrawingWorkspace {
             );
         }
 
-        // select and drag views
+        // select and drag views and annotations
         let pointer = ui.ctx().pointer_interact_pos();
         let world = |p: Pos2| {
             let w = view.to_world(rect, p);
@@ -240,6 +251,10 @@ impl DrawingWorkspace {
                 self.status.clear();
                 return;
             }
+            if !matches!(tool, Tool::Section { .. } | Tool::Detail { .. }) {
+                self.annot_tool_ui(ui, project, rect, &painter, &resp, tool);
+                return;
+            }
             let uv_of = |v: &View, p: [f64; 2]| -> Option<[f64; 2]> {
                 let c = v.cache.as_ref()?;
                 Some([
@@ -256,6 +271,7 @@ impl DrawingWorkspace {
             let (first, is_section) = match &tool {
                 Tool::Section { first } => (*first, true),
                 Tool::Detail { first } => (*first, false),
+                _ => return,
             };
             // where the first point sits on the sheet, and the second as it would be placed
             let parent = first.as_ref().and_then(|(id, _)| sheet.view(*id));
@@ -321,19 +337,88 @@ impl DrawingWorkspace {
             }
             return;
         }
+        // an annotation under a point of the sheet (the last one drawn wins)
+        let annot_at = |project: &Project, p: [f64; 2]| -> Option<u64> {
+            let sheet = &project.drawings.sheets[self.sheet];
+            sheet
+                .annots
+                .iter()
+                .rev()
+                .find(|a| {
+                    sheet.annotation_scene(a).bounds().is_some_and(|(lo, hi)| {
+                        p[0] >= lo[0] - 1.5
+                            && p[0] <= hi[0] + 1.5
+                            && p[1] >= lo[1] - 1.5
+                            && p[1] <= hi[1] + 1.5
+                    })
+                })
+                .map(|a| a.id)
+        };
         if resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(p) = pointer.map(world) {
-                let hit = project.drawings.sheets[self.sheet]
-                    .views
-                    .iter()
-                    .rev()
-                    .find(|v| inside(v, p))
-                    .map(|v| v.id);
-                if let Some(id) = hit {
-                    self.selected = Some(id);
+                if let Some(id) = annot_at(project, p) {
+                    self.selected = None;
+                    self.selected_annot = Some(id);
                     project.dw_checkpoint();
-                    self.drag = Some(Drag { view: id });
+                    self.drag_annot = Some(id);
+                } else {
+                    let hit = project.drawings.sheets[self.sheet]
+                        .views
+                        .iter()
+                        .rev()
+                        .find(|v| inside(v, p))
+                        .map(|v| v.id);
+                    if let Some(id) = hit {
+                        self.selected = Some(id);
+                        self.selected_annot = None;
+                        project.dw_checkpoint();
+                        self.drag = Some(Drag { view: id });
+                    }
                 }
+            }
+        }
+        if let Some(id) = self.drag_annot {
+            if resp.dragged_by(egui::PointerButton::Primary) {
+                let delta = resp.drag_delta();
+                let (dx, dy) = (delta.x as f64 / px, -delta.y as f64 / px);
+                let at = pointer.map(world);
+                let sheet = &mut project.drawings.sheets[self.sheet];
+                // a dimension follows the pointer (its line goes where it is dropped); the rest move by the drag
+                let dim_view =
+                    sheet
+                        .annots
+                        .iter()
+                        .find(|a| a.id == id)
+                        .and_then(|a| match &a.kind {
+                            AnnotKind::Dimension(d) => Some(d.view),
+                            _ => None,
+                        });
+                let placed = dim_view.and_then(|vid| {
+                    let v = sheet.view(vid)?.clone();
+                    Some((v.clone(), v.cache.clone()?, at?))
+                });
+                if let Some(a) = sheet.annots.iter_mut().find(|a| a.id == id) {
+                    match &mut a.kind {
+                        AnnotKind::Dimension(d) => {
+                            if let Some((v, c, at)) = placed {
+                                kw_drawing::dim::place(
+                                    d,
+                                    &v,
+                                    &c,
+                                    [at[0] - v.pos[0], at[1] - v.pos[1]],
+                                );
+                            }
+                        }
+                        AnnotKind::Note { pos, .. }
+                        | AnnotKind::Datum { pos, .. }
+                        | AnnotKind::Surface { pos, .. }
+                        | AnnotKind::Fcf { pos, .. } => {
+                            pos[0] += dx;
+                            pos[1] += dy;
+                        }
+                    }
+                }
+                project.mark_extras_dirty();
             }
         }
         if let Some(d) = &self.drag {
@@ -341,16 +426,14 @@ impl DrawingWorkspace {
                 let delta = resp.drag_delta();
                 let (mut dx, mut dy) = (delta.x as f64 / px, -delta.y as f64 / px);
                 let sheet = &mut project.drawings.sheets[self.sheet];
-                // a projected view slides along the line through its parent
-                match sheet.view(d.view).map(|v| &v.kind) {
-                    Some(kw_drawing::ViewKind::Projected {
-                        align: Align::Horizontal,
-                        ..
-                    }) => dy = 0.0,
-                    Some(kw_drawing::ViewKind::Projected {
-                        align: Align::Vertical,
-                        ..
-                    }) => dx = 0.0,
+                // a projected view or a section slides along the line through its parent
+                let align = sheet.view(d.view).map(|v| match &v.kind {
+                    ViewKind::Projected { align, .. } | ViewKind::Section { align, .. } => *align,
+                    _ => Align::Free,
+                });
+                match align {
+                    Some(Align::Horizontal) => dy = 0.0,
+                    Some(Align::Vertical) => dx = 0.0,
                     _ => {}
                 }
                 let mut moving = children(sheet, d.view);
@@ -364,17 +447,32 @@ impl DrawingWorkspace {
                 project.mark_extras_dirty();
             }
         }
-        if resp.drag_stopped() && self.drag.take().is_some() {
+        if resp.drag_stopped() && (self.drag.take().is_some() | self.drag_annot.take().is_some()) {
             project.dw_drop_checkpoint_if_unchanged();
         }
         if resp.clicked_by(egui::PointerButton::Primary) {
             if let Some(p) = pointer.map(world) {
-                self.selected = project.drawings.sheets[self.sheet]
-                    .views
-                    .iter()
-                    .rev()
-                    .find(|v| inside(v, p))
-                    .map(|v| v.id);
+                self.selected_annot = annot_at(project, p);
+                self.selected = if self.selected_annot.is_some() {
+                    None
+                } else {
+                    project.drawings.sheets[self.sheet]
+                        .views
+                        .iter()
+                        .rev()
+                        .find(|v| inside(v, p))
+                        .map(|v| v.id)
+                };
+            }
+        }
+        // Delete removes the selection
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.ctx().input(|i| i.key_pressed(egui::Key::Delete))
+        {
+            if let Some(a) = self.selected_annot {
+                let _ = self.delete_annot(project, a);
+            } else if let Some(v) = self.selected {
+                let _ = self.delete_view(project, v);
             }
         }
     }

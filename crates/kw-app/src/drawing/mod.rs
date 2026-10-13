@@ -4,7 +4,9 @@
 //! The logic lives in `kw-drawing`; this module holds the state of the workspace, the commands,
 //! and the jobs, and `canvas` paints the sheet.
 
+mod annot_tools;
 mod canvas;
+mod dims;
 mod panels;
 mod source;
 
@@ -16,8 +18,8 @@ use kw_drawing::projection::{neighbour_offset, Side, ViewFrame};
 use kw_drawing::section::{cut_directions, section_frame, slice_loops};
 use kw_drawing::update::{auto_scale, extent, generate, GenKind, GenSpec, STANDARD_SCALES};
 use kw_drawing::{
-    Align, Orientation, PaperSize, SheetFormat, Standard, View, ViewCache, ViewKind, ViewSource,
-    ViewStyle,
+    Align, DimKind, Orientation, PaperSize, SheetFormat, Standard, View, ViewCache, ViewKind,
+    ViewSource, ViewStyle,
 };
 use kw_sketcher::View as View2d;
 use source::{source_for, Source};
@@ -56,8 +58,32 @@ pub enum Dialog {
 /// coordinates, model units) once the first click is made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tool {
-    Section { first: Option<(u64, [f64; 2])> },
-    Detail { first: Option<(u64, [f64; 2])> },
+    Section {
+        first: Option<(u64, [f64; 2])>,
+    },
+    Detail {
+        first: Option<(u64, [f64; 2])>,
+    },
+    /// A dimension: picks so far (in the view `view`). `smart` makes a linear one horizontal or
+    /// vertical by where it is placed.
+    Dim {
+        kind: DimKind,
+        smart: bool,
+        view: Option<u64>,
+        picks: Vec<kw_drawing::snap::Cand>,
+    },
+    /// A note, with a leader if `leader`; `target` is the point the leader goes to once picked.
+    Note {
+        leader: bool,
+        target: Option<[f64; 2]>,
+    },
+    Datum {
+        target: Option<[f64; 2]>,
+    },
+    Surface,
+    Fcf {
+        target: Option<[f64; 2]>,
+    },
 }
 
 type Generated = (Vec<(u64, ViewGeometry)>, u64);
@@ -74,6 +100,8 @@ pub struct DrawingWorkspace {
     rect: eframe::egui::Rect,
     fit_for: Option<(usize, u64)>,
     pub selected: Option<u64>,
+    /// The selected dimension, note or symbol.
+    pub selected_annot: Option<u64>,
     pub dialog: Option<Dialog>,
     job: Option<Job<Generated>>,
     /// Views waiting for the running job to finish.
@@ -81,6 +109,10 @@ pub struct DrawingWorkspace {
     pub status: String,
     drag: Option<Drag>,
     pub tool: Option<Tool>,
+    /// What a dimension tool can pick in the view it works in.
+    cands: Vec<kw_drawing::snap::Cand>,
+    cands_view: Option<u64>,
+    drag_annot: Option<u64>,
     /// Ribbon button ids to run next frame.
     pub requests: Vec<&'static str>,
 }
@@ -93,12 +125,16 @@ impl Default for DrawingWorkspace {
             rect: eframe::egui::Rect::NOTHING,
             fit_for: None,
             selected: None,
+            selected_annot: None,
             dialog: None,
             job: None,
             queue: Vec::new(),
             status: String::new(),
             drag: None,
             tool: None,
+            cands: Vec::new(),
+            cands_view: None,
+            drag_annot: None,
             requests: Vec::new(),
         }
     }
@@ -202,6 +238,28 @@ impl DrawingWorkspace {
             "proj_left" => self.add_selected_projection(project, Side::Left),
             "proj_above" => self.add_selected_projection(project, Side::Above),
             "proj_below" => self.add_selected_projection(project, Side::Below),
+            "dim_linear" => self.start_dim(project, DimKind::Horizontal, true),
+            "dim_aligned" => self.start_dim(project, DimKind::Aligned, false),
+            "dim_diameter" => self.start_dim(project, DimKind::Diameter, false),
+            "dim_radius" => self.start_dim(project, DimKind::Radius, false),
+            "dim_angle" => self.start_dim(project, DimKind::Angle, false),
+            "note" => self.start_annot_tool(
+                project,
+                Tool::Note {
+                    leader: false,
+                    target: None,
+                },
+            ),
+            "leader_note" => self.start_annot_tool(
+                project,
+                Tool::Note {
+                    leader: true,
+                    target: None,
+                },
+            ),
+            "datum" => self.start_annot_tool(project, Tool::Datum { target: None }),
+            "surface" => self.start_annot_tool(project, Tool::Surface),
+            "fcf" => self.start_annot_tool(project, Tool::Fcf { target: None }),
             "section_view" => self.start_tool(project, Tool::Section { first: None }),
             "detail_view" => self.start_tool(project, Tool::Detail { first: None }),
             "delete_view" => self.delete_selected(project),
@@ -253,6 +311,61 @@ impl DrawingWorkspace {
         Ok(())
     }
 
+    /// The free place nearest `near` for a view `size` mm across (its centre): inside the border,
+    /// clear of the title block and of the views already on the sheet. When nothing is free the
+    /// nearest place inside the border is returned.
+    fn free_spot(project: &Project, sheet: usize, size: [f64; 2], near: [f64; 2]) -> [f64; 2] {
+        let fr = project.drawings.sheets[sheet].format.frame();
+        let (hw, hh) = (size[0] / 2.0, size[1] / 2.0);
+        let taken: Vec<([f64; 2], [f64; 2])> = project.drawings.sheets[sheet]
+            .views
+            .iter()
+            .filter_map(|v| {
+                let s = v.size();
+                (s[0] > 0.0).then_some((
+                    [v.pos[0] - s[0] / 2.0 - 8.0, v.pos[1] - s[1] / 2.0 - 12.0],
+                    [v.pos[0] + s[0] / 2.0 + 8.0, v.pos[1] + s[1] / 2.0 + 8.0],
+                ))
+            })
+            .chain(std::iter::once((
+                [fr.title.0[0] - 5.0, fr.title.0[1] - 5.0],
+                [fr.title.1[0] + 5.0, fr.title.1[1] + 12.0],
+            )))
+            .collect();
+        let inside = |c: [f64; 2]| {
+            c[0] - hw >= fr.border.0[0] + 5.0
+                && c[0] + hw <= fr.border.1[0] - 5.0
+                && c[1] - hh >= fr.border.0[1] + 12.0
+                && c[1] + hh <= fr.border.1[1] - 8.0
+        };
+        let free = |c: [f64; 2]| {
+            inside(c)
+                && taken.iter().all(|(lo, hi)| {
+                    c[0] + hw < lo[0] || c[0] - hw > hi[0] || c[1] + hh < lo[1] || c[1] - hh > hi[1]
+                })
+        };
+        // (place, distance) of the nearest free place and of the nearest place inside the border
+        let mut best: Option<([f64; 2], f64)> = None;
+        let mut best_in: Option<([f64; 2], f64)> = None;
+        let mut gx = fr.border.0[0];
+        while gx <= fr.border.1[0] {
+            let mut gy = fr.border.0[1];
+            while gy <= fr.border.1[1] {
+                let c = [gx, gy];
+                let d = (c[0] - near[0]).hypot(c[1] - near[1]);
+                if free(c) && best.is_none_or(|b| d < b.1) {
+                    best = Some((c, d));
+                }
+                if inside(c) && best_in.is_none_or(|b| d < b.1) {
+                    best_in = Some((c, d));
+                }
+                gy += 5.0;
+            }
+            gx += 5.0;
+        }
+        best.or(best_in).map_or(near, |b| b.0)
+    }
+
     /// Add a base view to the shown sheet. With `checkpoint` the change is a step of its own for Undo.
     pub fn add_base_view(
         &mut self,
@@ -286,12 +399,10 @@ impl DrawingWorkspace {
             project.dw_checkpoint();
         }
         let id = project.drawings.fresh_id();
-        let existing = project.drawings.sheets[sheet].views.len();
-        // the first view goes to the left of the middle, leaving room for the others
-        let pos = [
-            lo[0] + w * (0.3 + 0.05 * existing as f64),
-            lo[1] + h * (0.55 - 0.05 * existing as f64),
-        ];
+        // where the first view goes: left of the middle, leaving room for the others; later ones
+        // take the nearest free place
+        let wanted = [lo[0] + w * 0.3, lo[1] + h * 0.55];
+        let pos = Self::free_spot(project, sheet, [ext[0] * scale, ext[1] * scale], wanted);
         project.drawings.sheets[sheet].views.push(View {
             id,
             kind: ViewKind::Base,
@@ -302,6 +413,7 @@ impl DrawingWorkspace {
             pos,
             label: String::new(),
             cache: None,
+            center_marks: true,
         });
         project.mark_extras_dirty();
         self.selected = Some(id);
@@ -361,12 +473,51 @@ impl DrawingWorkspace {
             pos: [p.pos[0] + off[0], p.pos[1] + off[1]],
             label: String::new(),
             cache: None,
+            center_marks: true,
         });
         project.mark_extras_dirty();
         self.sheet = sheet;
         self.selected = Some(id);
         self.generate(project, vec![id]);
         Ok(id)
+    }
+
+    fn start_dim(&mut self, project: &Project, kind: DimKind, smart: bool) -> Result<(), String> {
+        let n = self.current_sheet(project).map_or(0, |s| s.views.len());
+        if n == 0 {
+            return Err("place a base view first".into());
+        }
+        self.status = match kind {
+            DimKind::Diameter | DimKind::Radius => "Click a circle, then where the leader should point (Esc cancels)",
+            DimKind::Angle => "Click two straight edges, then where the arc should go (Esc cancels)",
+            _ => "Click two points of the model, then where the dimension line should go (Esc cancels)",
+        }
+        .into();
+        self.cands.clear();
+        self.cands_view = None;
+        self.tool = Some(Tool::Dim {
+            kind,
+            smart,
+            view: None,
+            picks: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn start_annot_tool(&mut self, project: &Project, tool: Tool) -> Result<(), String> {
+        if self.current_sheet(project).is_none() {
+            return Err("make a drawing first".into());
+        }
+        self.status = match &tool {
+            Tool::Note { leader: false, .. } => "Click where the note goes (Esc cancels)",
+            Tool::Note { .. } => "Click the point the leader points at, then where the note goes",
+            Tool::Datum { .. } => "Click the feature, then where the datum box goes",
+            Tool::Surface => "Click the surface the symbol belongs to",
+            _ => "Click the feature the frame points at, then where the frame goes",
+        }
+        .into();
+        self.tool = Some(tool);
+        Ok(())
     }
 
     fn start_tool(&mut self, project: &Project, tool: Tool) -> Result<(), String> {
@@ -381,6 +532,7 @@ impl DrawingWorkspace {
             Tool::Detail { .. } => {
                 "Detail: click the centre, then a point on the circle's edge (Esc cancels)"
             }
+            _ => "",
         }
         .into();
         self.tool = Some(tool);
@@ -500,6 +652,7 @@ impl DrawingWorkspace {
             pos,
             label: String::new(),
             cache: None,
+            center_marks: true,
         });
         project.mark_extras_dirty();
         self.sheet = sheet;
@@ -541,50 +694,7 @@ impl DrawingWorkspace {
                 .fold(p.scale * 2.0, f64::max)
         });
         let r = radius * scale;
-        let fr = project.drawings.sheets[sheet].format.frame();
-        // the free spot nearest the parent that is inside the border, clear of the title block
-        // and of the other views
-        let taken: Vec<([f64; 2], [f64; 2])> = project.drawings.sheets[sheet]
-            .views
-            .iter()
-            .filter_map(|v| {
-                let s = v.size();
-                (s[0] > 0.0).then_some((
-                    [v.pos[0] - s[0] / 2.0 - 8.0, v.pos[1] - s[1] / 2.0 - 12.0],
-                    [v.pos[0] + s[0] / 2.0 + 8.0, v.pos[1] + s[1] / 2.0 + 8.0],
-                ))
-            })
-            .chain(std::iter::once((
-                [fr.title.0[0] - 5.0, fr.title.0[1] - 5.0],
-                [fr.title.1[0] + 5.0, fr.title.1[1] + 12.0],
-            )))
-            .collect();
-        let free = |c: [f64; 2]| {
-            c[0] - r >= fr.border.0[0] + 5.0
-                && c[0] + r <= fr.border.1[0] - 5.0
-                && c[1] - r >= fr.border.0[1] + 12.0
-                && c[1] + r <= fr.border.1[1] - 8.0
-                && taken.iter().all(|(lo, hi)| {
-                    c[0] + r < lo[0] || c[0] - r > hi[0] || c[1] + r < lo[1] || c[1] - r > hi[1]
-                })
-        };
-        let mut best: Option<([f64; 2], f64)> = None;
-        let mut gx = fr.border.0[0];
-        while gx <= fr.border.1[0] {
-            let mut gy = fr.border.0[1];
-            while gy <= fr.border.1[1] {
-                let c = [gx, gy];
-                let dist = (c[0] - p.pos[0]).hypot(c[1] - p.pos[1]);
-                if free(c) && best.is_none_or(|b| dist < b.1) {
-                    best = Some((c, dist));
-                }
-                gy += 5.0;
-            }
-            gx += 5.0;
-        }
-        let [x, y] = best.map_or([fr.border.1[0] - r - 5.0, fr.border.1[1] - r - 8.0], |b| {
-            b.0
-        });
+        let [x, y] = Self::free_spot(project, sheet, [2.0 * r, 2.0 * r], p.pos);
         let letter = Self::next_letter(&project.drawings.sheets[sheet]);
         project.dw_checkpoint();
         let id = project.drawings.fresh_id();
@@ -603,6 +713,7 @@ impl DrawingWorkspace {
             pos: [x, y],
             label: String::new(),
             cache: None,
+            center_marks: true,
         });
         project.mark_extras_dirty();
         self.sheet = sheet;
@@ -646,6 +757,9 @@ impl DrawingWorkspace {
     }
 
     fn delete_selected(&mut self, project: &mut Project) -> Result<(), String> {
+        if let Some(a) = self.selected_annot {
+            return self.delete_annot(project, a);
+        }
         let id = self.selected.ok_or("select a view to delete")?;
         self.delete_view(project, id)
     }
@@ -796,11 +910,15 @@ impl DrawingWorkspace {
                         source_hash: hash,
                         scene: g.scene.clone(),
                         centre: g.centre,
+                        marks: g.marks.clone(),
+                        axes: g.axes.clone(),
                     });
                 }
             }
         }
         project.mark_extras_dirty();
+        // the model may have changed since the views were last made: dimensions follow it
+        self.refresh_dimensions(project);
     }
 
     /// Check on the background job; start the next batch if views are waiting.
@@ -920,7 +1038,7 @@ impl DrawingWorkspace {
     pub fn ribbon(&mut self, ui: &mut eframe::egui::Ui, project: &Project) {
         use crate::chrome::{ribbon as rb, Icon};
         let has_sheet = !project.drawings.is_empty();
-        let has_sel = self.selected.is_some();
+        let has_sel = self.selected.is_some() || self.selected_annot.is_some();
         let mut req: Vec<&'static str> = Vec::new();
         ui.horizontal(|ui| {
             rb::group(ui, "SHEET", |ui| {
@@ -1012,6 +1130,38 @@ impl DrawingWorkspace {
                         req.push(id);
                     }
                 }
+            });
+            rb::group(ui, "ANNOTATE", |ui| {
+                ui.vertical(|ui| {
+                    let on = |t: &Option<Tool>, f: &dyn Fn(&Tool) -> bool| t.as_ref().is_some_and(f);
+                    ui.horizontal(|ui| {
+                        for (id, icon, tip, kind) in [
+                            ("dim_linear", Icon::Dimension, "Linear dimension: horizontal or vertical by where you place it", DimKind::Horizontal),
+                            ("dim_aligned", Icon::Measure, "Aligned dimension along the line between two points", DimKind::Aligned),
+                            ("dim_diameter", Icon::Circle, "Diameter of a circle (holes alike in the view get a count)", DimKind::Diameter),
+                            ("dim_radius", Icon::Arc, "Radius of a circle", DimKind::Radius),
+                            ("dim_angle", Icon::PlaneAngle, "Angle between two straight edges", DimKind::Angle),
+                        ] {
+                            let active = on(&self.tool, &|t| matches!(t, Tool::Dim { kind: k, smart, .. } if *k == kind && (kind != DimKind::Horizontal || *smart)));
+                            if rb::small(ui, icon, tip, active).clicked() {
+                                req.push(id);
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        for (id, icon, tip) in [
+                            ("note", Icon::Text, "Note"),
+                            ("leader_note", Icon::Line, "Note with a leader"),
+                            ("datum", Icon::Point, "Datum feature symbol"),
+                            ("surface", Icon::Trim, "Surface finish symbol"),
+                            ("fcf", Icon::Constraint, "Feature control frame (GD&T)"),
+                        ] {
+                            if rb::small(ui, icon, tip, false).clicked() {
+                                req.push(id);
+                            }
+                        }
+                    });
+                });
             });
             rb::group(ui, "MODIFY", |ui| {
                 if rb::button(

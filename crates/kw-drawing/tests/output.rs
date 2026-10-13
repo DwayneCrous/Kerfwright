@@ -42,7 +42,10 @@ fn demo_set() -> DrawingSet {
             source_hash: 7,
             scene,
             centre: [0.0, 0.0],
+            marks: vec![],
+            axes: vec![],
         }),
+        center_marks: true,
     });
     set.add_sheet("Sheet 2", SheetFormat::asme(PaperSize::AnsiB));
     set

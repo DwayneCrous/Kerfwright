@@ -222,11 +222,68 @@ impl KerfwrightApp {
                         .drawing
                         .add_detail(project, base, [0.0, 0.0], 6.0, None);
                     self.drawing.wait(project);
+                    Self::demo_dimensions(&mut self.drawing, project, base);
                 }
             }
             self.drawing.selected = None;
+            self.drawing.selected_annot = None;
         }
         self.set_workspace(Workspace::Drawing);
+    }
+
+    /// Dimensions, a note and a datum on the demo's front view.
+    fn demo_dimensions(drawing: &mut DrawingWorkspace, project: &mut Project, base: u64) {
+        use kw_drawing::snap::CandKind;
+        let Ok(cands) = drawing.candidates_for(project, base) else {
+            return;
+        };
+        let corner = |x: f64, z: f64| {
+            cands
+                .iter()
+                .find(|c| {
+                    matches!(c.kind, CandKind::Point(_))
+                        && (c.p3[0] - x).abs() < 1e-9
+                        && (c.p3[2] - z).abs() < 1e-9
+                        && c.p3[1].abs() < 1e-9
+                })
+                .cloned()
+        };
+        let Some(v) = project
+            .drawings
+            .sheets
+            .first()
+            .and_then(|s| s.view(base))
+            .cloned()
+        else {
+            return;
+        };
+        let size = v.size();
+        if let (Some(a), Some(b), Some(c)) =
+            (corner(0.0, 0.0), corner(40.0, 0.0), corner(0.0, 10.0))
+        {
+            let _ = drawing.add_dimension(
+                project,
+                base,
+                kw_drawing::DimKind::Horizontal,
+                &[a.clone(), b],
+                -(size[1] / 2.0 + 12.0),
+                0.0,
+            );
+            let _ = drawing.add_dimension(
+                project,
+                base,
+                kw_drawing::DimKind::Vertical,
+                &[a, c],
+                -(size[0] / 2.0 + 12.0),
+                0.0,
+            );
+        }
+        let _ = drawing.add_note(
+            project,
+            [v.pos[0] + size[0] / 2.0 + 130.0, v.pos[1] + 40.0],
+            "DEBURR ALL EDGES\n0.5 MAX",
+            None,
+        );
     }
 
     pub fn ecad_demo(&mut self, index: usize) {
