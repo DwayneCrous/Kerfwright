@@ -51,6 +51,8 @@ pub enum ViewKind {
     /// Projected from another view and kept aligned with it.
     Projected {
         parent: u64,
+        #[serde(default)]
+        align: Align,
     },
     /// A cut through `parent` along the line `a`..`b` (parent-view coordinates, mm at the
     /// parent's scale). The kept side is to the left of `a`→`b`, or the right when `flip`.
@@ -66,6 +68,17 @@ pub enum ViewKind {
         center: P,
         radius: f64,
     },
+}
+
+/// How a projected view moves: along the line through its parent's centre.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Align {
+    #[default]
+    Free,
+    /// Beside the parent: only moves left and right.
+    Horizontal,
+    /// Above or below the parent: only moves up and down.
+    Vertical,
 }
 
 /// What a view drew the last time it was updated, so an out-of-date drawing still shows.
@@ -146,6 +159,26 @@ impl DrawingSet {
 
     pub fn from_bytes(b: &[u8]) -> Result<DrawingSet, String> {
         ciborium::from_reader(b).map_err(|e| e.to_string())
+    }
+}
+
+impl View {
+    /// Width and height of the drawn geometry (zero before it is generated).
+    pub fn size(&self) -> P {
+        self.cache
+            .as_ref()
+            .and_then(|c| c.scene.bounds())
+            .map_or([0.0, 0.0], |(lo, hi)| [hi[0] - lo[0], hi[1] - lo[1]])
+    }
+
+    /// The views this one was made from, if any.
+    pub fn parent(&self) -> Option<u64> {
+        match &self.kind {
+            ViewKind::Base => None,
+            ViewKind::Projected { parent, .. }
+            | ViewKind::Section { parent, .. }
+            | ViewKind::Detail { parent, .. } => Some(*parent),
+        }
     }
 }
 

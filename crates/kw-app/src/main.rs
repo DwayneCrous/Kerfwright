@@ -5,7 +5,7 @@ const USAGE: &str = "kerfwright [PROJECT.kwf] [--demo] [--workspace NAME] [--scr
 \n\
   PROJECT.kwf            open this project instead of showing the welcome page\n\
   --demo                 open the demo part\n\
-  --workspace NAME       start in design|cam|fea|ecad|render (with a project)
+  --workspace NAME       start in design|cam|fea|ecad|render|drawing (with a project)
   --screenshot FILE      write a PNG of the window after a few frames, then quit
   --exit-after-frames N  render N frames, then quit (smoke test)\n";
 
@@ -22,7 +22,8 @@ fn main() -> eframe::Result {
                     Some("fea") => Workspace::Fea,
                     Some("ecad") => Workspace::Ecad,
                     Some("render") => Workspace::Render,
-                    _ => return usage("--workspace needs design|cam|fea|ecad|render"),
+                    Some("drawing") => Workspace::Drawing,
+                    _ => return usage("--workspace needs design|cam|fea|ecad|render|drawing"),
                 };
                 app.set_workspace(w);
             }
@@ -65,6 +66,7 @@ fn main() -> eframe::Result {
                 None => return usage("--open-menu needs a group title such as CREATE"),
             },
             "--cam-demo" => app.cam_demo(),
+            "--drawing-demo" => app.drawing_demo(),
             "--ecad-demo" => app.ecad_demo(5),
             "--screenshot" => match args.next() {
                 Some(f) => app.screenshot = Some((f.into(), 30)),

@@ -17,6 +17,8 @@ pub struct Project {
     pub board: Option<kw_ecad::Board>,
     /// The assembly (components and joints) stored with the project, if there is one.
     pub assembly: Option<kw_assembly::Assembly>,
+    /// The 2-D drawing sheets stored with the project.
+    pub drawings: kw_drawing::DrawingSet,
     /// The container as read, so unknown entries and fields survive a save.
     file: KwfFile,
     saved_hash: u128,
@@ -28,10 +30,15 @@ pub struct Project {
     /// Undo and redo of changes to the assembly (components, joints, motion): earlier states, as stored.
     asm_undo: Vec<Option<Vec<u8>>>,
     asm_redo: Vec<Option<Vec<u8>>>,
+    /// Undo and redo of changes to the drawings: earlier states, as stored.
+    dw_undo: Vec<Vec<u8>>,
+    dw_redo: Vec<Vec<u8>>,
 }
 
 /// How many assembly states are kept for undo.
 const ASM_UNDO_DEPTH: usize = 64;
+/// How many drawing states are kept for undo.
+const DW_UNDO_DEPTH: usize = 32;
 
 /// A component opened for editing: the project's own history is parked here and the component's document
 /// takes its place.
@@ -52,6 +59,9 @@ impl Project {
         let fea = kw_store::fea_from_file(&file).transpose()?;
         let board = kw_store::board_from_file(&file).transpose()?;
         let assembly = kw_assembly::Assembly::from_file(&file).transpose()?;
+        let drawings = kw_store::drawings_from_file(&file)
+            .transpose()?
+            .unwrap_or_default();
         let doc = file.document.clone();
         let saved_hash = doc.content_hash();
         Ok(Project {
@@ -62,6 +72,7 @@ impl Project {
             fea,
             board,
             assembly,
+            drawings,
             file,
             saved_hash,
             extras_dirty: false,
@@ -69,6 +80,8 @@ impl Project {
             editing: None,
             asm_undo: Vec::new(),
             asm_redo: Vec::new(),
+            dw_undo: Vec::new(),
+            dw_redo: Vec::new(),
         })
     }
 
@@ -254,6 +267,69 @@ impl Project {
         Ok(e.part)
     }
 
+    /// Remember the drawings as they are now, before a change (Undo in the Drawing workspace goes back to it).
+    pub fn dw_checkpoint(&mut self) {
+        self.dw_undo.push(self.drawings.to_bytes());
+        if self.dw_undo.len() > DW_UNDO_DEPTH {
+            self.dw_undo.remove(0);
+        }
+        self.dw_redo.clear();
+    }
+
+    /// Forget the last checkpoint if nothing changed since (a drag that moved nothing).
+    pub fn dw_drop_checkpoint_if_unchanged(&mut self) {
+        if self.dw_undo.last() == Some(&self.drawings.to_bytes()) {
+            self.dw_undo.pop();
+        }
+    }
+
+    pub fn dw_can_undo(&self) -> bool {
+        !self.dw_undo.is_empty()
+    }
+
+    pub fn dw_can_redo(&self) -> bool {
+        !self.dw_redo.is_empty()
+    }
+
+    fn dw_restore(&mut self, state: &[u8]) -> bool {
+        match kw_drawing::DrawingSet::from_bytes(state) {
+            Ok(d) => {
+                self.drawings = d;
+                self.extras_dirty = true;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Undo the last change to the drawings.
+    pub fn dw_undo(&mut self) -> bool {
+        let Some(prev) = self.dw_undo.pop() else {
+            return false;
+        };
+        let now = self.drawings.to_bytes();
+        if self.dw_restore(&prev) {
+            self.dw_redo.push(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo a change to the drawings that was undone.
+    pub fn dw_redo(&mut self) -> bool {
+        let Some(next) = self.dw_redo.pop() else {
+            return false;
+        };
+        let now = self.drawings.to_bytes();
+        if self.dw_restore(&next) {
+            self.dw_undo.push(now);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn mark_extras_dirty(&mut self) {
         self.extras_dirty = true;
     }
@@ -269,6 +345,7 @@ impl Project {
             kw_store::CAM_ENTRY,
             kw_store::FEA_ENTRY,
             kw_store::BOARD_ENTRY,
+            kw_store::DRAWING_ENTRY,
         ] {
             self.file.extra_entries.remove(name);
         }
@@ -280,6 +357,9 @@ impl Project {
         }
         if let Some(b) = &self.board {
             kw_store::attach_board(&mut self.file, b);
+        }
+        if !self.drawings.is_empty() {
+            kw_store::attach_drawings(&mut self.file, &self.drawings);
         }
         self.file.extra_entries.remove("assembly.cbor");
         if let Some(a) = &self.assembly {

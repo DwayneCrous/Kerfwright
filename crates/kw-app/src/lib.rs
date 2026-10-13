@@ -7,6 +7,7 @@ pub mod cam;
 pub mod chrome;
 pub mod design;
 pub mod dialogs;
+pub mod drawing;
 pub mod ecad;
 pub mod exchange;
 pub mod fea;

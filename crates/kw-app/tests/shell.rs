@@ -5487,3 +5487,298 @@ fn a_line_across_a_circle_gives_two_regions_and_the_chosen_one_extrudes() {
         cap * 3.0
     );
 }
+
+// ------------------------------------------------------------------------------------ Drawing workspace
+
+use kw_drawing::projection::Side;
+use kw_drawing::{Orientation, ViewKind};
+
+/// The demo block (40 x 25 x 10) open in the Drawing workspace.
+fn drawing_app(name: &str) -> (Harness, PathBuf) {
+    let dir = scratch(name);
+    let mut h = Harness::new(app_in(&dir));
+    h.app.open_demo();
+    h.app.set_workspace(Workspace::Drawing);
+    h.frame();
+    (h, dir)
+}
+
+fn dw_project(h: &mut Harness) -> &mut kw_app::project::Project {
+    h.app.project_mut().unwrap()
+}
+
+/// A drawing with a front view; waits for the geometry.
+fn make_drawing(h: &mut Harness) -> u64 {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!("no project")
+    };
+    let form = h.app.drawing.new_drawing_form(project);
+    h.app.drawing.new_drawing(project, &form).unwrap();
+    h.app.drawing.wait(project);
+    h.app.drawing.selected.unwrap()
+}
+
+#[test]
+fn a_new_drawing_has_a_front_view_with_geometry_at_a_fitting_scale() {
+    let (mut h, _) = drawing_app("dw_new");
+    let base = make_drawing(&mut h);
+    let p = dw_project(&mut h);
+    assert!(p.is_dirty());
+    assert_eq!(p.drawings.sheets.len(), 1);
+    let v = p.drawings.sheets[0].view(base).unwrap();
+    assert_eq!(v.orientation, Orientation::Front);
+    assert!(
+        v.cache.is_some(),
+        "the views are generated in the background"
+    );
+    // the front of a 40 x 10 block, at the chosen scale
+    let s = v.size();
+    assert!(
+        (s[0] - 40.0 * v.scale).abs() < 1e-6 && (s[1] - 10.0 * v.scale).abs() < 1e-6,
+        "{s:?} at {}",
+        v.scale
+    );
+    // it fits inside the border, clear of the title block
+    let fr = p.drawings.sheets[0].format.frame();
+    assert!(v.pos[0] - s[0] / 2.0 > fr.border.0[0] && v.pos[0] + s[0] / 2.0 < fr.border.1[0]);
+    for _ in 0..3 {
+        h.frame();
+    }
+}
+
+#[test]
+fn projected_views_follow_third_angle_and_stay_aligned() {
+    let (mut h, _) = drawing_app("dw_proj");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let right = h
+        .app
+        .drawing
+        .add_projected(project, base, Side::Right)
+        .unwrap();
+    h.app.drawing.wait(project);
+    let top = h
+        .app
+        .drawing
+        .add_projected(project, base, Side::Above)
+        .unwrap();
+    h.app.drawing.wait(project);
+    let sh = &project.drawings.sheets[0];
+    let (b, r, t) = (
+        sh.view(base).unwrap(),
+        sh.view(right).unwrap(),
+        sh.view(top).unwrap(),
+    );
+    assert_eq!(r.orientation, Orientation::Right);
+    assert_eq!(t.orientation, Orientation::Top);
+    assert!(matches!(r.kind, ViewKind::Projected { parent, .. } if parent == base));
+    // right of the front view at the same height, top above it at the same x
+    assert!(r.pos[0] > b.pos[0] && (r.pos[1] - b.pos[1]).abs() < 1e-9);
+    assert!(t.pos[1] > b.pos[1] && (t.pos[0] - b.pos[0]).abs() < 1e-9);
+    // the right view of the block is 25 wide (y) and 10 high; the top is 40 x 25
+    assert!(
+        (r.size()[0] - 25.0 * b.scale).abs() < 1e-6 && (r.size()[1] - 10.0 * b.scale).abs() < 1e-6
+    );
+    assert!(
+        (t.size()[0] - 40.0 * b.scale).abs() < 1e-6 && (t.size()[1] - 25.0 * b.scale).abs() < 1e-6
+    );
+    // no overlap between the views
+    let gap = (r.pos[0] - r.size()[0] / 2.0) - (b.pos[0] + b.size()[0] / 2.0);
+    assert!(gap > 10.0, "{gap}");
+}
+
+#[test]
+fn drawings_save_and_reopen_with_their_geometry() {
+    let (mut h, dir) = drawing_app("dw_save");
+    let base = make_drawing(&mut h);
+    let path = dir.join("drawn.kwf");
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app
+            .drawing
+            .add_projected(project, base, Side::Right)
+            .unwrap();
+        h.app.drawing.wait(project);
+        assert!(project.is_dirty());
+        project.save_as(&path).unwrap();
+        assert!(!project.is_dirty());
+    }
+    let back = kw_app::project::Project::open(&path).unwrap();
+    assert_eq!(back.drawings, dw_project(&mut h).drawings);
+    assert_eq!(back.drawings.sheets[0].views.len(), 2);
+    assert!(back.drawings.sheets[0]
+        .views
+        .iter()
+        .all(|v| v.cache.is_some()));
+    assert!(!back.is_dirty());
+}
+
+#[test]
+fn undo_and_redo_work_on_the_drawings_in_the_drawing_workspace() {
+    let (mut h, _) = drawing_app("dw_undo");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app
+        .drawing
+        .add_projected(project, base, Side::Right)
+        .unwrap();
+    h.app.drawing.wait(project);
+    assert_eq!(project.drawings.sheets[0].views.len(), 2);
+    assert!(h.app.undo_is_for_drawing());
+    h.app.undo_redo(true);
+    assert_eq!(dw_project(&mut h).drawings.sheets[0].views.len(), 1);
+    h.app.undo_redo(true);
+    assert!(
+        dw_project(&mut h).drawings.is_empty(),
+        "the whole drawing is one step"
+    );
+    h.app.undo_redo(false);
+    h.app.undo_redo(false);
+    assert_eq!(dw_project(&mut h).drawings.sheets[0].views.len(), 2);
+    // the design's own history is untouched
+    assert!(!dw_project(&mut h).history.can_redo());
+    h.frame();
+}
+
+#[test]
+fn deleting_a_view_deletes_what_was_projected_from_it() {
+    let (mut h, _) = drawing_app("dw_delete");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let right = h
+        .app
+        .drawing
+        .add_projected(project, base, Side::Right)
+        .unwrap();
+    h.app.drawing.wait(project);
+    h.app
+        .drawing
+        .add_projected(project, right, Side::Above)
+        .unwrap();
+    h.app.drawing.wait(project);
+    assert_eq!(project.drawings.sheets[0].views.len(), 3);
+    h.app.drawing.delete_view(project, right).unwrap();
+    assert_eq!(project.drawings.sheets[0].views.len(), 1);
+    h.app.undo_redo(true);
+    assert_eq!(dw_project(&mut h).drawings.sheets[0].views.len(), 3);
+}
+
+#[test]
+fn pdf_and_dxf_are_written_through_the_dialogs() {
+    let (mut h, dir) = drawing_app("dw_export");
+    make_drawing(&mut h);
+    let (pdf, dxf) = (dir.join("out.pdf"), dir.join("out.dxf"));
+    let mut dialogs = ScriptedDialogs {
+        save: vec![pdf.clone(), dxf.clone()],
+        ..Default::default()
+    };
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.command("export_pdf", project, &mut dialogs);
+    h.app.drawing.command("export_dxf", project, &mut dialogs);
+    let bytes = std::fs::read(&pdf).unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    assert!(String::from_utf8_lossy(&bytes).contains("/MediaBox [0 0 1190"));
+    let text = std::fs::read_to_string(&dxf).unwrap();
+    let doc = kw_dxf::parse(&text).unwrap();
+    assert!(doc.entities.len() > 20, "border, title block and the view");
+    assert!(
+        h.app.drawing.status.contains("saved"),
+        "{}",
+        h.app.drawing.status
+    );
+}
+
+#[test]
+fn dragging_a_view_moves_it_and_a_projected_view_slides_along_its_line() {
+    let (mut h, _) = drawing_app("dw_drag");
+    let base = make_drawing(&mut h);
+    let right = {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let r = h
+            .app
+            .drawing
+            .add_projected(project, base, Side::Right)
+            .unwrap();
+        h.app.drawing.wait(project);
+        r
+    };
+    h.frame();
+    let (before_b, before_r) = {
+        let sh = &dw_project(&mut h).drawings.sheets[0];
+        (sh.view(base).unwrap().pos, sh.view(right).unwrap().pos)
+    };
+    // drag the right view diagonally: only the horizontal part counts
+    let from = h.app.drawing.screen_of(before_r);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(from)]);
+    pointer_frame(&mut h, vec![press(from, true)]);
+    for k in 1..=6 {
+        let to = from + egui::vec2(8.0 * k as f32, -6.0 * k as f32);
+        pointer_frame(&mut h, vec![egui::Event::PointerMoved(to)]);
+    }
+    let to = from + egui::vec2(48.0, -36.0);
+    pointer_frame(&mut h, vec![press(to, false)]);
+    let sh = &dw_project(&mut h).drawings.sheets[0];
+    let after_r = sh.view(right).unwrap().pos;
+    assert!(
+        after_r[0] > before_r[0] + 1.0,
+        "moved right: {before_r:?} -> {after_r:?}"
+    );
+    assert!(
+        (after_r[1] - before_r[1]).abs() < 1e-9,
+        "stays level with its parent"
+    );
+    assert_eq!(sh.view(base).unwrap().pos, before_b);
+    // dragging the parent takes the projected view along
+    let from = h.app.drawing.screen_of(before_b);
+    pointer_frame(&mut h, vec![egui::Event::PointerMoved(from)]);
+    pointer_frame(&mut h, vec![press(from, true)]);
+    for k in 1..=6 {
+        let to = from + egui::vec2(0.0, 8.0 * k as f32);
+        pointer_frame(&mut h, vec![egui::Event::PointerMoved(to)]);
+    }
+    pointer_frame(&mut h, vec![press(from + egui::vec2(0.0, 48.0), false)]);
+    let sh = &dw_project(&mut h).drawings.sheets[0];
+    let (nb, nr) = (sh.view(base).unwrap().pos, sh.view(right).unwrap().pos);
+    assert!(nb[1] < before_b[1] - 1.0, "dragged down");
+    assert!(
+        ((nr[1] - after_r[1]) - (nb[1] - before_b[1])).abs() < 1e-9,
+        "the child followed"
+    );
+    // each drag is one undo step
+    h.app.undo_redo(true);
+    assert_eq!(
+        dw_project(&mut h).drawings.sheets[0]
+            .view(base)
+            .unwrap()
+            .pos,
+        before_b
+    );
+}
+
+#[test]
+fn nothing_to_draw_is_reported_not_made() {
+    let dir = scratch("dw_empty");
+    let mut h = Harness::new(app_in(&dir));
+    h.app.create_project("Empty", &dir).unwrap();
+    h.app.set_workspace(Workspace::Drawing);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let form = h.app.drawing.new_drawing_form(project);
+    assert!(h.app.drawing.new_drawing(project, &form).is_err());
+    assert!(project.drawings.is_empty());
+    assert!(!project.dw_can_undo());
+    h.frame();
+}

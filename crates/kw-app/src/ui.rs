@@ -4,6 +4,7 @@ use crate::cam::CamWorkspace;
 use crate::chrome::{icons, ribbon as rb, theme, Icon};
 use crate::design::DesignWorkspace;
 use crate::dialogs::{Dialogs, NativeDialogs};
+use crate::drawing::DrawingWorkspace;
 use crate::ecad::EcadWorkspace;
 use crate::fea::FeaWorkspace;
 use crate::project::Project;
@@ -20,15 +21,18 @@ pub enum Workspace {
     Fea,
     Ecad,
     Render,
+    /// 2-D drawing sheets of the design.
+    Drawing,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 5] = [
+    pub const ALL: [Workspace; 6] = [
         Workspace::Design,
         Workspace::Cam,
         Workspace::Fea,
         Workspace::Ecad,
         Workspace::Render,
+        Workspace::Drawing,
     ];
 
     pub fn label(self) -> &'static str {
@@ -38,6 +42,7 @@ impl Workspace {
             Workspace::Fea => "SIMULATION",
             Workspace::Ecad => "ELECTRONICS",
             Workspace::Render => "RENDER",
+            Workspace::Drawing => "DRAWING",
         }
     }
 
@@ -48,6 +53,7 @@ impl Workspace {
             Workspace::Fea => "Meshing and static stress analysis.",
             Workspace::Ecad => "Circuit board placement, routing and fabrication outputs.",
             Workspace::Render => "Realtime and path-traced images.",
+            Workspace::Drawing => "Dimensioned drawing sheets with views of the design.",
         }
     }
 
@@ -58,6 +64,7 @@ impl Workspace {
             Workspace::Fea => Icon::Fea,
             Workspace::Ecad => Icon::Board,
             Workspace::Render => Icon::Render,
+            Workspace::Drawing => Icon::Drawing,
         }
     }
 }
@@ -90,6 +97,7 @@ pub struct KerfwrightApp {
     pub cam: CamWorkspace,
     pub fea: FeaWorkspace,
     pub render: RenderWorkspace,
+    pub drawing: DrawingWorkspace,
     pub message: String,
     pub new_name: String,
     pub new_folder: Option<PathBuf>,
@@ -136,6 +144,7 @@ impl KerfwrightApp {
             cam: CamWorkspace::default(),
             fea: FeaWorkspace::default(),
             render: RenderWorkspace::default(),
+            drawing: DrawingWorkspace::default(),
             message: String::new(),
             new_name: "Untitled".into(),
             new_folder: std::env::var_os("HOME").map(PathBuf::from),
@@ -182,6 +191,35 @@ impl KerfwrightApp {
     }
 
     /// A project with a generated board, routed, in the ECAD workspace (for demos and screenshots).
+    /// The demo part with a drawing sheet: front, top and right views and an isometric one.
+    pub fn drawing_demo(&mut self) {
+        use kw_drawing::projection::Side;
+        self.open_demo();
+        if let Screen::Project { project, .. } = &mut self.screen {
+            let form = self.drawing.new_drawing_form(project);
+            if self.drawing.new_drawing(project, &form).is_ok() {
+                self.drawing.wait(project);
+                if let Some(base) = self.drawing.selected {
+                    for side in [Side::Right, Side::Above] {
+                        let _ = self.drawing.add_projected(project, base, side);
+                        self.drawing.wait(project);
+                    }
+                    let iso = crate::drawing::ViewForm {
+                        orientation: kw_drawing::Orientation::Iso,
+                        style: kw_drawing::ViewStyle::VisibleHidden,
+                        assembly: false,
+                        scale: None,
+                    };
+                    if self.drawing.add_base_view(project, &iso, false).is_ok() {
+                        self.drawing.wait(project);
+                    }
+                }
+            }
+            self.drawing.selected = None;
+        }
+        self.set_workspace(Workspace::Drawing);
+    }
+
     pub fn ecad_demo(&mut self, index: usize) {
         self.open_demo();
         if let Screen::Project { project, .. } = &mut self.screen {
@@ -672,6 +710,7 @@ impl KerfwrightApp {
         self.cam = CamWorkspace::default();
         self.fea = FeaWorkspace::default();
         self.render = RenderWorkspace::default();
+        self.drawing = DrawingWorkspace::default();
         self.screen = Screen::Project {
             project: Box::new(project),
             workspace: Workspace::Design,
@@ -837,12 +876,25 @@ impl KerfwrightApp {
             && self.project().is_some_and(|p| p.editing().is_none())
     }
 
+    /// In the Drawing workspace Undo and Redo work on the drawings.
+    pub fn undo_is_for_drawing(&self) -> bool {
+        self.workspace() == Some(Workspace::Drawing)
+    }
+
     pub fn undo_redo(&mut self, undo: bool) {
         let on_assembly = self.undo_is_for_assembly();
+        let on_drawing = self.undo_is_for_drawing();
         let Some(p) = self.project_mut() else {
             return;
         };
-        if on_assembly {
+        if on_drawing {
+            if undo {
+                p.dw_undo();
+            } else {
+                p.dw_redo();
+            }
+            self.drawing.selected = None;
+        } else if on_assembly {
             if undo {
                 p.asm_undo();
             } else {
@@ -1383,10 +1435,13 @@ impl KerfwrightApp {
                     }
                 });
                 let on_assembly = self.undo_is_for_assembly();
+                let on_drawing = self.undo_is_for_drawing();
                 let (can_undo, can_redo) = self
                     .project()
                     .map(|p| {
-                        if on_assembly {
+                        if on_drawing {
+                            (p.dw_can_undo(), p.dw_can_redo())
+                        } else if on_assembly {
                             (p.asm_can_undo(), p.asm_can_redo())
                         } else {
                             (p.history.can_undo(), p.history.can_redo())
@@ -1457,7 +1512,10 @@ impl KerfwrightApp {
                         (_, Workspace::Fea) => self.fea.ribbon(ui),
                         (_, Workspace::Ecad) => self.ecad.ribbon(ui),
                         (_, Workspace::Render) => self.render.ribbon(ui),
-                        (_, Workspace::Design) => {}
+                        (Screen::Project { project, .. }, Workspace::Drawing) => {
+                            self.drawing.ribbon(ui, project)
+                        }
+                        (_, Workspace::Design | Workspace::Drawing) => {}
                     });
                 });
             });
@@ -1517,6 +1575,12 @@ impl KerfwrightApp {
                 let (ecad, dialogs) = (&mut self.ecad, &mut self.dialogs);
                 egui::CentralPanel::default()
                     .show(ui, |ui| ecad.show(ui, project, dialogs.as_mut()));
+            }
+            Workspace::Drawing => {
+                let (drawing, dialogs) = (&mut self.drawing, &mut self.dialogs);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| drawing.show(ui, project, dialogs.as_mut()));
             }
         }
     }

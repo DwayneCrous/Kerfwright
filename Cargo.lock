@@ -2103,6 +2103,7 @@ dependencies = [
  "kw-boolean",
  "kw-brep",
  "kw-cam",
+ "kw-drawing",
  "kw-dxf",
  "kw-ecad",
  "kw-expr",

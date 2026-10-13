@@ -10,9 +10,11 @@ pub mod projection;
 pub mod render;
 pub mod scene;
 pub mod sheet;
+pub mod update;
 
 pub use model::{
-    scale_label, DrawingSet, Orientation, Sheet, View, ViewCache, ViewKind, ViewSource, ViewStyle,
+    scale_label, Align, DrawingSet, Orientation, Sheet, View, ViewCache, ViewKind, ViewSource,
+    ViewStyle,
 };
 pub use scene::{Anchor, Layer, LineStyle, Prim, Scene2d, Shape, P};
 pub use sheet::{PaperSize, ProjectionAngle, SheetFormat, SheetFrame, Standard, TitleBlock, Units};

@@ -337,6 +337,63 @@ pub(super) fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
                 line(p, q(x, 3.0), q(x - 4.0, 10.0), ink, 1.6);
             }
         }
+        Icon::Drawing => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(22.0 * s, 28.0 * s)),
+                1.5,
+                Stroke::new(1.6, blue_d),
+                egui::StrokeKind::Middle,
+            );
+            p.rect_stroke(
+                Rect::from_center_size(q(-2.0, -4.0), vec2(10.0 * s, 8.0 * s)),
+                0.0,
+                Stroke::new(1.4, ink),
+                egui::StrokeKind::Middle,
+            );
+            p.rect_stroke(
+                Rect::from_center_size(q(-2.0, 7.0), vec2(10.0 * s, 6.0 * s)),
+                0.0,
+                Stroke::new(1.4, ink),
+                egui::StrokeKind::Middle,
+            );
+            line(p, q(5.0, 11.0), q(9.0, 11.0), orange, 1.8);
+        }
+        Icon::BaseView => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(22.0 * s, 16.0 * s)),
+                0.0,
+                Stroke::new(1.8, ink),
+                egui::StrokeKind::Middle,
+            );
+            p.add(Shape::dashed_line(
+                &[q(-11.0, 0.0), q(11.0, 0.0)],
+                Stroke::new(1.2, grey),
+                3.0,
+                2.0,
+            ));
+            line(p, q(0.0, -11.0), q(0.0, 11.0), orange, 1.4);
+        }
+        Icon::ProjView => {
+            p.rect_stroke(
+                Rect::from_center_size(q(-6.0, 4.0), vec2(14.0 * s, 12.0 * s)),
+                0.0,
+                Stroke::new(1.6, ink),
+                egui::StrokeKind::Middle,
+            );
+            p.rect_stroke(
+                Rect::from_center_size(q(8.0, 4.0), vec2(8.0 * s, 12.0 * s)),
+                0.0,
+                Stroke::new(1.6, blue_d),
+                egui::StrokeKind::Middle,
+            );
+            p.add(Shape::dashed_line(
+                &[q(-6.0, -12.0), q(-6.0, -3.0)],
+                Stroke::new(1.2, grey),
+                2.0,
+                2.0,
+            ));
+            line(p, q(-1.0, 4.0), q(3.0, 4.0), orange, 1.8);
+        }
         Icon::Bom => {
             for k in 0..4 {
                 let y = -9.0 + k as f32 * 6.0;

@@ -68,6 +68,10 @@ pub enum Icon {
     Ground,
     Bom,
     AssemblyView,
+    // ----- drawings
+    Drawing,
+    BaseView,
+    ProjView,
     // ----- construction
     PlaneAngle,
     PlaneMid,
