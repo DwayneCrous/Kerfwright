@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s https://crates.io/api/v1/crates/egui-wgpu/0.36.2/dependencies -A \"kerfwright-dev\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\([\\(x['crate_id'],x['req']\\) for x in d['dependencies'] if x['crate_id'] in \\('wgpu','egui','winit'\\)]\\)\")",
+      "Bash(curl -s https://crates.io/api/v1/crates/egui-winit/0.36.2/dependencies -A \"kerfwright-dev\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\([\\(x['crate_id'],x['req']\\) for x in d['dependencies'] if x['crate_id'] in \\('winit','egui'\\)]\\)\")",
+      "Bash(sort -k2)",
+      "Bash(python3 -c \"import OCC\")",
+      "Bash(python3 -c \"import cadquery\")",
+      "Bash(python3 -c \"import build123d\")",
+      "Bash(cd /home/dwayner/Desktop/Dev/Kerfwright/crates && sed -n 1,45p kw-nurbs/src/geom.rs; sed -n 60,130p kw-nurbs/src/geom.rs; sed -n 160,215p kw-nurbs/src/geom.rs; cat kw-nurbs/src/lib.rs; grep -n \"pub fn\" kw-nurbs/src/build.rs kw-nurbs/src/surface.rs kw-nurbs/src/curve.rs | head -60; sed -n 140,230p kw-tess/src/face.rs; grep -n \"fn \\\\|features\" kw-tess/tests/primitives.rs | head -30; ls ../docs ../docs/* | head -40; grep -rn \"features\" */Cargo.toml)",
+      "Bash(cd /home/dwayner/Desktop/Dev/Kerfwright; ls ~/.cargo/bin 2>&1 | head; cat rust-toolchain.toml; grep -niE \"step|iges|occt|opencascade|truck|ruststep|nom|fornjot|parry\" docs/01-research/05-rust-ecosystem.md | head -30; ls target; find / -iname \"*.stp\" -o -iname \"*.step\" -o -iname \"*.igs\" 2>/dev/null | grep -v proc | head; which cmake pkg-config)",
+      "Bash(cd /home/dwayner/Desktop/Dev/Kerfwright/crates/kw-sketch/src && grep -n 'pub fn' solve/drag.rs | cut -c1-200; grep -n 'CONSTRUCTION_LAYER' ../../kw-dxf/src/*.rs | head -2; grep -n 'pub fn' ../../kw-brep/src/mass.rs ../../kw-brep/src/store.rs | grep -n 'volume\\\\|area\\\\|mass_prop\\\\|centroid')",
+      "Bash(cd /home/dwayner/Desktop/Dev/Kerfwright/crates/kw-sketch/src && sed -n 172,200p solve/drag.rs; sed -n 60,70p ../../kw-sketch/src/solve/mod.rs >/dev/null; grep -n 'pub struct DragOutcome' -A12 solve/*.rs | head -16)",
+      "Bash(ls ~/.cargo/registry/src/*/ | grep -iE \"nalgebra|rayon|sprs|faer|nalgebra-sparse|png|image|delaunay|spade|earcut|geo|clipper|i_overlay|gerber|wgpu|winit|eframe|egui|proptest|bytemuck|pollster|cdt|triangle|lyon|robust|rstar|bvh|parry|ncollide|sparse|lapack|ndarray|cgmath|glam|tiny|zip|flate|miniz|cosmic|ttf|rusttype|fontdue|ab_glyph|rand|naga\" | tr '\\\\n' ' ')",
+      "Bash(grep -v \"^$\")",
+      "Bash(cd /home/dwayner/Desktop/Dev/Kerfwright; grep -n \"^#\\\\|^##\" docs/phase4-report.md | head -40; echo ---; cat scripts/phase4_acceptance.sh | head -60; ls scripts/oracles; grep -n \"^## \\\\|^# \" docs/04-roadmap.md | head -30; ls ~/.cargo/registry/src/*/ | grep -iE \"sprs|nalgebra-sparse|gerber|delaunay|cdt|clipper|geo|i_overlay|lyon|tiny-skia|stl_io|tobj|gltf|clap|env_logger|truck|rstar|slotmap|ndarray|arpack|lapack|ordered\" | tr '\\\\n' ' '; nproc; grep -c . /dev/null; free -g | head -2)",
+      "Bash(cd /home/dwayner/Desktop/Dev/Kerfwright/crates && sed -n 60,115p kw-feature/src/engine.rs; sed -n 80,135p kw-feature/src/eval.rs; sed -n 78,125p kw-feature/src/kwf.rs; grep -rn 'tessellate\\\\|kw_tess' kw-feature/src | head -5; grep -n 'pub ' kw-render/src/lib.rs | head -30; grep -n 'pub ' kw-store/src/lib.rs | head -15; ls ../examples ../docs 2>/dev/null | head -30; grep -n 'egui\\\\|eframe' ../Cargo.lock | head -8)",
+      "Bash(awk -F: '{print $1\": \"$3}')",
+      "Bash(grep -n \"match .*{$\" crates/kw-app/src/ui.rs)",
+      "Bash(awk 'NR>=290 && NR<=330' crates/kw-app/src/ui.rs)"
+    ]
+  }
+}
