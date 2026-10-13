@@ -1,11 +1,12 @@
 //! Painting the sheet and handling the pointer: pan, zoom, select and drag views.
 
-use super::{Drag, DrawingWorkspace};
+use super::{Drag, DrawingWorkspace, Tool};
 use crate::chrome::theme::ACCENT;
 use crate::project::Project;
 use eframe::egui::{self, epaint::TextShape, Color32, FontId, Pos2, Rect, Shape as Sh, Stroke};
 use kw_drawing::scene::{flatten, Anchor, Layer, LineStyle, Scene2d, Shape};
-use kw_drawing::{Align, Sheet, View};
+use kw_drawing::section::to_sheet;
+use kw_drawing::{Align, Sheet, View, ViewKind};
 
 fn colour(l: Layer) -> Color32 {
     let [r, g, b] = l.rgb();
@@ -105,7 +106,8 @@ fn children(sheet: &Sheet, id: u64) -> Vec<u64> {
     let mut frontier = vec![id];
     while let Some(p) = frontier.pop() {
         for v in &sheet.views {
-            if matches!(v.kind, kw_drawing::ViewKind::Projected { parent, .. } if parent == p) {
+            if matches!(v.kind, ViewKind::Projected { parent, .. } | ViewKind::Section { parent, .. } if parent == p)
+            {
                 out.push(v.id);
                 frontier.push(v.id);
             }
@@ -180,21 +182,13 @@ impl DrawingWorkspace {
         paint_scene(&painter, &frame, &to, px);
         for v in &sheet.views {
             let Some(cache) = &v.cache else { continue };
-            paint_scene(&painter, &cache.scene.placed(1.0, v.pos), &to, px);
-            if !v.label.is_empty() {
-                let mut s = Scene2d::new();
-                if let Some((lo, hi)) = view_rect(v) {
-                    s.text(
-                        Layer::Text,
-                        [(lo[0] + hi[0]) / 2.0, lo[1] - 7.0],
-                        3.5,
-                        Anchor::Center,
-                        &format!("{}   SCALE {}", v.label, kw_drawing::scale_label(v.scale)),
-                    );
-                }
-                paint_scene(&painter, &s, &to, px);
+            let placed = cache.scene.placed(1.0, v.pos);
+            paint_scene(&painter, &placed, &to, px);
+            if let Some(l) = kw_drawing::render::view_label(v, &placed) {
+                paint_scene(&painter, &l, &to, px);
             }
         }
+        paint_scene(&painter, &sheet.annotations(), &to, px);
         if let Some(id) = self.selected {
             if let Some((lo, hi)) = sheet.view(id).and_then(view_rect) {
                 let r = Rect::from_two_pos(
@@ -239,6 +233,94 @@ impl DrawingWorkspace {
                     && p[1] <= hi[1] + 3.0
             })
         };
+        // a section or detail tool takes the clicks
+        if let Some(tool) = self.tool.clone() {
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.tool = None;
+                self.status.clear();
+                return;
+            }
+            let uv_of = |v: &View, p: [f64; 2]| -> Option<[f64; 2]> {
+                let c = v.cache.as_ref()?;
+                Some([
+                    (p[0] - v.pos[0] + c.centre[0]) / v.scale,
+                    (p[1] - v.pos[1] + c.centre[1]) / v.scale,
+                ])
+            };
+            let hover = ui
+                .ctx()
+                .pointer_hover_pos()
+                .filter(|p| rect.contains(*p))
+                .map(world);
+            let sheet = &project.drawings.sheets[self.sheet];
+            let (first, is_section) = match &tool {
+                Tool::Section { first } => (*first, true),
+                Tool::Detail { first } => (*first, false),
+            };
+            // where the first point sits on the sheet, and the second as it would be placed
+            let parent = first.as_ref().and_then(|(id, _)| sheet.view(*id));
+            let end_uv = |p: [f64; 2]| -> Option<[f64; 2]> {
+                let (pv, (_, a)) = (parent?, first.as_ref()?);
+                let mut b = uv_of(pv, p)?;
+                if is_section {
+                    // square to the axes when within a few degrees
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let k = 4.0_f64.to_radians().tan();
+                    if dy.abs() < k * dx.abs() {
+                        b[1] = a[1];
+                    } else if dx.abs() < k * dy.abs() {
+                        b[0] = a[0];
+                    }
+                }
+                Some(b)
+            };
+            if let (Some(pv), Some((_, a)), Some(h)) = (parent, first.as_ref(), hover) {
+                if let (Some(c), Some(b)) = (pv.cache.as_ref(), end_uv(h)) {
+                    let at = |uv: [f64; 2]| to(to_sheet(pv.pos, pv.scale, c.centre, uv));
+                    let stroke = Stroke::new(1.5, ACCENT);
+                    if is_section {
+                        painter.line_segment([at(*a), at(b)], stroke);
+                    } else {
+                        let r = (b[0] - a[0]).hypot(b[1] - a[1]) * pv.scale * px;
+                        painter.circle_stroke(at(*a), r as f32, stroke);
+                    }
+                }
+            }
+            if resp.clicked_by(egui::PointerButton::Primary) {
+                if let Some(p) = pointer.map(world) {
+                    match first {
+                        None => {
+                            let hit = sheet.views.iter().rev().find(|v| inside(v, p));
+                            if let Some((v, uv)) = hit.and_then(|v| Some((v, uv_of(v, p)?))) {
+                                let first = Some((v.id, uv));
+                                self.tool = Some(if is_section {
+                                    Tool::Section { first }
+                                } else {
+                                    Tool::Detail { first }
+                                });
+                                self.selected = Some(v.id);
+                            }
+                        }
+                        Some((pid, a)) => {
+                            if let Some(b) = end_uv(p) {
+                                self.tool = None;
+                                self.status.clear();
+                                let res = if is_section {
+                                    self.add_section(project, pid, a, b, false)
+                                } else {
+                                    let r = (b[0] - a[0]).hypot(b[1] - a[1]);
+                                    self.add_detail(project, pid, a, r, None)
+                                };
+                                if let Err(e) = res {
+                                    self.status = e;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(p) = pointer.map(world) {
                 let hit = project.drawings.sheets[self.sheet]

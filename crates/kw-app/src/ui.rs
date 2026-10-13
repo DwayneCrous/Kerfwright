@@ -213,6 +213,15 @@ impl KerfwrightApp {
                     if self.drawing.add_base_view(project, &iso, false).is_ok() {
                         self.drawing.wait(project);
                     }
+                    // a section down the middle of the front view and a detail of its corner
+                    let _ =
+                        self.drawing
+                            .add_section(project, base, [20.0, -2.0], [20.0, 12.0], false);
+                    self.drawing.wait(project);
+                    let _ = self
+                        .drawing
+                        .add_detail(project, base, [0.0, 0.0], 6.0, None);
+                    self.drawing.wait(project);
                 }
             }
             self.drawing.selected = None;

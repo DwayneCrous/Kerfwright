@@ -13,7 +13,8 @@ use crate::job::Job;
 use crate::project::Project;
 use kw_drawing::hlr::ViewGeometry;
 use kw_drawing::projection::{neighbour_offset, Side, ViewFrame};
-use kw_drawing::update::{auto_scale, extent, generate, GenSpec};
+use kw_drawing::section::{cut_directions, section_frame, slice_loops};
+use kw_drawing::update::{auto_scale, extent, generate, GenKind, GenSpec, STANDARD_SCALES};
 use kw_drawing::{
     Align, Orientation, PaperSize, SheetFormat, Standard, View, ViewCache, ViewKind, ViewSource,
     ViewStyle,
@@ -51,6 +52,14 @@ pub enum Dialog {
     BaseView(ViewForm),
 }
 
+/// A tool waiting for clicks on the sheet: the parent view and first point (in the parent's view
+/// coordinates, model units) once the first click is made.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tool {
+    Section { first: Option<(u64, [f64; 2])> },
+    Detail { first: Option<(u64, [f64; 2])> },
+}
+
 type Generated = (Vec<(u64, ViewGeometry)>, u64);
 
 struct Drag {
@@ -71,6 +80,7 @@ pub struct DrawingWorkspace {
     queue: Vec<u64>,
     pub status: String,
     drag: Option<Drag>,
+    pub tool: Option<Tool>,
     /// Ribbon button ids to run next frame.
     pub requests: Vec<&'static str>,
 }
@@ -88,6 +98,7 @@ impl Default for DrawingWorkspace {
             queue: Vec::new(),
             status: String::new(),
             drag: None,
+            tool: None,
             requests: Vec::new(),
         }
     }
@@ -191,6 +202,8 @@ impl DrawingWorkspace {
             "proj_left" => self.add_selected_projection(project, Side::Left),
             "proj_above" => self.add_selected_projection(project, Side::Above),
             "proj_below" => self.add_selected_projection(project, Side::Below),
+            "section_view" => self.start_tool(project, Tool::Section { first: None }),
+            "detail_view" => self.start_tool(project, Tool::Detail { first: None }),
             "delete_view" => self.delete_selected(project),
             "update" => self.update_all(project),
             "export_pdf" => self.export_pdf(project, dialogs),
@@ -356,6 +369,282 @@ impl DrawingWorkspace {
         Ok(id)
     }
 
+    fn start_tool(&mut self, project: &Project, tool: Tool) -> Result<(), String> {
+        let n = self.current_sheet(project).map_or(0, |s| s.views.len());
+        if n == 0 {
+            return Err("place a base view first".into());
+        }
+        self.status = match &tool {
+            Tool::Section { .. } => {
+                "Section: click the view, then click the end of the cutting line (Esc cancels)"
+            }
+            Tool::Detail { .. } => {
+                "Detail: click the centre, then a point on the circle's edge (Esc cancels)"
+            }
+        }
+        .into();
+        self.tool = Some(tool);
+        Ok(())
+    }
+
+    /// The first unused section / detail letter on the sheet (A, B, C...; I, O and Q are skipped).
+    fn next_letter(sheet: &kw_drawing::Sheet) -> String {
+        let used: Vec<&str> = sheet
+            .views
+            .iter()
+            .filter_map(|v| match &v.kind {
+                ViewKind::Section { letter, .. } | ViewKind::Detail { letter, .. } => {
+                    Some(letter.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        ('A'..='Z')
+            .filter(|c| !"IOQ".contains(*c))
+            .map(|c| c.to_string())
+            .find(|l| !used.contains(&l.as_str()))
+            .unwrap_or_else(|| "?".into())
+    }
+
+    /// A section of `parent` along the line `a`..`b` (the parent's view coordinates, model units),
+    /// looking toward the material to the right of `a`→`b` (to the left when `flip`). The view is
+    /// placed beside the parent in the direction of the arrows.
+    pub fn add_section(
+        &mut self,
+        project: &mut Project,
+        parent: u64,
+        a: [f64; 2],
+        b: [f64; 2],
+        flip: bool,
+    ) -> Result<u64, String> {
+        let sheet = project
+            .drawings
+            .sheets
+            .iter()
+            .position(|s| s.view(parent).is_some())
+            .ok_or("that view does not exist")?;
+        let p = project.drawings.sheets[sheet].view(parent).unwrap().clone();
+        if matches!(p.kind, ViewKind::Detail { .. }) {
+            return Err("a section of a detail view is not available".into());
+        }
+        let pf = ViewFrame::of(p.orientation);
+        let (frame, p0) = section_frame(&pf, a, b, flip)?;
+        let src = source_for(project, &p.source)?;
+        // fail now, not in the background, when the line misses the model
+        slice_loops(&src.brep, &src.bodies, p0, frame.dir)?;
+        let (_, n) = cut_directions(a, b, flip).ok_or("the cutting line has no length")?;
+        let side = if n[0].abs() >= n[1].abs() {
+            if n[0] >= 0.0 {
+                Side::Right
+            } else {
+                Side::Left
+            }
+        } else if n[1] >= 0.0 {
+            Side::Above
+        } else {
+            Side::Below
+        };
+        let e = extent(&src.brep, &src.bodies, &frame);
+        let parent_size = {
+            let s = p.size();
+            if s[0] > 0.0 {
+                s
+            } else {
+                [e[0] * p.scale, e[1] * p.scale]
+            }
+        };
+        let off = neighbour_offset(side, parent_size, [e[0] * p.scale, e[1] * p.scale], GAP);
+        // beside the parent, and further on along the arrows while another view is in the way
+        let child = [e[0] * p.scale, e[1] * p.scale];
+        let step = match side {
+            Side::Left | Side::Right => child[0] + GAP,
+            Side::Above | Side::Below => child[1] + GAP,
+        };
+        let dir = [
+            off[0].signum() * (off[0] != 0.0) as u8 as f64,
+            off[1].signum() * (off[1] != 0.0) as u8 as f64,
+        ];
+        let mut pos = [p.pos[0] + off[0], p.pos[1] + off[1]];
+        for _ in 0..6 {
+            let clash = project.drawings.sheets[sheet].views.iter().any(|o| {
+                let os = o.size();
+                os[0] > 0.0
+                    && (o.pos[0] - pos[0]).abs() < (os[0] + child[0]) / 2.0 + 4.0
+                    && (o.pos[1] - pos[1]).abs() < (os[1] + child[1]) / 2.0 + 4.0
+            });
+            if !clash {
+                break;
+            }
+            pos = [pos[0] + dir[0] * step, pos[1] + dir[1] * step];
+        }
+        let letter = Self::next_letter(&project.drawings.sheets[sheet]);
+        project.dw_checkpoint();
+        let id = project.drawings.fresh_id();
+        project.drawings.sheets[sheet].views.push(View {
+            id,
+            kind: ViewKind::Section {
+                parent,
+                a,
+                b,
+                flip,
+                align: match side {
+                    Side::Left | Side::Right => Align::Horizontal,
+                    Side::Above | Side::Below => Align::Vertical,
+                },
+                letter,
+            },
+            source: p.source.clone(),
+            orientation: frame.orientation(),
+            scale: p.scale,
+            style: p.style,
+            pos,
+            label: String::new(),
+            cache: None,
+        });
+        project.mark_extras_dirty();
+        self.sheet = sheet;
+        self.selected = Some(id);
+        self.generate(project, vec![id]);
+        Ok(id)
+    }
+
+    /// An enlarged view of the circle `center`, `radius` (the parent's view coordinates, model
+    /// units) of `parent`. `scale` is the enlargement; by default one that makes the circle about
+    /// 70 mm across.
+    pub fn add_detail(
+        &mut self,
+        project: &mut Project,
+        parent: u64,
+        center: [f64; 2],
+        radius: f64,
+        scale: Option<f64>,
+    ) -> Result<u64, String> {
+        let sheet = project
+            .drawings
+            .sheets
+            .iter()
+            .position(|s| s.view(parent).is_some())
+            .ok_or("that view does not exist")?;
+        let p = project.drawings.sheets[sheet].view(parent).unwrap().clone();
+        if matches!(p.kind, ViewKind::Section { .. }) {
+            return Err("a detail of a section view is not available yet".into());
+        }
+        if radius <= 1e-9 {
+            return Err("the detail circle has no size".into());
+        }
+        let scale = scale.unwrap_or_else(|| {
+            let ideal = 35.0 / radius;
+            STANDARD_SCALES
+                .iter()
+                .copied()
+                .filter(|s| *s <= ideal)
+                .fold(p.scale * 2.0, f64::max)
+        });
+        let r = radius * scale;
+        let fr = project.drawings.sheets[sheet].format.frame();
+        // the free spot nearest the parent that is inside the border, clear of the title block
+        // and of the other views
+        let taken: Vec<([f64; 2], [f64; 2])> = project.drawings.sheets[sheet]
+            .views
+            .iter()
+            .filter_map(|v| {
+                let s = v.size();
+                (s[0] > 0.0).then_some((
+                    [v.pos[0] - s[0] / 2.0 - 8.0, v.pos[1] - s[1] / 2.0 - 12.0],
+                    [v.pos[0] + s[0] / 2.0 + 8.0, v.pos[1] + s[1] / 2.0 + 8.0],
+                ))
+            })
+            .chain(std::iter::once((
+                [fr.title.0[0] - 5.0, fr.title.0[1] - 5.0],
+                [fr.title.1[0] + 5.0, fr.title.1[1] + 12.0],
+            )))
+            .collect();
+        let free = |c: [f64; 2]| {
+            c[0] - r >= fr.border.0[0] + 5.0
+                && c[0] + r <= fr.border.1[0] - 5.0
+                && c[1] - r >= fr.border.0[1] + 12.0
+                && c[1] + r <= fr.border.1[1] - 8.0
+                && taken.iter().all(|(lo, hi)| {
+                    c[0] + r < lo[0] || c[0] - r > hi[0] || c[1] + r < lo[1] || c[1] - r > hi[1]
+                })
+        };
+        let mut best: Option<([f64; 2], f64)> = None;
+        let mut gx = fr.border.0[0];
+        while gx <= fr.border.1[0] {
+            let mut gy = fr.border.0[1];
+            while gy <= fr.border.1[1] {
+                let c = [gx, gy];
+                let dist = (c[0] - p.pos[0]).hypot(c[1] - p.pos[1]);
+                if free(c) && best.is_none_or(|b| dist < b.1) {
+                    best = Some((c, dist));
+                }
+                gy += 5.0;
+            }
+            gx += 5.0;
+        }
+        let [x, y] = best.map_or([fr.border.1[0] - r - 5.0, fr.border.1[1] - r - 8.0], |b| {
+            b.0
+        });
+        let letter = Self::next_letter(&project.drawings.sheets[sheet]);
+        project.dw_checkpoint();
+        let id = project.drawings.fresh_id();
+        project.drawings.sheets[sheet].views.push(View {
+            id,
+            kind: ViewKind::Detail {
+                parent,
+                center,
+                radius,
+                letter,
+            },
+            source: p.source.clone(),
+            orientation: p.orientation,
+            scale,
+            style: p.style,
+            pos: [x, y],
+            label: String::new(),
+            cache: None,
+        });
+        project.mark_extras_dirty();
+        self.sheet = sheet;
+        self.selected = Some(id);
+        self.generate(project, vec![id]);
+        Ok(id)
+    }
+
+    /// Turn a section around: it looks at the other side of the cutting line.
+    pub fn flip_section(&mut self, project: &mut Project, id: u64) -> Result<(), String> {
+        let sheet = project
+            .drawings
+            .sheets
+            .iter()
+            .position(|s| s.view(id).is_some())
+            .ok_or("that view does not exist")?;
+        let v = project.drawings.sheets[sheet].view(id).unwrap().clone();
+        let ViewKind::Section {
+            parent, a, b, flip, ..
+        } = v.kind
+        else {
+            return Err("that is not a section view".into());
+        };
+        let p = project.drawings.sheets[sheet]
+            .view(parent)
+            .ok_or("the parent view is gone")?
+            .clone();
+        let (frame, p0) = section_frame(&ViewFrame::of(p.orientation), a, b, !flip)?;
+        let src = source_for(project, &v.source)?;
+        slice_loops(&src.brep, &src.bodies, p0, frame.dir)?;
+        project.dw_checkpoint();
+        if let Some(vm) = project.drawings.sheets[sheet].view_mut(id) {
+            if let ViewKind::Section { flip, .. } = &mut vm.kind {
+                *flip = !*flip;
+            }
+            vm.orientation = frame.orientation();
+        }
+        project.mark_extras_dirty();
+        self.generate(project, vec![id]);
+        Ok(())
+    }
+
     fn delete_selected(&mut self, project: &mut Project) -> Result<(), String> {
         let id = self.selected.ok_or("select a view to delete")?;
         self.delete_view(project, id)
@@ -424,17 +713,35 @@ impl DrawingWorkspace {
         let mut out = Vec::new();
         for id in ids {
             for s in &project.drawings.sheets {
-                if let Some(v) = s.view(*id) {
-                    out.push((
-                        v.source.clone(),
-                        GenSpec {
-                            id: v.id,
-                            frame: ViewFrame::of(v.orientation),
-                            scale: v.scale,
-                            style: v.style,
-                        },
-                    ));
-                }
+                let Some(v) = s.view(*id) else { continue };
+                let kind = match &v.kind {
+                    ViewKind::Base | ViewKind::Projected { .. } => GenKind::Plain,
+                    ViewKind::Section {
+                        parent, a, b, flip, ..
+                    } => {
+                        let Some(p) = s.view(*parent) else { continue };
+                        GenKind::Section {
+                            parent: ViewFrame::of(p.orientation),
+                            a: *a,
+                            b: *b,
+                            flip: *flip,
+                        }
+                    }
+                    ViewKind::Detail { center, radius, .. } => GenKind::Detail {
+                        center: *center,
+                        radius: *radius,
+                    },
+                };
+                out.push((
+                    v.source.clone(),
+                    GenSpec {
+                        id: v.id,
+                        frame: ViewFrame::of(v.orientation),
+                        scale: v.scale,
+                        style: v.style,
+                        kind,
+                    },
+                ));
             }
         }
         out
@@ -488,6 +795,7 @@ impl DrawingWorkspace {
                     v.cache = Some(ViewCache {
                         source_hash: hash,
                         scene: g.scene.clone(),
+                        centre: g.centre,
                     });
                 }
             }
@@ -653,6 +961,30 @@ impl DrawingWorkspace {
                 .clicked()
                 {
                     req.push("base_view");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Section,
+                    "Section View",
+                    has_sheet,
+                    matches!(self.tool, Some(Tool::Section { .. })),
+                    "Cut the model along a line and show the cut face hatched",
+                )
+                .clicked()
+                {
+                    req.push("section_view");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Circle,
+                    "Detail View",
+                    has_sheet,
+                    matches!(self.tool, Some(Tool::Detail { .. })),
+                    "Enlarge a circular part of a view",
+                )
+                .clicked()
+                {
+                    req.push("detail_view");
                 }
                 for (id, tip, label) in [
                     (

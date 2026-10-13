@@ -2,6 +2,7 @@
 //! writers. Everything draws into one flat [`Scene2d`] that the canvas and the writers share.
 //! The crate has no UI and no global state.
 
+pub mod detail;
 pub mod dxf_out;
 pub mod hlr;
 pub mod model;
@@ -9,6 +10,7 @@ pub mod pdf;
 pub mod projection;
 pub mod render;
 pub mod scene;
+pub mod section;
 pub mod sheet;
 pub mod update;
 

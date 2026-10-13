@@ -39,6 +39,8 @@ pub struct ViewGeometry {
     pub scene: Scene2d,
     /// One entry per primitive of `scene`.
     pub sources: Vec<Source>,
+    /// The projected point (sheet mm) that sits at the origin of `scene`.
+    pub centre: P,
     /// Width and height of the geometry in mm.
     pub size: P,
 }
@@ -60,6 +62,32 @@ struct Occluder {
     /// How far outside a triangle (mm in the view) still counts as covered; the mesh is
     /// inscribed in curved faces by about the chord tolerance.
     xy_tol: f64,
+    /// Cut faces of a section: they hide whatever lies behind them.
+    caps: Vec<Cap>,
+}
+
+/// A region of the view (loops, filled by the even-odd rule) at one depth.
+struct Cap {
+    loops: Vec<Vec<[f64; 2]>>,
+    depth: f64,
+}
+
+impl Cap {
+    fn contains(&self, p: [f64; 2]) -> bool {
+        let mut inside = false;
+        for l in &self.loops {
+            let n = l.len();
+            for i in 0..n {
+                let (a, b) = (l[i], l[(i + 1) % n]);
+                if (a[1] > p[1]) != (b[1] > p[1])
+                    && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+                {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
 }
 
 impl Occluder {
@@ -84,6 +112,7 @@ impl Occluder {
                 grid: vec![Vec::new()],
                 depth_tol,
                 xy_tol,
+                caps: Vec::new(),
             };
         }
         let n = ((tris.len() as f64).sqrt() as usize).clamp(1, 256);
@@ -114,6 +143,7 @@ impl Occluder {
             grid,
             depth_tol,
             xy_tol,
+            caps: Vec::new(),
         }
     }
 
@@ -170,7 +200,9 @@ impl Occluder {
                 return true;
             }
         }
-        false
+        self.caps
+            .iter()
+            .any(|c| depth > c.depth + self.depth_tol && c.contains(uv))
     }
 }
 
@@ -338,21 +370,30 @@ fn conic_shape(
     }
 }
 
-/// Stretches `(tau0, tau1, visible)` of a curve, from sampling and bisection.
-fn runs(c: &Curve, hidden: &dyn Fn(V3) -> bool, min_len: f64) -> Vec<(f64, f64, bool)> {
+/// What a point of a curve looks like in the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum St {
+    Visible,
+    Hidden,
+    /// Cut away by the section plane: not drawn at all.
+    Gone,
+}
+
+/// Stretches `(tau0, tau1, state)` of a curve, from sampling and bisection.
+fn runs(c: &Curve, status: &dyn Fn(V3) -> St, min_len: f64) -> Vec<(f64, f64, St)> {
     let n = c.samples();
-    let vis: Vec<bool> = (0..n)
-        .map(|i| !hidden(c.at(i as f64 / (n - 1) as f64)))
+    let st: Vec<St> = (0..n)
+        .map(|i| status(c.at(i as f64 / (n - 1) as f64)))
         .collect();
-    let mut out: Vec<(f64, f64, bool)> = Vec::new();
+    let mut out: Vec<(f64, f64, St)> = Vec::new();
     let mut start = 0.0;
-    let mut cur = vis[0];
+    let mut cur = st[0];
     for i in 1..n {
-        if vis[i] != vis[i - 1] {
+        if st[i] != st[i - 1] {
             let (mut lo, mut hi) = ((i - 1) as f64 / (n - 1) as f64, i as f64 / (n - 1) as f64);
             for _ in 0..24 {
                 let mid = 0.5 * (lo + hi);
-                if !hidden(c.at(mid)) == vis[i - 1] {
+                if status(c.at(mid)) == st[i - 1] {
                     lo = mid;
                 } else {
                     hi = mid;
@@ -361,7 +402,7 @@ fn runs(c: &Curve, hidden: &dyn Fn(V3) -> bool, min_len: f64) -> Vec<(f64, f64, 
             let tb = 0.5 * (lo + hi);
             out.push((start, tb, cur));
             start = tb;
-            cur = vis[i];
+            cur = st[i];
         }
     }
     out.push((start, 1.0, cur));
@@ -400,7 +441,7 @@ fn runs(c: &Curve, hidden: &dyn Fn(V3) -> bool, min_len: f64) -> Vec<(f64, f64, 
         };
         out[i].2 = state;
         // join equal neighbours
-        let mut merged: Vec<(f64, f64, bool)> = Vec::new();
+        let mut merged: Vec<(f64, f64, St)> = Vec::new();
         for r in out.drain(..) {
             match merged.last_mut() {
                 Some(l) if l.2 == r.2 => l.1 = r.1,
@@ -426,11 +467,39 @@ struct BodyData {
     base: u32,
 }
 
+/// A section plane: what lies on the `keep` side of the plane through `p0` is drawn, the rest is
+/// cut away. `caps` holds the outlines (3-D loops lying in the plane) of what the plane cuts,
+/// one list per body; they are drawn as edges and hide what lies behind them.
+pub struct Clip<'a> {
+    pub p0: V3,
+    pub keep: V3,
+    pub caps: &'a [Vec<Vec<V3>>],
+}
+
+impl Clip<'_> {
+    fn side(&self, p: V3) -> f64 {
+        dot(
+            [p[0] - self.p0[0], p[1] - self.p0[1], p[2] - self.p0[2]],
+            self.keep,
+        )
+    }
+}
+
 /// Project the given bodies of `brep` into a view.
 pub fn project_bodies(
     brep: &BRep,
     bodies: &[BodyId],
     o: &HlrOptions,
+) -> Result<ViewGeometry, String> {
+    project_clipped(brep, bodies, o, None)
+}
+
+/// Like [`project_bodies`], with part of the model cut away by a section plane.
+pub fn project_clipped(
+    brep: &BRep,
+    bodies: &[BodyId],
+    o: &HlrOptions,
+    clip: Option<&Clip>,
 ) -> Result<ViewGeometry, String> {
     // overall size, for tolerances
     let mut lo = [f64::INFINITY; 3];
@@ -460,53 +529,85 @@ pub fn project_bodies(
     }
     let f = &o.frame;
 
-    // triangles of every body, in view coordinates
+    // triangles of every body, in view coordinates; with a section plane, only the kept part
     let mut tris: Vec<[V3; 3]> = Vec::new();
     let mut tags: Vec<u32> = Vec::new();
     for d in &data {
         for t in 0..d.tess.mesh.triangle_count() {
             let c = d.tess.mesh.triangle(t);
-            let mut out = [[0.0; 3]; 3];
-            for (k, p) in c.iter().enumerate() {
-                let (uv, depth) = f.project(v3(p));
-                out[k] = [uv[0], uv[1], depth];
+            let world = [v3(&c[0]), v3(&c[1]), v3(&c[2])];
+            let pieces: Vec<[V3; 3]> = match clip {
+                None => vec![world],
+                Some(cl) => clip_triangle(&world, cl),
+            };
+            for w in pieces {
+                let mut out = [[0.0; 3]; 3];
+                for (k, p) in w.iter().enumerate() {
+                    let (uv, depth) = f.project(*p);
+                    out[k] = [uv[0], uv[1], depth];
+                }
+                tris.push(out);
+                tags.push(d.base + d.tess.mesh.tri_face[t]);
             }
-            tris.push(out);
-            tags.push(d.base + d.tess.mesh.tri_face[t]);
         }
     }
     let wire = o.style == ViewStyle::Wireframe;
-    let occ = Occluder::new(
+    let mut occ = Occluder::new(
         tris,
         tags,
         diag * 1e-4 + opts.chord_tol,
         opts.chord_tol * 1.5,
     );
-    let hidden = |p: V3, own: &[u32]| -> bool {
+    if let Some(cl) = clip {
+        // the cut faces face the viewer when the plane is square to the line of sight
+        if dot(cl.keep, f.dir) > 1.0 - 1e-9 {
+            for body in cl.caps {
+                let loops: Vec<Vec<[f64; 2]>> = body
+                    .iter()
+                    .map(|l| l.iter().map(|p| f.project(*p).0).collect())
+                    .collect();
+                occ.caps.push(Cap {
+                    loops,
+                    depth: dot(cl.p0, f.dir),
+                });
+            }
+        }
+    }
+    let absent_tol = diag * 1e-7;
+    let status = |p: V3, own: &[u32]| -> St {
+        if clip.is_some_and(|c| c.side(p) < -absent_tol) {
+            return St::Gone;
+        }
         if wire {
-            return false;
+            return St::Visible;
         }
         let (uv, d) = f.project(p);
-        occ.hidden(uv, d, own)
+        if occ.hidden(uv, d, own) {
+            St::Hidden
+        } else {
+            St::Visible
+        }
     };
 
     let mut scene = Scene2d::new();
     let mut sources: Vec<Source> = Vec::new();
     if o.style == ViewStyle::Shaded {
-        shaded_fills(&data, f, o.scale, &mut scene, &mut sources);
+        shaded_fills(&data, f, o.scale, clip, &mut scene, &mut sources);
     }
 
     let min_len = diag * 5e-4;
     let show_hidden = matches!(o.style, ViewStyle::VisibleHidden | ViewStyle::Wireframe);
     let mut emit = |scene: &mut Scene2d, src: Source, c: &Curve, own: &[u32]| {
-        for (t0, t1, vis) in runs(c, &|p| hidden(p, own), min_len) {
+        for (t0, t1, st) in runs(c, &|p| status(p, own), min_len) {
             if t1 - t0 < 1e-9 {
                 continue;
             }
-            let layer = match (vis, wire) {
-                (true, _) | (_, true) => Layer::Visible,
-                (false, _) if show_hidden => Layer::Hidden,
-                _ => continue,
+            let layer = match st {
+                St::Gone => continue,
+                St::Visible => Layer::Visible,
+                St::Hidden if wire => Layer::Visible,
+                St::Hidden if show_hidden => Layer::Hidden,
+                St::Hidden => continue,
             };
             let shape = c.shape(t0, t1, f, o.scale);
             if degenerate(&shape) {
@@ -524,6 +625,19 @@ pub fn project_bodies(
         }
     }
 
+    // the outline of what the section plane cuts
+    if let Some(cl) = clip {
+        for body in cl.caps {
+            for l in body {
+                // each side on its own, so lines behind it that coincide are recognised
+                for i in 0..l.len() {
+                    let (a, b) = (l[i], l[(i + 1) % l.len()]);
+                    emit(&mut scene, Source::None, &Curve::Segment(a, b), &[]);
+                }
+            }
+        }
+    }
+
     drop_covered_hidden(&mut scene, &mut sources);
 
     // centre the geometry on the view origin
@@ -534,6 +648,7 @@ pub fn project_bodies(
     Ok(ViewGeometry {
         scene: scene.placed(1.0, [-centre[0], -centre[1]]),
         sources,
+        centre,
         size: [bhi[0] - blo[0], bhi[1] - blo[1]],
     })
 }
@@ -543,6 +658,7 @@ fn shaded_fills(
     data: &[BodyData],
     f: &ViewFrame,
     scale: f64,
+    clip: Option<&Clip>,
     scene: &mut Scene2d,
     sources: &mut Vec<Source>,
 ) {
@@ -565,6 +681,15 @@ fn shaded_fills(
             let n = crate::projection::cross(e1, e2);
             let nl = dot(n, n).sqrt();
             if nl < 1e-18 || dot(n, f.dir) >= 0.0 {
+                continue;
+            }
+            if clip.is_some_and(|cl| {
+                cl.side([
+                    (a[0] + b[0] + cc[0]) / 3.0,
+                    (a[1] + b[1] + cc[1]) / 3.0,
+                    (a[2] + b[2] + cc[2]) / 3.0,
+                ]) < 0.0
+            }) {
                 continue;
             }
             let shade = 150.0 + 90.0 * (dot(n, light) / nl).max(0.0);
@@ -944,4 +1069,33 @@ fn drop_covered_hidden(scene: &mut Scene2d, sources: &mut Vec<Source>) {
         j += 1;
         keep[j - 1]
     });
+}
+
+/// The part of a triangle on the kept side of the section plane, as up to two triangles.
+fn clip_triangle(t: &[V3; 3], cl: &Clip) -> Vec<[V3; 3]> {
+    let d: Vec<f64> = t.iter().map(|p| cl.side(*p)).collect();
+    if d.iter().all(|x| *x >= 0.0) {
+        return vec![*t];
+    }
+    if d.iter().all(|x| *x <= 0.0) {
+        return Vec::new();
+    }
+    let mut poly: Vec<V3> = Vec::new();
+    for i in 0..3 {
+        let (a, b) = (i, (i + 1) % 3);
+        if d[a] >= 0.0 {
+            poly.push(t[a]);
+        }
+        if (d[a] > 0.0 && d[b] < 0.0) || (d[a] < 0.0 && d[b] > 0.0) {
+            let f = d[a] / (d[a] - d[b]);
+            poly.push([
+                t[a][0] + (t[b][0] - t[a][0]) * f,
+                t[a][1] + (t[b][1] - t[a][1]) * f,
+                t[a][2] + (t[b][2] - t[a][2]) * f,
+            ]);
+        }
+    }
+    (1..poly.len().saturating_sub(1))
+        .map(|i| [poly[0], poly[i], poly[i + 1]])
+        .collect()
 }

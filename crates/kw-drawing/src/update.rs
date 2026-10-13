@@ -1,11 +1,30 @@
 //! Making and refreshing the geometry of views: what to project, at what scale, and a hash of
 //! the source so a drawing can tell when the model has moved on.
 
-use crate::hlr::{project_bodies, HlrOptions, ViewGeometry};
+use crate::hlr::{project_bodies, project_clipped, Clip, HlrOptions, Source, ViewGeometry};
 use crate::model::ViewStyle;
 use crate::projection::ViewFrame;
 use crate::scene::P;
+use crate::{detail, section};
 use kw_brep::{BRep, BodyId};
+
+/// What kind of view to make.
+#[derive(Debug, Clone)]
+pub enum GenKind {
+    /// A plain projection of the model.
+    Plain,
+    /// A cut along `a`..`b` of the parent view `parent` (its frame and the cut line in its view
+    /// coordinates, model units), with the cut faces hatched.
+    Section {
+        parent: ViewFrame,
+        a: P,
+        b: P,
+        flip: bool,
+    },
+    /// The inside of a circle (centre and radius in the view's coordinates, model units),
+    /// enlarged to the spec's scale.
+    Detail { center: P, radius: f64 },
+}
 
 /// What to draw for one view.
 #[derive(Debug, Clone)]
@@ -14,6 +33,53 @@ pub struct GenSpec {
     pub frame: ViewFrame,
     pub scale: f64,
     pub style: ViewStyle,
+    pub kind: GenKind,
+}
+
+/// Hatch line spacing on the sheet, mm.
+pub const HATCH_SPACING: f64 = 3.0;
+
+fn make(brep: &BRep, bodies: &[BodyId], s: &GenSpec) -> Result<ViewGeometry, String> {
+    let opts = |frame: ViewFrame| HlrOptions {
+        frame,
+        scale: s.scale,
+        style: s.style,
+    };
+    match &s.kind {
+        GenKind::Plain => project_bodies(brep, bodies, &opts(s.frame)),
+        GenKind::Section { parent, a, b, flip } => {
+            let (frame, p0) = section::section_frame(parent, *a, *b, *flip)?;
+            let caps = section::slice_loops(brep, bodies, p0, frame.dir)?;
+            let clip = Clip {
+                p0,
+                keep: frame.dir,
+                caps: &caps,
+            };
+            let mut g = project_clipped(brep, bodies, &opts(frame), Some(&clip))?;
+            let hatch = section::hatch_loops(&caps, &frame, s.scale, g.centre, HATCH_SPACING);
+            for h in hatch {
+                g.scene.prims.push(h);
+                g.sources.push(Source::None);
+            }
+            Ok(g)
+        }
+        GenKind::Detail { center, radius } => {
+            let g = project_bodies(brep, bodies, &opts(s.frame))?;
+            // the circle's centre in this geometry's own coordinates
+            let c = [
+                center[0] * s.scale - g.centre[0],
+                center[1] * s.scale - g.centre[1],
+            ];
+            let r = radius * s.scale;
+            let scene = detail::detail_scene(&g.scene, c, r);
+            Ok(ViewGeometry {
+                sources: vec![Source::None; scene.prims.len()],
+                scene,
+                centre: [g.centre[0] + c[0], g.centre[1] + c[1]],
+                size: [2.0 * r, 2.0 * r],
+            })
+        }
+    }
 }
 
 /// The drawn geometry of each spec, in order. Fails with the first error.
@@ -24,18 +90,7 @@ pub fn generate(
 ) -> Result<Vec<(u64, ViewGeometry)>, String> {
     specs
         .iter()
-        .map(|s| {
-            project_bodies(
-                brep,
-                bodies,
-                &HlrOptions {
-                    frame: s.frame,
-                    scale: s.scale,
-                    style: s.style,
-                },
-            )
-            .map(|g| (s.id, g))
-        })
+        .map(|s| make(brep, bodies, s).map(|g| (s.id, g)))
         .collect()
 }
 

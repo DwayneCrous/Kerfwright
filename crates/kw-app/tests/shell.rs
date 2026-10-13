@@ -5782,3 +5782,360 @@ fn nothing_to_draw_is_reported_not_made() {
     assert!(!project.dw_can_undo());
     h.frame();
 }
+
+// ------------------------------------------------------------------------------------ section and detail views
+
+use kw_drawing::{Layer, Shape};
+
+fn dw_wait(h: &mut Harness) {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.wait(project);
+}
+
+fn count_layer(v: &kw_drawing::View, l: Layer) -> usize {
+    v.cache
+        .as_ref()
+        .map_or(0, |c| c.scene.prims.iter().filter(|p| p.layer == l).count())
+}
+
+#[test]
+fn a_section_is_placed_in_the_direction_of_its_arrows_hatched_and_marked_on_its_parent() {
+    let (mut h, _) = drawing_app("dw_section");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    // the front view of the demo block (40 x 10): a vertical cut up the middle, material to its right
+    let (a, b) = ([20.0, -2.0], [20.0, 12.0]);
+    let sec = h
+        .app
+        .drawing
+        .add_section(project, base, a, b, false)
+        .unwrap();
+    h.app.drawing.wait(project);
+    let sh = &project.drawings.sheets[0];
+    let (bv, sv) = (sh.view(base).unwrap(), sh.view(sec).unwrap());
+    assert!(
+        matches!(&sv.kind, ViewKind::Section { letter, parent, .. } if letter == "A" && *parent == base)
+    );
+    assert_eq!(sv.orientation, Orientation::Left, "looking along +x");
+    assert!(
+        sv.pos[0] > bv.pos[0] + 10.0 && (sv.pos[1] - bv.pos[1]).abs() < 1e-9,
+        "to the right of its parent, level"
+    );
+    // the cut face of the block is 25 wide and 10 high; the hatch fills it
+    let s = sv.size();
+    assert!(
+        (s[0] - 25.0 * sv.scale).abs() < 1e-3 && (s[1] - 10.0 * sv.scale).abs() < 1e-3,
+        "{s:?}"
+    );
+    assert!(count_layer(sv, Layer::Hatch) > 5);
+    let hatch_len: f64 = sv
+        .cache
+        .as_ref()
+        .unwrap()
+        .scene
+        .prims
+        .iter()
+        .filter_map(|p| match (&p.shape, p.layer) {
+            (Shape::Line { a, b }, Layer::Hatch) => Some((a[0] - b[0]).hypot(a[1] - b[1])),
+            _ => None,
+        })
+        .sum();
+    let area = 25.0 * 10.0 * sv.scale * sv.scale;
+    assert!(
+        (hatch_len * 3.0 - area).abs() < 0.03 * area,
+        "{hatch_len} x 3 vs {area}"
+    );
+    // the parent carries the cutting-plane line and the letters at its ends
+    let notes = sh.annotations();
+    let letters = notes
+        .prims
+        .iter()
+        .filter(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "A"))
+        .count();
+    assert_eq!(letters, 2);
+    assert!(notes.prims.iter().any(|p| p.layer == Layer::Section));
+    // and the sheet's own scene captions the view
+    let scene = sh.scene(1, 1);
+    assert!(scene
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text.starts_with("SECTION A-A"))));
+    // a cut that misses the block is refused and leaves no view behind
+    let n = project.drawings.sheets[0].views.len();
+    assert!(h
+        .app
+        .drawing
+        .add_section(project, base, [100.0, -2.0], [100.0, 12.0], false)
+        .is_err());
+    assert_eq!(project.drawings.sheets[0].views.len(), n);
+}
+
+#[test]
+fn flipping_a_section_looks_at_the_other_half() {
+    let (mut h, _) = drawing_app("dw_flip");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let sec = h
+        .app
+        .drawing
+        .add_section(project, base, [10.0, -2.0], [10.0, 12.0], false)
+        .unwrap();
+    h.app.drawing.wait(project);
+    // x > 10 is kept: 30 wide in the block's x, so the section is 25 (y) wide either way, but
+    // the other half is seen from the other side
+    h.app.drawing.flip_section(project, sec).unwrap();
+    h.app.drawing.wait(project);
+    let v = project.drawings.sheets[0].view(sec).unwrap();
+    assert_eq!(v.orientation, Orientation::Right);
+    assert!(matches!(&v.kind, ViewKind::Section { flip: true, .. }));
+    assert!(count_layer(v, Layer::Hatch) > 5);
+    h.app.undo_redo(true);
+    assert_eq!(
+        dw_project(&mut h).drawings.sheets[0]
+            .view(sec)
+            .unwrap()
+            .orientation,
+        Orientation::Left
+    );
+}
+
+#[test]
+fn a_detail_encloses_what_is_inside_its_circle_at_a_larger_scale() {
+    let (mut h, _) = drawing_app("dw_detail");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let before = project.drawings.sheets[0].view(base).unwrap().scale;
+    let det = h
+        .app
+        .drawing
+        .add_detail(project, base, [0.0, 0.0], 6.0, None)
+        .unwrap();
+    h.app.drawing.wait(project);
+    let sh = &project.drawings.sheets[0];
+    let (bv, dv) = (sh.view(base).unwrap(), sh.view(det).unwrap());
+    assert!(
+        dv.scale > bv.scale && before == bv.scale,
+        "enlarged: {} vs {}",
+        dv.scale,
+        bv.scale
+    );
+    // it is a disc: its size is the circle's diameter at the new scale
+    let r = 6.0 * dv.scale;
+    assert!(
+        (dv.size()[0] - 2.0 * r).abs() < 1e-6,
+        "{:?} vs {}",
+        dv.size(),
+        2.0 * r
+    );
+    assert!(dv
+        .cache
+        .as_ref()
+        .unwrap()
+        .scene
+        .prims
+        .iter()
+        .any(|p| matches!(p.shape, Shape::Circle { r: rr, .. } if (rr - r).abs() < 1e-9)));
+    // it does not sit on top of another view
+    for o in sh.views.iter().filter(|o| o.id != det) {
+        let (os, ds) = (o.size(), dv.size());
+        let apart = (o.pos[0] - dv.pos[0]).abs() > (os[0] + ds[0]) / 2.0
+            || (o.pos[1] - dv.pos[1]).abs() > (os[1] + ds[1]) / 2.0;
+        assert!(apart, "overlaps {:?}", o.kind);
+    }
+    // the parent shows the circle and the letter
+    let notes = sh.annotations();
+    assert!(notes
+        .prims
+        .iter()
+        .any(|p| p.layer == Layer::Symbol && matches!(p.shape, Shape::Circle { .. })));
+    assert!(notes
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "A")));
+    // a detail of a section is not offered
+    let sec = h
+        .app
+        .drawing
+        .add_section(project, base, [20.0, -2.0], [20.0, 12.0], false)
+        .unwrap();
+    h.app.drawing.wait(project);
+    assert!(h
+        .app
+        .drawing
+        .add_detail(project, sec, [0.0, 0.0], 2.0, None)
+        .is_err());
+    // deleting the parent takes the section and the detail with it
+    h.app.drawing.delete_view(project, base).unwrap();
+    assert!(project.drawings.sheets[0].views.is_empty());
+}
+
+#[test]
+fn section_and_detail_tools_work_with_clicks() {
+    let (mut h, _) = drawing_app("dw_tools");
+    let base = make_drawing(&mut h);
+    h.frame();
+    let (pos, size) = {
+        let v = dw_project(&mut h).drawings.sheets[0]
+            .view(base)
+            .unwrap()
+            .clone();
+        (v.pos, v.size())
+    };
+    let click = |h: &mut Harness, p: Pos2| {
+        pointer_frame(h, vec![egui::Event::PointerMoved(p)]);
+        pointer_frame(h, vec![press(p, true)]);
+        pointer_frame(h, vec![press(p, false)]);
+    };
+    // section: click the view's middle, then above it: a vertical line up the middle
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let mut d = ScriptedDialogs::default();
+        h.app.drawing.command("section_view", project, &mut d);
+    }
+    assert!(h.app.drawing.tool.is_some());
+    // the status line changes the layout: let it settle before aiming
+    h.frame();
+    h.frame();
+    let first = h.app.drawing.screen_of(pos);
+    click(&mut h, first);
+    let second = h
+        .app
+        .drawing
+        .screen_of([pos[0] + 0.7, pos[1] + size[1] * 0.7]); // a hair off the vertical
+    click(&mut h, second);
+    assert!(h.app.drawing.tool.is_none());
+    dw_wait(&mut h);
+    {
+        let sh = &dw_project(&mut h).drawings.sheets[0];
+        assert_eq!(sh.views.len(), 2, "{}", h.app.drawing.status);
+        let ViewKind::Section { a, b, .. } = &sh.views[1].kind else {
+            panic!("{:?}", sh.views[1].kind)
+        };
+        assert_eq!(a[0], b[0], "squared to the vertical");
+        assert!(
+            b[1] > a[1],
+            "the line points up, so the material to the right is kept"
+        );
+    }
+    // detail: click a centre, then a point on the edge
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let mut d = ScriptedDialogs::default();
+        h.app.drawing.command("detail_view", project, &mut d);
+    }
+    h.frame();
+    h.frame();
+    let (c0, c1) = (
+        h.app
+            .drawing
+            .screen_of([pos[0] - size[0] / 2.0 + 1.0, pos[1]]),
+        h.app
+            .drawing
+            .screen_of([pos[0] - size[0] / 2.0 + 9.0, pos[1]]),
+    );
+    click(&mut h, c0);
+    click(&mut h, c1);
+    dw_wait(&mut h);
+    let sh = &dw_project(&mut h).drawings.sheets[0];
+    assert_eq!(sh.views.len(), 3, "{}", h.app.drawing.status);
+    let ViewKind::Detail { radius, letter, .. } = &sh.views[2].kind else {
+        panic!()
+    };
+    assert!(
+        (radius * sh.views[0].scale - 8.0).abs() < 1e-3,
+        "radius {radius}"
+    );
+    assert_eq!(letter, "B");
+    // Escape cancels a tool
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let mut d = ScriptedDialogs::default();
+        h.app.drawing.command("section_view", project, &mut d);
+    }
+    pointer_frame(
+        &mut h,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(h.app.drawing.tool.is_none());
+}
+
+#[test]
+fn sections_and_details_save_and_reopen() {
+    let (mut h, dir) = drawing_app("dw_sec_save");
+    let base = make_drawing(&mut h);
+    let path = dir.join("sec.kwf");
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app
+            .drawing
+            .add_section(project, base, [20.0, -2.0], [20.0, 12.0], false)
+            .unwrap();
+        h.app.drawing.wait(project);
+        h.app
+            .drawing
+            .add_detail(project, base, [0.0, 0.0], 6.0, None)
+            .unwrap();
+        h.app.drawing.wait(project);
+        project.save_as(&path).unwrap();
+    }
+    let back = kw_app::project::Project::open(&path).unwrap();
+    assert_eq!(back.drawings, dw_project(&mut h).drawings);
+    let sh = &back.drawings.sheets[0];
+    assert_eq!(sh.views.len(), 3);
+    // the annotations come back from the stored geometry, without regenerating anything
+    assert!(sh.annotations().prims.len() > 8);
+}
+
+#[test]
+fn a_section_steps_aside_for_a_view_already_beside_its_parent() {
+    let (mut h, _) = drawing_app("dw_section_clear");
+    let base = make_drawing(&mut h);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let right = h
+        .app
+        .drawing
+        .add_projected(project, base, Side::Right)
+        .unwrap();
+    h.app.drawing.wait(project);
+    // arrows to the right: the right view is already where the section would go
+    let sec = h
+        .app
+        .drawing
+        .add_section(project, base, [20.0, -2.0], [20.0, 12.0], false)
+        .unwrap();
+    h.app.drawing.wait(project);
+    let sh = &project.drawings.sheets[0];
+    let (r, s) = (sh.view(right).unwrap(), sh.view(sec).unwrap());
+    assert!(
+        s.pos[0] - s.size()[0] / 2.0 >= r.pos[0] + r.size()[0] / 2.0,
+        "clear of the right view"
+    );
+    assert!(
+        (s.pos[1] - r.pos[1]).abs() < 1e-9,
+        "still level with its parent"
+    );
+}

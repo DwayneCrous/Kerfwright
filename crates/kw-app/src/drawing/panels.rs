@@ -184,6 +184,16 @@ impl DrawingWorkspace {
             ui.add(egui::TextEdit::singleline(&mut label).desired_width(110.0));
             ui.end_row();
         });
+        if matches!(v.kind, ViewKind::Section { .. })
+            && ui
+                .button("Flip direction")
+                .on_hover_text("Look at the other side of the cutting line")
+                .clicked()
+        {
+            if let Err(e) = self.flip_section(project, id) {
+                self.status = e;
+            }
+        }
         let new_scale = scale_i.map_or(v.scale, |i| STANDARD_SCALES[i]);
         if (new_scale - v.scale).abs() > 1e-12 || style != v.style || orient != v.orientation {
             regen = true;

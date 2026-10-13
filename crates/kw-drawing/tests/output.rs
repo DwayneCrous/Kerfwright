@@ -41,6 +41,7 @@ fn demo_set() -> DrawingSet {
         cache: Some(ViewCache {
             source_hash: 7,
             scene,
+            centre: [0.0, 0.0],
         }),
     });
     set.add_sheet("Sheet 2", SheetFormat::asme(PaperSize::AnsiB));

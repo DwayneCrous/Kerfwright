@@ -54,19 +54,27 @@ pub enum ViewKind {
         #[serde(default)]
         align: Align,
     },
-    /// A cut through `parent` along the line `a`..`b` (parent-view coordinates, mm at the
-    /// parent's scale). The kept side is to the left of `a`→`b`, or the right when `flip`.
+    /// A cut through `parent` along the line `a`..`b` (in the parent's view coordinates, model
+    /// units: `u` to the right, `v` up). The material the arrows point at is kept, which is to the
+    /// right of `a`→`b` unless `flip`. The view's own `orientation` is the direction it looks.
     Section {
         parent: u64,
         a: P,
         b: P,
         flip: bool,
+        #[serde(default)]
+        align: Align,
+        #[serde(default)]
+        letter: String,
     },
-    /// An enlarged circle of `parent`.
+    /// An enlarged circle of `parent`: centre and radius in the parent's view coordinates (model
+    /// units). The view's `scale` is the enlargement.
     Detail {
         parent: u64,
         center: P,
         radius: f64,
+        #[serde(default)]
+        letter: String,
     },
 }
 
@@ -88,6 +96,10 @@ pub struct ViewCache {
     pub source_hash: u64,
     /// The view's geometry at the view's scale, relative to the view origin.
     pub scene: Scene2d,
+    /// Where the view origin lies in the view's projected coordinates, in sheet mm: a model point
+    /// with view coordinates `(u, v)` is drawn at `(u, v) * scale - centre` from the view origin.
+    #[serde(default)]
+    pub centre: P,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
