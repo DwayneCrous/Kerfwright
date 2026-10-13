@@ -204,6 +204,16 @@ impl EvalOutput {
     pub fn body(&self) -> Option<kw_brep::BodyId> {
         self.brep().and_then(|b| b.bodies.keys().next())
     }
+    /// Is the product a surface (a sheet body that encloses no volume) rather than a solid?
+    pub fn is_sheet(&self) -> bool {
+        match (self.brep(), self.body()) {
+            (Some(rep), Some(b)) => rep
+                .bodies
+                .get(b)
+                .is_some_and(|b| b.kind == kw_brep::BodyKind::Sheet),
+            _ => false,
+        }
+    }
     pub fn quantity(&self) -> Option<Quantity> {
         match &self.product {
             Product::Param(q) => Some(*q),

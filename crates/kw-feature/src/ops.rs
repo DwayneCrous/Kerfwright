@@ -48,6 +48,9 @@ impl<'a> Inputs<'a> {
     fn solid(&self, id: FeatureId) -> Result<&'a Arc<EvalOutput>, EvalError> {
         let o = self.get(id)?;
         match &o.product {
+            Product::Solid(_) if o.is_sheet() => Err(EvalError::Dependency(format!(
+                "{id} is a surface, not a solid: stitch it closed or thicken it first"
+            ))),
             Product::Solid(_) => Ok(o),
             _ => Err(EvalError::Dependency(format!(
                 "{id} does not produce a solid"
@@ -1548,6 +1551,11 @@ fn body_of<'a>(inp: &Inputs<'a>, what: &str) -> Result<&'a Arc<EvalOutput>, Eval
             "{what}: the input is not a solid"
         )));
     }
+    if b.is_sheet() {
+        return Err(EvalError::Dependency(format!(
+            "{what} needs a solid body, but the body before it is a surface: stitch it closed or thicken it first"
+        )));
+    }
     Ok(b)
 }
 
@@ -1619,6 +1627,11 @@ fn finish_with_op(
     let Some(prev) = body_in else {
         return sess.finish(None, notes);
     };
+    if prev.is_sheet() {
+        return Err(EvalError::Dependency(
+            "a solid cannot be joined to or cut from a surface: stitch the surface closed or thicken it first".into(),
+        ));
+    }
     // the new solid becomes a tool: name it, then combine
     let body = sess.body.unwrap();
     let mut tool_names: HashMap<FaceId, TopoName> = HashMap::new();
@@ -1749,4 +1762,52 @@ fn pattern(
         }
     }
     sess.finish(None, notes)
+}
+
+#[cfg(test)]
+mod sheet_guards {
+    use super::*;
+    use kw_brep::builders::{make_box, make_plane_sheet};
+    use kw_math::Frame3;
+
+    fn out(rep: BRep, body: kw_brep::BodyId) -> Arc<EvalOutput> {
+        Arc::new(EvalOutput::solid(
+            rep,
+            body,
+            NameMap::default(),
+            ShapeHistory::default(),
+            None,
+            vec![],
+        ))
+    }
+
+    #[test]
+    fn a_surface_is_a_body_but_not_a_solid_for_solid_only_features() {
+        let mut rep = BRep::new();
+        let sheet = make_plane_sheet(&mut rep, &Frame3::world(), 4.0, 4.0).body;
+        let surface = out(rep, sheet);
+        let mut rep = BRep::new();
+        let b = make_box(&mut rep, &Frame3::world(), 2.0, 2.0, 2.0).body;
+        let solid = out(rep, b);
+        assert!(surface.is_sheet() && !solid.is_sheet());
+        let (sid, bid) = (FeatureId(1), FeatureId(2));
+        let mut deps = HashMap::new();
+        deps.insert(sid, surface);
+        deps.insert(bid, solid);
+        // a feature that works on "the body before it"
+        let on_sheet = Inputs {
+            deps: &deps,
+            body: Some(sid),
+        };
+        let err = body_of(&on_sheet, "Fillet").expect_err("refused");
+        assert!(err.to_string().contains("surface"), "{err}");
+        let on_solid = Inputs {
+            deps: &deps,
+            body: Some(bid),
+        };
+        assert!(body_of(&on_solid, "Fillet").is_ok());
+        // a feature that names a body explicitly
+        assert!(on_sheet.solid(sid).is_err());
+        assert!(on_sheet.solid(bid).is_ok());
+    }
 }

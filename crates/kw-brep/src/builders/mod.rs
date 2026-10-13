@@ -17,7 +17,9 @@ mod auto;
 mod primitives;
 
 pub use auto::{add_face_auto, LoopSpec};
-pub use primitives::{make_box, make_cone, make_cylinder, make_sphere, make_torus};
+pub use primitives::{
+    make_box, make_cone, make_cylinder, make_plane_sheet, make_sphere, make_torus,
+};
 
 use crate::history::ShapeHistory;
 use crate::ids::BodyId;

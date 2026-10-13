@@ -131,6 +131,61 @@ pub fn make_box(brep: &mut BRep, frame: &Frame3, dx: f64, dy: f64, dz: f64) -> B
     BuildResult { body, history }
 }
 
+/// A flat rectangular sheet `w x h` centred on `frame.origin` in its xy plane, facing `frame.z`: a
+/// sheet body (one face, four free edges), not a solid.
+pub fn make_plane_sheet(brep: &mut BRep, frame: &Frame3, w: f64, h: f64) -> BuildResult {
+    assert!(w > 0.0 && h > 0.0, "sheet extents must be positive");
+    let body = brep.add_body(BodyKind::Sheet);
+    let lump = brep.add_lump(body);
+    let shell = brep.add_shell(lump);
+    let mut history = ShapeHistory::default();
+    let p = |x: f64, y: f64| frame.origin + frame.x * x + frame.y * y;
+    let corners = [
+        (-w / 2.0, -h / 2.0),
+        (w / 2.0, -h / 2.0),
+        (w / 2.0, h / 2.0),
+        (-w / 2.0, h / 2.0),
+    ];
+    let verts: Vec<VertexId> = corners
+        .iter()
+        .map(|c| brep.add_vertex(p(c.0, c.1)))
+        .collect();
+    let mut chain = Vec::new();
+    for i in 0..4 {
+        let (a, b) = (
+            p(corners[i].0, corners[i].1),
+            p(corners[(i + 1) % 4].0, corners[(i + 1) % 4].1),
+        );
+        let c = brep.add_curve(CurveGeom::Line(Line {
+            origin: a,
+            dir: b - a,
+        }));
+        let e = brep.add_edge(verts[i], verts[(i + 1) % 4], Some(c), (0.0, 1.0));
+        history.record(
+            EntityRef::Edge(e),
+            Origin::New {
+                role: "sheet-edge".into(),
+            },
+        );
+        chain.push((e, Sense::Forward));
+    }
+    let surf = brep.add_surface(SurfaceGeom::Plane(Plane { frame: *frame }));
+    let n = frame.z;
+    let face = super::add_face_auto(
+        brep,
+        shell,
+        surf,
+        &move |_| n,
+        &[super::LoopSpec {
+            kind: LoopKind::Outer,
+            chain,
+        }],
+    )
+    .expect("a planar quad always meshes");
+    note_face(&mut history, face, "sheet");
+    BuildResult { body, history }
+}
+
 /// Cylinder with base centre at `frame.origin`, axis `frame.z`.
 pub fn make_cylinder(brep: &mut BRep, frame: &Frame3, radius: f64, height: f64) -> BuildResult {
     make_frustum(brep, frame, radius, radius, height)

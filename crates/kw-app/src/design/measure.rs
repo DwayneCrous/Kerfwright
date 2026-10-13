@@ -59,6 +59,8 @@ pub const MATERIALS: &[Material] = &[
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyProps {
+    /// A surface (sheet body): it has an area but encloses no volume, so volume, mass and inertia are 0.
+    pub surface: bool,
     /// mm³
     pub volume: f64,
     /// mm²
@@ -100,10 +102,24 @@ impl BodyProps {
 }
 
 pub fn body_props(brep: &BRep, body: BodyId) -> Option<BodyProps> {
+    if brep.bodies.get(body)?.kind == kw_brep::BodyKind::Sheet {
+        let bb = brep.body_bbox(body);
+        let c = (bb.min.coords + bb.max.coords) / 2.0;
+        return Some(BodyProps {
+            surface: true,
+            volume: 0.0,
+            area: brep.area(body)?,
+            centroid: [c.x, c.y, c.z],
+            bbox_min: [bb.min.x, bb.min.y, bb.min.z],
+            bbox_max: [bb.max.x, bb.max.y, bb.max.z],
+            inertia: [[0.0; 3]; 3],
+        });
+    }
     let mp = brep.mass_properties(body)?;
     let bb = brep.body_bbox(body);
     let i = mp.inertia_centroid();
     Some(BodyProps {
+        surface: false,
         volume: mp.volume,
         area: mp.area,
         centroid: [mp.centroid.x, mp.centroid.y, mp.centroid.z],
@@ -420,7 +436,30 @@ impl DesignWorkspace {
                 let Some((brep, id)) = body.output.brep().zip(body.output.body()) else {
                     return;
                 };
-                if let Some(p) = body_props(brep, id) {
+                if let Some(p) = body_props(brep, id).filter(|p| p.surface) {
+                    let size = p.size();
+                    ui.label(
+                        egui::RichText::new("a surface: it encloses no volume, so it has no mass")
+                            .size(10.5)
+                            .color(TEXT_WEAK),
+                    );
+                    egui::Grid::new("surface_props")
+                        .num_columns(2)
+                        .spacing([14.0, 3.0])
+                        .show(ui, |ui| {
+                            let mut row = |k: &str, v: String| {
+                                ui.label(egui::RichText::new(k).color(TEXT_WEAK));
+                                ui.label(v);
+                                ui.end_row();
+                            };
+                            row("Surface area", format!("{:.3} mm²", p.area));
+                            row("Free edges", brep.free_edges(id).len().to_string());
+                            row(
+                                "Bounding box",
+                                format!("{:.3} × {:.3} × {:.3} mm", size[0], size[1], size[2]),
+                            );
+                        });
+                } else if let Some(p) = body_props(brep, id) {
                     let size = p.size();
                     let own = body
                         .material

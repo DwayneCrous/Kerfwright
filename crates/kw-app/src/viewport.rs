@@ -188,6 +188,8 @@ pub struct ModelScene {
     /// One curvature value per vertex of `scene` when the scene was built for a curvature analysis
     /// (`NaN` where it cannot be found), else empty.
     pub scalars: Vec<f32>,
+    /// The free edges of surfaces (sheet bodies), as segments in scene coordinates.
+    pub free_edges: Vec<([f64; 3], [f64; 3])>,
 }
 
 /// What the analysis overlay shows.
@@ -220,6 +222,7 @@ impl ModelScene {
             scene,
             tess: Vec::new(),
             scalars: Vec::new(),
+            free_edges: Vec::new(),
         }
     }
 
@@ -267,6 +270,28 @@ impl ModelScene {
             scene.center = nalgebra::Vector3::zeros();
             scene.radius = 40.0;
         }
+        // the open boundary of every surface, for the overlay that marks where it is not yet joined
+        let mut free_edges = Vec::new();
+        for (t, body) in tess.iter().zip(bodies) {
+            let free: std::collections::HashSet<_> = brep.free_edges(body).into_iter().collect();
+            if free.is_empty() {
+                continue;
+            }
+            for (ei, first, count) in &t.edges.ranges {
+                if !t
+                    .edge_keys
+                    .get(*ei as usize)
+                    .is_some_and(|e| free.contains(e))
+                {
+                    continue;
+                }
+                let pts = &t.edges.points[*first as usize..(*first + *count) as usize];
+                for w in pts.windows(2) {
+                    let (a, b) = (w[0].coords - scene.center, w[1].coords - scene.center);
+                    free_edges.push(([a.x, a.y, a.z], [b.x, b.y, b.z]));
+                }
+            }
+        }
         let scalars = match curvature {
             Some(kind) => tess
                 .iter()
@@ -278,6 +303,7 @@ impl ModelScene {
             scene,
             tess,
             scalars,
+            free_edges,
         }
     }
 

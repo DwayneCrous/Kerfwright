@@ -356,7 +356,11 @@ impl BRep {
         Some(s)
     }
 
+    /// The volume of a solid body; `None` for a sheet or wire, which enclose nothing.
     pub fn volume(&self, body: BodyId) -> Option<f64> {
+        if self.bodies.get(body)?.kind != BodyKind::Solid {
+            return None;
+        }
         self.faces_volume(&self.body_faces(body))
     }
 

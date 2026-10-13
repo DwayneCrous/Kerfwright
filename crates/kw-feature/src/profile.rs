@@ -3,7 +3,8 @@
 //!
 //! The curves of a sketch are cut where they cross or touch (`kw_sketch::arrangement`); the faces of that
 //! arrangement are the regions. A profile is one face (its outline and its holes) or the outline of several
-//! faces merged. Free-standing open curves belong to no face and are ignored.
+//! faces merged. Free-standing open curves belong to no face; [`sketch_wires`] returns them (and the closed
+//! outlines) as ordered chains of edges, for the surface features.
 
 use crate::eval::EvalError;
 use kw_math::Frame3;
@@ -20,6 +21,26 @@ pub struct LabeledProfile {
     pub profile: Profile,
     /// `labels[loop][edge]`; loop 0 is the outer loop, the rest are holes, in profile order.
     pub labels: Vec<Vec<u32>>,
+}
+
+/// An ordered chain of sketch curves on the sketch plane: each edge starts where the one before ends. Open
+/// chains are the curves a surface is swept or lofted from; a closed chain is an outline.
+#[derive(Debug, Clone)]
+pub struct Wire {
+    pub plane: Frame3,
+    pub edges: Vec<ProfileEdge>,
+    /// The label of the sketch entity behind each edge.
+    pub labels: Vec<u32>,
+    pub closed: bool,
+}
+
+impl Wire {
+    pub fn start(&self) -> kw_math::Point3<f64> {
+        self.edges[0].start()
+    }
+    pub fn end(&self) -> kw_math::Point3<f64> {
+        self.edges[self.edges.len() - 1].end()
+    }
 }
 
 /// The arrangement of a sketch on its plane, with what is needed to turn faces into kernel profiles.
@@ -139,6 +160,154 @@ impl FaceSet {
         edge
     }
 
+    /// Every curve of the sketch as chains of consecutive edges: from each free end (or from a place where
+    /// three or more curves meet) up to the next such place; whatever is left are closed outlines. Chains
+    /// are ordered by their smallest entity label and start at the end that makes their first edge run
+    /// along its curve, so the names made from them do not depend on the order the curves were found in.
+    pub fn wires(&self) -> Vec<Wire> {
+        let n = self.arr.vertices.len();
+        let mut around: Vec<Vec<Half>> = vec![Vec::new(); n];
+        for (i, e) in self.arr.edges.iter().enumerate() {
+            if e.from == e.to {
+                continue; // a closed curve on its own is handled below
+            }
+            around[e.from].push(Half {
+                edge: i,
+                forward: true,
+            });
+            around[e.to].push(Half {
+                edge: i,
+                forward: false,
+            });
+        }
+        let end_of = |h: Half| {
+            let e = &self.arr.edges[h.edge];
+            if h.forward {
+                e.to
+            } else {
+                e.from
+            }
+        };
+        let mut used = vec![false; self.arr.edges.len()];
+        let mut chains: Vec<(Vec<Half>, bool)> = Vec::new();
+        let walk = |start: Half, used: &mut Vec<bool>| -> (Vec<Half>, bool) {
+            let mut halves = vec![start];
+            used[start.edge] = true;
+            let first_from = if start.forward {
+                self.arr.edges[start.edge].from
+            } else {
+                self.arr.edges[start.edge].to
+            };
+            let mut at = end_of(start);
+            loop {
+                if at == first_from {
+                    return (halves, true);
+                }
+                if around[at].len() != 2 {
+                    return (halves, false);
+                }
+                let Some(next) = around[at].iter().copied().find(|h| !used[h.edge]) else {
+                    return (halves, false);
+                };
+                used[next.edge] = true;
+                halves.push(next);
+                at = end_of(next);
+            }
+        };
+        // open ends and junctions first
+        for v in 0..n {
+            if around[v].len() == 2 {
+                continue;
+            }
+            for h in around[v].clone() {
+                if !used[h.edge] {
+                    let (c, closed) = walk(h, &mut used);
+                    chains.push((c, closed));
+                }
+            }
+        }
+        // then outlines (every vertex of degree two)
+        for (i, e) in self.arr.edges.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let (c, closed) = if e.from == e.to {
+                used[i] = true;
+                (
+                    vec![Half {
+                        edge: i,
+                        forward: true,
+                    }],
+                    true,
+                )
+            } else {
+                walk(
+                    Half {
+                        edge: i,
+                        forward: true,
+                    },
+                    &mut used,
+                )
+            };
+            chains.push((c, closed));
+        }
+        let mut wires: Vec<(u32, Wire)> = chains
+            .into_iter()
+            .map(|(halves, closed)| {
+                let rev: Vec<Half> = halves
+                    .iter()
+                    .rev()
+                    .map(|h| Half {
+                        edge: h.edge,
+                        forward: !h.forward,
+                    })
+                    .collect();
+                // the orientation whose first edge has the smaller label, then the one that runs along its curve
+                let key = |hs: &[Half]| {
+                    let h = hs[0];
+                    let e = &self.arr.edges[h.edge];
+                    (self.label_of(&e.sources), !h.forward, e.t0.to_bits())
+                };
+                let halves = if closed || key(&halves) <= key(&rev) {
+                    halves
+                } else {
+                    rev
+                };
+                let labels: Vec<u32> = halves
+                    .iter()
+                    .map(|h| self.label_of(&self.arr.edges[h.edge].sources))
+                    .collect();
+                let first = labels.iter().copied().min().unwrap_or(u32::MAX);
+                // a closed outline starts at its smallest label like a profile loop does
+                let (halves, labels) = if closed {
+                    let (l, lab) = self.loop_of(&halves);
+                    return (
+                        first,
+                        Wire {
+                            plane: self.plane,
+                            edges: l.edges,
+                            labels: lab,
+                            closed,
+                        },
+                    );
+                } else {
+                    (halves, labels)
+                };
+                (
+                    first,
+                    Wire {
+                        plane: self.plane,
+                        edges: halves.iter().map(|h| self.edge(*h)).collect(),
+                        labels,
+                        closed,
+                    },
+                )
+            })
+            .collect();
+        wires.sort_by_key(|(first, w)| (*first, w.edges.len()));
+        wires.into_iter().map(|(_, w)| w).collect()
+    }
+
     /// A loop of half-edges as a kernel loop with the label of every edge. The loop starts at its edge with
     /// the smallest label (then the smallest parameter), so that the names of the faces made from it do not
     /// depend on where the traversal happened to begin.
@@ -248,4 +417,9 @@ pub fn sketch_profile_labeled(
 pub fn sketch_profile(sk: &Sketch, plane: Frame3) -> Result<Profile, EvalError> {
     let ents: Vec<EntityId> = sk.entities.keys().collect();
     Ok(sketch_profile_labeled(sk, &ents, plane)?.profile)
+}
+
+/// The chains of curves of a sketch: open ones (what a surface is made from) and closed ones.
+pub fn sketch_wires(sk: &Sketch, entities: &[EntityId], plane: Frame3) -> Vec<Wire> {
+    sketch_faces(sk, entities, plane).wires()
 }

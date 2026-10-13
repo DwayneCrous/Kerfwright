@@ -236,6 +236,36 @@ impl BRep {
         })
     }
 
+    /// The edges of a body that only one face uses: the boundary of a sheet. A closed solid has none.
+    pub fn free_edges(&self, body: BodyId) -> Vec<EdgeId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for f in self.body_faces(body) {
+            let Some(face) = self.faces.get(f) else {
+                continue;
+            };
+            for lp in &face.loops {
+                for c in self.loop_coedges(*lp) {
+                    let Some(co) = self.coedges.get(c) else {
+                        continue;
+                    };
+                    if seen.insert(co.edge)
+                        && self.radial_ring(co.edge).len() == 1
+                        && self.edges.get(co.edge).is_some_and(|e| !e.is_degenerate())
+                    {
+                        out.push(co.edge);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Does the body enclose a volume (no free edges)?
+    pub fn is_closed(&self, body: BodyId) -> bool {
+        self.free_edges(body).is_empty()
+    }
+
     /// Faces of a body (through lumps and shells).
     pub fn body_faces(&self, body: BodyId) -> Vec<FaceId> {
         let mut out = Vec::new();

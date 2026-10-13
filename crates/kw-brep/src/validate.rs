@@ -251,8 +251,18 @@ impl BRep {
         }
 
         // --- edges and radial rings ------------------------------------------
-        let all_solid =
-            !self.bodies.is_empty() && self.bodies.values().all(|b| b.kind == BodyKind::Solid);
+        // closedness is a property of each body: the edges of a sheet (or wire) body may be free, those of
+        // a solid must pair up exactly
+        let open_edges: HashSet<EdgeId> = self
+            .bodies
+            .iter()
+            .filter(|(_, b)| b.kind != BodyKind::Solid)
+            .flat_map(|(id, _)| self.body_faces(id))
+            .filter_map(|f| self.faces.get(f))
+            .flat_map(|f| f.loops.iter())
+            .flat_map(|l| self.loop_coedges(*l))
+            .filter_map(|c| self.coedges.get(c).map(|c| c.edge))
+            .collect();
         let mut uses: HashMap<EdgeId, usize> = HashMap::new();
         for c in self.coedges.values() {
             *uses.entry(c.edge).or_default() += 1;
@@ -303,7 +313,7 @@ impl BRep {
                     reason: "ring misses coedges that use the edge",
                 });
             }
-            if all_solid && !e.is_degenerate() {
+            if !open_edges.contains(&eid) && !e.is_degenerate() {
                 if ring.len() != 2 {
                     errs.push(ValidationError::RadialRing {
                         edge: eid,
@@ -316,8 +326,17 @@ impl BRep {
         }
 
         // --- Euler–Poincaré per shell -----------------------------------------
-        if all_solid {
+        {
             for (sid, s) in &self.shells {
+                // only a solid's shells are closed surfaces
+                let solid = self
+                    .lumps
+                    .get(s.lump)
+                    .and_then(|l| self.bodies.get(l.body))
+                    .is_some_and(|b| b.kind == BodyKind::Solid);
+                if !solid {
+                    continue;
+                }
                 let mut verts: HashSet<VertexId> = HashSet::new();
                 let mut edges: HashSet<EdgeId> = HashSet::new();
                 let mut inner = 0i64;

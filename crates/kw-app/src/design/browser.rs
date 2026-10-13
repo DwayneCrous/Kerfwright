@@ -204,10 +204,20 @@ impl DesignWorkspace {
                 .show(ui, |ui| {
                     for info in &infos {
                         let hidden = self.hidden_bodies.contains(&info.root);
+                        let surface = self
+                            .bodies
+                            .as_ref()
+                            .and_then(|b| b.list.iter().find(|x| x.root == info.root))
+                            .is_some_and(|x| x.output.is_sheet());
+                        let label = if surface {
+                            format!("{} (surface)", info.name)
+                        } else {
+                            info.name.clone()
+                        };
                         let (resp, eye) = row(
                             ui,
-                            Icon::Body,
-                            &info.name,
+                            if surface { Icon::Plane } else { Icon::Body },
+                            &label,
                             self.active_body == Some(info.root),
                             Some(!hidden),
                             false,

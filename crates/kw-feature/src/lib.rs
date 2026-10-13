@@ -39,7 +39,7 @@ pub use naming::{
     GeomFingerprint, NameMap, NameOrigin, Reference, ResolveKind, ResolveOutcome, Resolved,
     TopoName,
 };
-pub use profile::{sketch_profile, sketch_profile_labeled, LabeledProfile};
+pub use profile::{sketch_profile, sketch_profile_labeled, sketch_wires, LabeledProfile, Wire};
 pub use recipe::SketchRecipe;
 pub use spec::*;
 

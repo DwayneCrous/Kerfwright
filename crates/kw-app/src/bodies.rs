@@ -203,6 +203,10 @@ pub fn interference(bodies: &Bodies) -> Vec<Overlap> {
     for i in 0..bodies.list.len() {
         for j in i + 1..bodies.list.len() {
             let (oa, ob) = (&bodies.list[i].output, &bodies.list[j].output);
+            // a surface encloses no volume to overlap
+            if oa.is_sheet() || ob.is_sheet() {
+                continue;
+            }
             let (Some((ra, ba)), Some((rb, bb))) =
                 (oa.brep().zip(oa.body()), ob.brep().zip(ob.body()))
             else {

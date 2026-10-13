@@ -100,13 +100,15 @@ impl Evaluation {
             .iter()
             .all(|id| matches!(self.states.get(id), Some(FeatureState::Ok(_))))
     }
-    /// The output of the last evaluated solid feature.
+    /// The output of the last evaluated solid feature (a surface is not a solid: see `final_body`).
     pub fn final_solid(&self) -> Option<(&FeatureId, &Arc<EvalOutput>)> {
         self.order
             .iter()
             .rev()
             .find_map(|id| match self.states.get(id) {
-                Some(FeatureState::Ok(o)) if matches!(o.product, Product::Solid(_)) => {
+                Some(FeatureState::Ok(o))
+                    if matches!(o.product, Product::Solid(_)) && !o.is_sheet() =>
+                {
                     Some((id, o))
                 }
                 _ => None,
@@ -130,6 +132,18 @@ impl Evaluation {
             }
         }
         h.finish()
+    }
+    /// The output of the last evaluated body, whether a solid or a surface.
+    pub fn final_body(&self) -> Option<(&FeatureId, &Arc<EvalOutput>)> {
+        self.order
+            .iter()
+            .rev()
+            .find_map(|id| match self.states.get(id) {
+                Some(FeatureState::Ok(o)) if matches!(o.product, Product::Solid(_)) => {
+                    Some((id, o))
+                }
+                _ => None,
+            })
     }
     /// Geometry hash and name-set hash of the final solid.
     pub fn final_hashes(&self) -> Option<(u128, u128)> {

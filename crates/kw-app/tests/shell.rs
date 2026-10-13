@@ -7481,3 +7481,26 @@ fn curvature_scalars_follow_the_model_and_the_range_ignores_extremes() {
     let (lo, hi) = m.scalar_range().unwrap();
     assert!(lo.abs() < 1e-3 && (hi - 0.125).abs() < 1e-3, "{lo} {hi}");
 }
+
+#[test]
+fn a_surface_reports_area_but_no_volume_and_shows_its_open_edges() {
+    use kw_app::design::measure::body_props;
+    use kw_brep::builders::{make_box, make_plane_sheet};
+    use kw_brep::BRep;
+    use kw_math::Frame3;
+    let mut rep = BRep::new();
+    let sheet = make_plane_sheet(&mut rep, &Frame3::world(), 6.0, 4.0).body;
+    let solid = make_box(&mut rep, &Frame3::world(), 2.0, 2.0, 2.0).body;
+    let p = body_props(&rep, sheet).expect("a surface has properties");
+    assert!(p.surface);
+    assert!((p.area - 24.0).abs() < 1e-9);
+    assert_eq!(p.volume, 0.0);
+    let q = body_props(&rep, solid).unwrap();
+    assert!(!q.surface && q.volume > 7.9);
+    // the four sides of the sheet are marked, the closed box has none
+    let scene = ModelScene::build(&rep);
+    assert!(scene.free_edges.len() >= 4);
+    let mut only_box = BRep::new();
+    make_box(&mut only_box, &Frame3::world(), 2.0, 2.0, 2.0);
+    assert!(ModelScene::build(&only_box).free_edges.is_empty());
+}

@@ -261,6 +261,16 @@ impl DesignWorkspace {
             .model()
             .map(|m| m.scene.radius)
             .unwrap_or(40.0);
+        // the open edges of surfaces, so a gap in a surface is plain to see
+        if let Some(m) = self.viewport.model() {
+            let stroke = egui::Stroke::new(2.0, Color32::from_rgb(230, 60, 200));
+            for (a, b) in &m.free_edges {
+                if let (Some(pa), Some(pb)) = (self.viewport.project(*a), self.viewport.project(*b))
+                {
+                    painter.line_segment([pa, pb], stroke);
+                }
+            }
+        }
         let s = geom::plane_size(radius);
         let o = self.viewport.origin_in_scene();
         let o3 = [o.x, o.y, o.z];
