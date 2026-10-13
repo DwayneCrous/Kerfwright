@@ -2,8 +2,10 @@
 //! symbols, feature control frames (with the characteristic symbols drawn from lines and arcs,
 //! since fonts do not carry them), and the centre marks of circles and cylinders.
 
-use crate::dim::Dimension;
+use crate::bom::{BomColumn, BomRowData};
+use crate::dim::{DimStatus, Dimension};
 use crate::model::View;
+use crate::projection::V3;
 use crate::scene::{text_width, Anchor, Layer, Scene2d, Shape, P};
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +93,26 @@ pub enum AnnotKind {
     Surface {
         pos: P,
         value: String,
+    },
+    /// The parts list, its lower-right corner at `pos`; `rows` is what it was last made from.
+    Bom {
+        pos: P,
+        columns: Vec<BomColumn>,
+        rows: Vec<BomRowData>,
+    },
+    /// A balloon with the item number of `part` at `pos` (on the sheet), its leader ending on a
+    /// point of the part. `instance` says which of several like components (in the order of the
+    /// assembly's bodies); `local` is the point in the component's own frame and `world` where it
+    /// was last found, in the assembly.
+    Balloon {
+        view: u64,
+        part: String,
+        instance: u32,
+        local: V3,
+        world: V3,
+        pos: P,
+        item: u32,
+        status: DimStatus,
     },
     /// A feature control frame with its lower-left corner at `pos`, optionally with a leader.
     Fcf {
@@ -214,7 +236,11 @@ fn leader(s: &mut Scene2d, from: P, target: P) {
 pub fn layout(a: &Annotation) -> Scene2d {
     let mut s = Scene2d::new();
     match &a.kind {
-        AnnotKind::Dimension(_) => {}
+        // these need their view (balloons) or are drawn by the sheet
+        AnnotKind::Dimension(_) | AnnotKind::Balloon { .. } => {}
+        AnnotKind::Bom { pos, columns, rows } => {
+            s.extend(crate::bom::table_scene(*pos, columns, rows))
+        }
         AnnotKind::Note {
             pos,
             text,

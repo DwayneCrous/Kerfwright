@@ -6840,3 +6840,366 @@ fn annotations_are_selected_dragged_and_deleted_on_the_sheet() {
     );
     assert!(dw_project(&mut h).drawings.sheets[0].annots.is_empty());
 }
+
+// ------------------------------------------------------------------------------------ parts list and balloons
+
+use kw_assembly::{Assembly, Part, Placement};
+
+fn box_part(name: &str, w: f64, h: f64, d: f64, material: Option<&str>) -> Part {
+    let mm = |v: f64| kw_expr::Param::length(v);
+    let mut doc = kw_feature::Document::new();
+    let s = doc
+        .add_rect_sketch(
+            "S",
+            kw_feature::PlaneSpec::Xy(mm(0.0)),
+            mm(0.0),
+            mm(0.0),
+            mm(w),
+            mm(h),
+        )
+        .unwrap();
+    doc.add_extrude("Box", s, mm(d), kw_feature::BodyOp::New)
+        .unwrap();
+    let mut p = Part::new(name, doc, vec![]);
+    p.material = material.map(String::from);
+    p
+}
+
+/// A 60 x 40 x 10 aluminium plate with two steel pins (10 x 10 x 20) standing on it, in the
+/// Drawing workspace with a front view of the assembly. Returns the view.
+fn rig_app(name: &str) -> (Harness, u64) {
+    let dir = scratch(name);
+    let mut h = Harness::new(app_in(&dir));
+    h.app.create_project("Rig", &dir).unwrap();
+    {
+        let p = h.app.project_mut().unwrap();
+        let mut a = Assembly::new("Rig");
+        let plate = a.add_part(box_part("Plate", 60.0, 40.0, 10.0, Some("Aluminium")));
+        let pin = a.add_part(box_part("Pin", 10.0, 10.0, 20.0, Some("Steel")));
+        let i0 = a.add_instance("Plate:1", plate);
+        a.instances[i0].grounded = true;
+        for (k, x) in [10.0, 40.0].iter().enumerate() {
+            let i = a.add_instance(&format!("Pin:{}", k + 1), pin);
+            a.instances[i].at = Placement {
+                t: [*x, 15.0, 10.0],
+                ..Placement::default()
+            };
+        }
+        p.assembly = Some(a);
+        p.mark_extras_dirty();
+    }
+    h.app.set_workspace(Workspace::Drawing);
+    h.frame();
+    let front;
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        project
+            .drawings
+            .add_sheet("Sheet 1", kw_drawing::SheetFormat::default());
+        h.app.drawing.sheet = 0;
+        let f = kw_app::drawing::ViewForm {
+            orientation: Orientation::Front,
+            style: kw_drawing::ViewStyle::Visible,
+            assembly: true,
+            scale: None,
+        };
+        front = h.app.drawing.add_base_view(project, &f, false).unwrap();
+        h.app.drawing.wait(project);
+    }
+    (h, front)
+}
+
+fn add_balloon_at(h: &mut Harness, view: u64, uv: [f64; 2], pos: [f64; 2]) -> Result<u64, String> {
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.add_balloon(project, view, uv, pos)
+}
+
+fn boms_of(h: &mut Harness) -> Vec<(Vec<kw_drawing::BomColumn>, Vec<kw_drawing::BomRowData>)> {
+    dw_project(h).drawings.sheets[0]
+        .annots
+        .iter()
+        .filter_map(|a| match &a.kind {
+            AnnotKind::Bom { columns, rows, .. } => Some((columns.clone(), rows.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn balloons_of(h: &mut Harness) -> Vec<(u32, String, [f64; 3], DimStatus)> {
+    dw_project(h).drawings.sheets[0]
+        .annots
+        .iter()
+        .filter_map(|a| match &a.kind {
+            AnnotKind::Balloon {
+                item,
+                part,
+                world,
+                status,
+                ..
+            } => Some((*item, part.clone(), *world, status.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_parts_list_counts_and_weighs_like_the_assembly_bill_of_materials() {
+    use kw_app::design::asm_inspect::{bom_csv, bom_rows};
+    let (mut h, _front) = rig_app("dw_bom");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.add_bom(project).unwrap();
+    assert!(h.app.drawing.add_bom(project).is_err(), "one list a sheet");
+    // the reference: the assembly's own BOM, read independently
+    let pose = project
+        .assembly
+        .as_ref()
+        .unwrap()
+        .pose(&mut project.engine)
+        .unwrap();
+    let want = bom_rows(&pose);
+    let rows = boms_of(&mut h).pop().unwrap().1;
+    assert_eq!(rows.len(), want.len());
+    assert_eq!(rows.len(), 2);
+    for (r, w) in rows.iter().zip(&want) {
+        assert_eq!(
+            (r.part.as_str(), r.count as usize),
+            (w.part.as_str(), w.count)
+        );
+        assert_eq!(r.material, w.material.clone().unwrap_or_default());
+        assert!((r.volume - w.volume).abs() < 1e-9 && (r.mass_g - w.mass_g).abs() < 1e-9);
+    }
+    // 60 x 40 x 10 aluminium (2700 kg/m3) = 64.8 g; a steel pin (7850) of 2000 mm3 = 15.7 g
+    assert_eq!(rows[0].part, "Plate");
+    assert!(
+        (rows[0].mass_g - 24000.0 * 2700.0e-6).abs() < 1e-6,
+        "{}",
+        rows[0].mass_g
+    );
+    assert_eq!((rows[1].part.as_str(), rows[1].count), ("Pin", 2));
+    assert!((rows[1].mass_g - 2000.0 * 7850.0e-6).abs() < 1e-6);
+    // the CSV is the assembly's
+    assert_eq!(
+        h.app.drawing.bom_csv(h.app.project().unwrap()).unwrap(),
+        bom_csv(&want)
+    );
+    // it is drawn on the sheet, its corner at the top of the title block
+    let sheet = &dw_project(&mut h).drawings.sheets[0];
+    let notes = sheet.annotations();
+    for t in ["Plate", "Pin", "ITEM", "QTY", "MATERIAL"] {
+        assert!(
+            notes
+                .prims
+                .iter()
+                .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == t)),
+            "{t}"
+        );
+    }
+    let (_, hi) = notes.bounds().unwrap();
+    assert!(hi[0] >= sheet.format.frame().title.1[0] - 1e-6);
+}
+
+#[test]
+fn the_parts_list_is_saved_exported_and_its_columns_are_chosen() {
+    let (mut h, _front) = rig_app("dw_bom_csv");
+    let dir = scratch("dw_bom_out");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    let id = h.app.drawing.add_bom(project).unwrap();
+    // fewer / more columns
+    if let Some(a) = project.drawings.sheets[0]
+        .annots
+        .iter_mut()
+        .find(|a| a.id == id)
+    {
+        if let AnnotKind::Bom { columns, .. } = &mut a.kind {
+            *columns = vec![
+                kw_drawing::BomColumn::Item,
+                kw_drawing::BomColumn::Part,
+                kw_drawing::BomColumn::TotalMass,
+            ];
+        }
+    }
+    let notes = project.drawings.sheets[0].annotations();
+    assert!(notes
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "TOTAL (g)")));
+    assert!(!notes
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "MATERIAL")));
+    // through the dialogs
+    let out = dir.join("bom.csv");
+    let mut dialogs = ScriptedDialogs {
+        save: vec![out.clone()],
+        ..Default::default()
+    };
+    h.app.drawing.command("export_bom", project, &mut dialogs);
+    let csv = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        csv.lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("1,Plate,1,Aluminium,"),
+        "{csv}"
+    );
+    assert!(csv.lines().last().unwrap().starts_with(",Total,3,"));
+    // saved with the sheet
+    let path = dir.join("rig.kwf");
+    project.save_as(&path).unwrap();
+    assert_eq!(
+        kw_app::project::Project::open(&path).unwrap().drawings,
+        project.drawings
+    );
+}
+
+#[test]
+fn balloons_carry_the_items_of_their_parts_and_follow_the_assembly() {
+    let (mut h, front) = rig_app("dw_balloon");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.add_bom(project).unwrap();
+    // the front view (x right, z up): the plate's body at (5, 5) and the second pin at (45, 20)
+    let v = project.drawings.sheets[0].view(front).unwrap().clone();
+    let sheet_pos = |uv: [f64; 2]| {
+        let c = v.cache.as_ref().unwrap().centre;
+        [
+            v.pos[0] + uv[0] * v.scale - c[0],
+            v.pos[1] + uv[1] * v.scale - c[1],
+        ]
+    };
+    let _ = sheet_pos;
+    add_balloon_at(&mut h, front, [5.0, 5.0], [30.0, 250.0]).unwrap();
+    add_balloon_at(&mut h, front, [45.0, 20.0], [90.0, 250.0]).unwrap();
+    add_balloon_at(&mut h, front, [15.0, 20.0], [60.0, 250.0]).unwrap();
+    let b = balloons_of(&mut h);
+    assert_eq!(
+        b.iter().map(|x| (x.0, x.1.as_str())).collect::<Vec<_>>(),
+        [(1, "Plate"), (2, "Pin"), (2, "Pin")],
+        "the number is the part's row in the list"
+    );
+    // the point is on the front of the component that was clicked (the plate's front face is y = 0)
+    assert!(
+        b[0].2[1].abs() < 1e-6 && (b[0].2[0] - 5.0).abs() < 1e-6 && (b[0].2[2] - 5.0).abs() < 1e-6,
+        "{:?}",
+        b[0].2
+    );
+    assert!(
+        (b[1].2[1] - 15.0).abs() < 1e-6,
+        "the pin's front face is at y = 15: {:?}",
+        b[1].2
+    );
+    assert!(
+        add_balloon_at(&mut h, front, [200.0, 20.0], [0.0, 0.0]).is_err(),
+        "nothing there"
+    );
+    // drawn: the item numbers on the sheet
+    let sheet = &dw_project(&mut h).drawings.sheets[0];
+    let notes = sheet.annotations();
+    assert_eq!(
+        notes
+            .prims
+            .iter()
+            .filter(|p| matches!(&p.shape, Shape::Circle { r, .. } if (*r - 5.0).abs() < 1e-9))
+            .count(),
+        3
+    );
+    // move the second pin 20 mm along x: its balloon's point goes with it, the other pin's stays
+    {
+        let p = h.app.project_mut().unwrap();
+        p.assembly.as_mut().unwrap().instances[2].at.t[0] += 20.0;
+    }
+    dw_update(&mut h);
+    let b = balloons_of(&mut h);
+    assert!(
+        (b[1].2[0] - 65.0).abs() < 1e-6,
+        "followed the pin: {:?}",
+        b[1].2
+    );
+    assert!(
+        (b[2].2[0] - 15.0).abs() < 1e-6,
+        "the other pin did not move: {:?}",
+        b[2].2
+    );
+    assert!(b.iter().all(|x| x.3 == DimStatus::Ok));
+    // take the plate out of the assembly: the pins become item 1, the plate's balloon is broken
+    {
+        let p = h.app.project_mut().unwrap();
+        p.assembly.as_mut().unwrap().instances[0].hidden = true;
+    }
+    dw_update(&mut h);
+    let b = balloons_of(&mut h);
+    assert!(matches!(b[0].3, DimStatus::Broken(_)), "{:?}", b[0]);
+    assert_eq!((b[1].0, b[2].0), (1, 1), "numbers follow the list");
+    assert_eq!(boms_of(&mut h)[0].1.len(), 1);
+    let notes = dw_project(&mut h).drawings.sheets[0].annotations();
+    assert!(notes
+        .prims
+        .iter()
+        .any(|p| matches!(&p.shape, Shape::Text { text, .. } if text == "?")));
+}
+
+#[test]
+fn the_balloon_tool_takes_a_click_on_the_component_then_one_for_the_balloon() {
+    let (mut h, front) = rig_app("dw_balloon_tool");
+    h.frame();
+    dw_command(&mut h, "balloon");
+    let v = dw_project(&mut h).drawings.sheets[0]
+        .view(front)
+        .unwrap()
+        .clone();
+    let c = v.cache.as_ref().unwrap().centre;
+    // the second pin's front at (45, 20), in view coordinates (sheet mm about the view origin)
+    let on = [45.0 * v.scale - c[0], 20.0 * v.scale - c[1]];
+    dw_click_view(&mut h, front, on);
+    assert!(
+        matches!(
+            h.app.drawing.tool,
+            Some(kw_app::drawing::Tool::Balloon { first: Some(_) })
+        ),
+        "{:?}",
+        h.app.drawing.tool
+    );
+    let at = h.app.drawing.screen_of([v.pos[0] + 40.0, v.pos[1] + 50.0]);
+    dw_click(&mut h, at);
+    assert!(h.app.drawing.tool.is_none(), "{}", h.app.drawing.status);
+    let b = balloons_of(&mut h);
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].1, "Pin");
+    assert!(
+        (b[0].2[0] - 45.0).abs() < 0.5 && (b[0].2[2] - 20.0).abs() < 0.5,
+        "{:?}",
+        b[0].2
+    );
+    // it is a step of its own
+    h.app.undo_redo(true);
+    assert!(balloons_of(&mut h).is_empty());
+}
+
+#[test]
+fn a_design_without_an_assembly_lists_its_bodies() {
+    let (mut h, _pl) = plate_app("dw_bom_design");
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.drawing.add_bom(project).unwrap();
+    let rows = boms_of(&mut h).pop().unwrap().1;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].count, 1);
+    // 60 x 40 x 10 with two holes of 6 mm
+    let v = 60.0 * 40.0 * 10.0 - 2.0 * std::f64::consts::PI * 9.0 * 10.0;
+    assert!(
+        (rows[0].volume - v).abs() < 1e-3,
+        "{} vs {v}",
+        rows[0].volume
+    );
+    assert_eq!(rows[0].size.map(|x| x.round()), [60.0, 40.0, 10.0]);
+}

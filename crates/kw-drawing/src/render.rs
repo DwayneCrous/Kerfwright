@@ -125,6 +125,17 @@ impl Sheet {
                     None => Scene2d::new(),
                 }
             }
+            AnnotKind::Balloon {
+                view,
+                pos,
+                item,
+                status,
+                world,
+                ..
+            } => match self.view(*view).and_then(|v| Some((v, v.cache.as_ref()?))) {
+                Some((v, c)) => crate::bom::balloon_scene(*pos, *item, status, *world, v, c),
+                None => Scene2d::new(),
+            },
             _ => annot::layout(a),
         }
     }

@@ -38,6 +38,19 @@ fn annot_name(a: &kw_drawing::Annotation, units: kw_drawing::Units) -> (String, 
         K::Datum { letter, .. } => (format!("Datum {letter}"), false),
         K::Surface { value, .. } => (format!("Finish {value}"), false),
         K::Fcf { symbol, .. } => (format!("Frame - {}", symbol.name()), false),
+        K::Bom { rows, .. } => (format!("Parts list ({} parts)", rows.len()), false),
+        K::Balloon {
+            item, part, status, ..
+        } => {
+            let bad = matches!(status, kw_drawing::DimStatus::Broken(_));
+            (
+                format!(
+                    "Balloon {item} - {part}{}",
+                    if bad { "  (broken)" } else { "" }
+                ),
+                bad,
+            )
+        }
     }
 }
 
@@ -409,6 +422,7 @@ impl DrawingWorkspace {
         let mut start_edit = false;
         let mut changed = false;
         let mut delete = false;
+        let mut refresh = false;
         let text_field =
             |ui: &mut egui::Ui, v: &mut String, start: &mut bool, ch: &mut bool, w: f32| {
                 let r = ui.add(egui::TextEdit::singleline(v).desired_width(w));
@@ -551,6 +565,47 @@ impl DrawingWorkspace {
                     text_field(ui, value, &mut start_edit, &mut changed, 100.0);
                 });
             }
+            K::Bom { columns, rows, .. } => {
+                ui.label(egui::RichText::new("PARTS LIST").size(11.5).strong());
+                ui.separator();
+                ui.label(format!(
+                    "{} parts, {} components",
+                    rows.len(),
+                    rows.iter().map(|r| r.count).sum::<u32>()
+                ));
+                for c in kw_drawing::BomColumn::ALL {
+                    let mut on = columns.contains(&c);
+                    if ui.checkbox(&mut on, c.name()).changed() {
+                        if on {
+                            // keep the columns in their usual order
+                            columns.push(c);
+                            columns.sort_by_key(|x| {
+                                kw_drawing::BomColumn::ALL.iter().position(|y| y == x)
+                            });
+                        } else {
+                            columns.retain(|x| *x != c);
+                        }
+                        changed = true;
+                    }
+                }
+                if ui.button("Read from the model again").clicked() {
+                    refresh = true;
+                }
+            }
+            K::Balloon {
+                item, part, status, ..
+            } => {
+                ui.label(egui::RichText::new("BALLOON").size(11.5).strong());
+                ui.separator();
+                match status {
+                    kw_drawing::DimStatus::Ok => {
+                        ui.label(format!("Item {item}: {part}"));
+                    }
+                    kw_drawing::DimStatus::Broken(why) => {
+                        ui.label(egui::RichText::new(why.clone()).color(BAD).size(11.5));
+                    }
+                }
+            }
             K::Fcf {
                 symbol,
                 tol,
@@ -600,6 +655,10 @@ impl DrawingWorkspace {
         }
         if delete {
             let _ = self.delete_annot(project, id);
+            return;
+        }
+        if refresh {
+            self.refresh_bom(project);
             return;
         }
         if start_edit {

@@ -192,7 +192,11 @@ impl DrawingWorkspace {
         paint_scene(&painter, &sheet.annotations(), &to, px, None);
         // dimensions that lost their model in red, the selected annotation in the accent colour
         for a in &sheet.annots {
-            let broken = matches!(&a.kind, AnnotKind::Dimension(d) if matches!(d.status, DimStatus::Broken(_)));
+            let broken = match &a.kind {
+                AnnotKind::Dimension(d) => matches!(d.status, DimStatus::Broken(_)),
+                AnnotKind::Balloon { status, .. } => matches!(status, DimStatus::Broken(_)),
+                _ => false,
+            };
             if broken {
                 paint_scene(&painter, &sheet.annotation_scene(a), &to, px, Some(BAD));
             }
@@ -412,7 +416,9 @@ impl DrawingWorkspace {
                         AnnotKind::Note { pos, .. }
                         | AnnotKind::Datum { pos, .. }
                         | AnnotKind::Surface { pos, .. }
-                        | AnnotKind::Fcf { pos, .. } => {
+                        | AnnotKind::Fcf { pos, .. }
+                        | AnnotKind::Bom { pos, .. }
+                        | AnnotKind::Balloon { pos, .. } => {
                             pos[0] += dx;
                             pos[1] += dy;
                         }

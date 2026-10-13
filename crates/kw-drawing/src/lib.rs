@@ -3,12 +3,14 @@
 //! The crate has no UI and no global state.
 
 pub mod annot;
+pub mod bom;
 pub mod detail;
 pub mod dim;
 pub mod dxf_out;
 pub mod hlr;
 pub mod model;
 pub mod pdf;
+pub mod pick;
 pub mod projection;
 pub mod render;
 pub mod scene;
@@ -18,6 +20,7 @@ pub mod snap;
 pub mod update;
 
 pub use annot::{AnnotKind, Annotation, Gdt};
+pub use bom::{BomColumn, BomRowData};
 pub use dim::{DimKind, DimStatus, Dimension, PointKind, Resolved, Tolerance};
 pub use model::{
     scale_label, Align, DrawingSet, Orientation, Sheet, View, ViewCache, ViewKind, ViewSource,

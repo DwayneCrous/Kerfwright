@@ -122,6 +122,58 @@ impl DrawingWorkspace {
                     done(self, r);
                 }
             }
+            Tool::Balloon { first } => {
+                // the first click picks the component, the second places the balloon
+                let sheet_i = self.sheet;
+                let under = |p: [f64; 2]| {
+                    project.drawings.sheets[sheet_i]
+                        .views
+                        .iter()
+                        .rev()
+                        .find(|v| {
+                            v.cache.as_ref().and_then(|c| c.scene.bounds()).is_some_and(
+                                |(lo, hi)| {
+                                    p[0] >= v.pos[0] + lo[0]
+                                        && p[0] <= v.pos[0] + hi[0]
+                                        && p[1] >= v.pos[1] + lo[1]
+                                        && p[1] <= v.pos[1] + hi[1]
+                                },
+                            )
+                        })
+                        .cloned()
+                };
+                if let (Some((vid, uv)), Some(h)) = (first, hover) {
+                    if let Some(v) = project.drawings.sheets[sheet_i].view(vid) {
+                        if let Some(c) = &v.cache {
+                            let at = [
+                                v.pos[0] + uv[0] * v.scale - c.centre[0],
+                                v.pos[1] + uv[1] * v.scale - c.centre[1],
+                            ];
+                            painter.line_segment([to(at), to(h)], stroke);
+                        }
+                    }
+                }
+                if let Some(c) = click {
+                    match first {
+                        None => {
+                            if let Some(v) = under(c) {
+                                let cc = v.cache.as_ref().map(|x| x.centre).unwrap_or([0.0; 2]);
+                                let uv = [
+                                    (c[0] - v.pos[0] + cc[0]) / v.scale,
+                                    (c[1] - v.pos[1] + cc[1]) / v.scale,
+                                ];
+                                self.tool = Some(Tool::Balloon {
+                                    first: Some((v.id, uv)),
+                                });
+                            }
+                        }
+                        Some((vid, uv)) => {
+                            let r = self.add_balloon(project, vid, uv, c);
+                            done(self, r);
+                        }
+                    }
+                }
+            }
             Tool::Fcf { target } => {
                 if let (Some(t), Some(h)) = (target, hover) {
                     painter.line_segment([to(t), to(h)], stroke);

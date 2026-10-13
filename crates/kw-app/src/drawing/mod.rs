@@ -8,6 +8,7 @@ mod annot_tools;
 mod canvas;
 mod dims;
 mod panels;
+mod parts;
 mod source;
 
 use crate::dialogs::Dialogs;
@@ -79,6 +80,10 @@ pub enum Tool {
     },
     Datum {
         target: Option<[f64; 2]>,
+    },
+    /// A balloon: the component (view, and the point in the view's coordinates) once picked.
+    Balloon {
+        first: Option<(u64, [f64; 2])>,
     },
     Surface,
     Fcf {
@@ -260,6 +265,9 @@ impl DrawingWorkspace {
             "datum" => self.start_annot_tool(project, Tool::Datum { target: None }),
             "surface" => self.start_annot_tool(project, Tool::Surface),
             "fcf" => self.start_annot_tool(project, Tool::Fcf { target: None }),
+            "bom_table" => self.add_bom(project).map(|_| ()),
+            "balloon" => self.start_annot_tool(project, Tool::Balloon { first: None }),
+            "export_bom" => self.export_bom(project, dialogs),
             "section_view" => self.start_tool(project, Tool::Section { first: None }),
             "detail_view" => self.start_tool(project, Tool::Detail { first: None }),
             "delete_view" => self.delete_selected(project),
@@ -512,6 +520,7 @@ impl DrawingWorkspace {
             Tool::Note { leader: false, .. } => "Click where the note goes (Esc cancels)",
             Tool::Note { .. } => "Click the point the leader points at, then where the note goes",
             Tool::Datum { .. } => "Click the feature, then where the datum box goes",
+            Tool::Balloon { .. } => "Click the component, then where the balloon goes",
             Tool::Surface => "Click the surface the symbol belongs to",
             _ => "Click the feature the frame points at, then where the frame goes",
         }
@@ -919,6 +928,7 @@ impl DrawingWorkspace {
         project.mark_extras_dirty();
         // the model may have changed since the views were last made: dimensions follow it
         self.refresh_dimensions(project);
+        self.refresh_bom(project);
     }
 
     /// Check on the background job; start the next batch if views are waiting.
@@ -975,6 +985,24 @@ impl DrawingWorkspace {
             return Ok(());
         };
         std::fs::write(&path, kw_drawing::set_to_pdf(&name, &project.drawings))
+            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        self.status = format!("saved {}", path.display());
+        Ok(())
+    }
+
+    fn export_bom(
+        &mut self,
+        project: &mut Project,
+        dialogs: &mut dyn Dialogs,
+    ) -> Result<(), String> {
+        let csv = self
+            .bom_csv(project)
+            .ok_or("this sheet has no parts list")?;
+        let name = project.name();
+        let Some(path) = dialogs.save_file(&format!("{name}-bom.csv"), "CSV", &["csv"]) else {
+            return Ok(());
+        };
+        std::fs::write(&path, csv)
             .map_err(|e| format!("could not write {}: {e}", path.display()))?;
         self.status = format!("saved {}", path.display());
         Ok(())
@@ -1162,6 +1190,44 @@ impl DrawingWorkspace {
                         }
                     });
                 });
+            });
+            rb::group(ui, "TABLES", |ui| {
+                if rb::button(
+                    ui,
+                    Icon::Bom,
+                    "Parts List",
+                    has_sheet,
+                    false,
+                    "Add the bill of materials to the sheet",
+                )
+                .clicked()
+                {
+                    req.push("bom_table");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Point,
+                    "Balloon",
+                    has_sheet,
+                    matches!(self.tool, Some(Tool::Balloon { .. })),
+                    "Number a component with its item in the parts list",
+                )
+                .clicked()
+                {
+                    req.push("balloon");
+                }
+                if rb::button(
+                    ui,
+                    Icon::Folder,
+                    "BOM CSV",
+                    has_sheet,
+                    false,
+                    "Save the parts list as a CSV file",
+                )
+                .clicked()
+                {
+                    req.push("export_bom");
+                }
             });
             rb::group(ui, "MODIFY", |ui| {
                 if rb::button(
