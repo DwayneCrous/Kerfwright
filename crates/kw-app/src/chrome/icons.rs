@@ -72,6 +72,17 @@ pub enum Icon {
     Zebra,
     Curvature,
     DraftAnalysis,
+    // ----- surfaces
+    Patch,
+    Ruled,
+    SurfTrim,
+    SurfExtend,
+    Match,
+    Stitch,
+    Unstitch,
+    Thicken,
+    OffsetSurface,
+    Continuity,
     // ----- drawings
     Drawing,
     BaseView,

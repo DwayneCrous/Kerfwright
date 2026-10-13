@@ -679,7 +679,7 @@ impl KerfwrightApp {
                     self.design.analysis = Some(AnalysisState::new(AKind::Zebra));
                 }
             }
-            "patch" | "patch-zebra" => {
+            "patch" | "patch-zebra" | "continuity" => {
                 // a rounded box of surface: an open tube capped by a patch tangent to its four walls
                 use kw_expr::Param;
                 use kw_feature::{
@@ -727,10 +727,11 @@ impl KerfwrightApp {
                                         kw_feature::ops::boundary_ref(out, e).ok().map(|edge| {
                                             BoundaryEdge {
                                                 source: tube,
-                                                tangent: matches!(
-                                                    edge,
-                                                    kw_feature::BoundaryRef::Free { .. }
-                                                ),
+                                                tangent: what != "continuity"
+                                                    && matches!(
+                                                        edge,
+                                                        kw_feature::BoundaryRef::Free { .. }
+                                                    ),
                                                 edge,
                                             }
                                         })
@@ -738,9 +739,66 @@ impl KerfwrightApp {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let _ = self.design.model.edit(project, |d| {
+                        let cap = self.design.model.edit(project, |d| {
                             d.add("Cap", FeatureSpec::Patch(PatchSpec { edges }))
                         });
+                        if let (what, Some(cap)) = (what, cap) {
+                            if what == "continuity" {
+                                // the cap is turned to meet the wall y = 0, then everything is stitched
+                                let ev = project.evaluation();
+                                if let (Some(t), Some(c)) = (ev.output(tube), ev.output(cap)) {
+                                    let wall = t.brep().and_then(|rep| {
+                                        t.body().and_then(|b| {
+                                            rep.body_faces(b)
+                                                .into_iter()
+                                                .find(|f| {
+                                                    rep.face_bbox(*f)
+                                                        .is_some_and(|bb| bb.max.y < 1e-3)
+                                                })
+                                                .and_then(|f| t.names.reference_to(rep, f))
+                                        })
+                                    });
+                                    let edge = c.brep().zip(c.body()).and_then(|(rep, b)| {
+                                        rep.free_edges(b)
+                                            .into_iter()
+                                            .find(|e| {
+                                                let ed = &rep.edges[*e];
+                                                [ed.start, ed.end]
+                                                    .iter()
+                                                    .all(|v| rep.vertices[*v].point.y.abs() < 1e-9)
+                                            })
+                                            .and_then(|e| kw_feature::ops::boundary_ref(c, e).ok())
+                                    });
+                                    if let (Some(face), Some(edge)) = (wall, edge) {
+                                        let m = self.design.model.edit(project, |d| {
+                                            d.add(
+                                                "Match",
+                                                FeatureSpec::Match(kw_feature::MatchSpec {
+                                                    edge,
+                                                    neighbour_source: tube,
+                                                    neighbour_face: face,
+                                                    level: kw_feature::MatchLevel::G2,
+                                                    base: None,
+                                                }),
+                                            )
+                                        });
+                                        if let Some(m) = m {
+                                            let _ = self.design.model.edit(project, |d| {
+                                                d.add(
+                                                    "Stitch",
+                                                    FeatureSpec::Stitch(kw_feature::StitchSpec {
+                                                        bodies: vec![tube, m],
+                                                        tolerance: mm(0.01),
+                                                    }),
+                                                )
+                                            });
+                                        }
+                                    }
+                                }
+                                self.design.continuity =
+                                    Some(crate::design::continuity::ContinuityState::default());
+                            }
+                        }
                     }
                 }
                 self.design.ribbon_tab = 1;

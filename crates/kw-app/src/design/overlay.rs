@@ -475,6 +475,8 @@ impl DesignWorkspace {
         self.section_window(ui.ctx(), project);
         self.analysis_window(ui.ctx());
         self.analysis_legend(&painter, rect);
+        self.draw_continuity(&painter);
+        self.continuity_window(ui.ctx());
         self.assembly_window(ui.ctx(), project);
         self.asm_rename_windows(ui.ctx());
         self.asm_joint_window(ui.ctx(), project);

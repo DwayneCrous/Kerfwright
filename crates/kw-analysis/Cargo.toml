@@ -18,3 +18,4 @@ kw-tess.workspace = true
 approx.workspace = true
 kw-model.workspace = true
 kw-boolean.workspace = true
+kw-blend.workspace = true

@@ -377,6 +377,178 @@ pub(super) fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
                 2.0,
             ));
         }
+        Icon::Patch => {
+            // a surface held by four boundary curves
+            poly(
+                &[
+                    (-11.0, -5.0),
+                    (-3.0, -10.0),
+                    (11.0, -6.0),
+                    (12.0, 5.0),
+                    (2.0, 10.0),
+                    (-11.0, 6.0),
+                ],
+                top,
+                st(blue_d),
+            );
+            for (x, y) in [(-11.0, -5.0), (11.0, -6.0), (2.0, 10.0), (-11.0, 6.0)] {
+                dot(x, y, orange);
+            }
+        }
+        Icon::Ruled => {
+            p.add(curve(
+                vec![q(-12.0, -6.0), q(-4.0, -12.0), q(4.0, -10.0), q(12.0, -4.0)],
+                thick(blue_d),
+            ));
+            line(p, q(-12.0, 10.0), q(12.0, 10.0), blue_d, 2.2);
+            for k in 0..6 {
+                let t = k as f32 / 5.0;
+                let top_y = [-6.0, -12.0, -10.0, -4.0];
+                let _ = top_y;
+                line(
+                    p,
+                    q(-12.0 + 24.0 * t, -9.0 + 4.0 * (t - 0.5).abs()),
+                    q(-12.0 + 24.0 * t, 10.0),
+                    grey,
+                    1.0,
+                );
+            }
+        }
+        Icon::SurfTrim => {
+            poly(
+                &[(-12.0, -8.0), (2.0, -8.0), (2.0, 8.0), (-12.0, 8.0)],
+                top,
+                st(blue_d),
+            );
+            p.add(Shape::line(
+                vec![q(2.0, -8.0), q(12.0, -8.0), q(12.0, 8.0), q(2.0, 8.0)],
+                Stroke::new(1.2, grey),
+            ));
+            p.add(Shape::dashed_line(
+                &[q(2.0, -13.0), q(2.0, 13.0)],
+                Stroke::new(1.8, red),
+                3.0,
+                2.0,
+            ));
+        }
+        Icon::SurfExtend => {
+            poly(
+                &[(-12.0, -7.0), (-1.0, -7.0), (-1.0, 7.0), (-12.0, 7.0)],
+                top,
+                st(blue_d),
+            );
+            p.add(Shape::dashed_line(
+                &[q(-1.0, -7.0), q(11.0, -7.0), q(11.0, 7.0), q(-1.0, 7.0)],
+                Stroke::new(1.4, blue_d),
+                3.0,
+                2.0,
+            ));
+            arrow_up(p, q(5.0, 0.0), 0.0, orange);
+        }
+        Icon::Match => {
+            poly(
+                &[(-12.0, 0.0), (-1.0, 0.0), (-1.0, 11.0), (-12.0, 11.0)],
+                top,
+                st(blue_d),
+            );
+            poly(
+                &[(1.0, 0.0), (12.0, -6.0), (12.0, 5.0), (1.0, 11.0)],
+                top,
+                st(blue_d),
+            );
+            p.add(curve(
+                vec![
+                    q(-12.0, -2.0),
+                    q(-5.0, -2.0),
+                    q(0.0, -4.0),
+                    q(5.0, -8.0),
+                    q(12.0, -10.0),
+                ],
+                thick(green),
+            ));
+        }
+        Icon::Stitch => {
+            poly(
+                &[(-12.0, -8.0), (-1.5, -8.0), (-1.5, 8.0), (-12.0, 8.0)],
+                top,
+                st(blue_d),
+            );
+            poly(
+                &[(1.5, -8.0), (12.0, -8.0), (12.0, 8.0), (1.5, 8.0)],
+                top,
+                st(blue_d),
+            );
+            for k in 0..4 {
+                let y = -6.0 + k as f32 * 4.0;
+                line(p, q(-4.0, y), q(4.0, y + 1.0), green, 2.0);
+            }
+        }
+        Icon::Unstitch => {
+            poly(
+                &[(-12.0, -8.0), (-4.5, -8.0), (-4.5, 8.0), (-12.0, 8.0)],
+                top,
+                st(blue_d),
+            );
+            poly(
+                &[(4.5, -8.0), (12.0, -8.0), (12.0, 8.0), (4.5, 8.0)],
+                top,
+                st(blue_d),
+            );
+            p.add(Shape::dashed_line(
+                &[q(0.0, -10.0), q(0.0, 10.0)],
+                Stroke::new(1.6, red),
+                2.5,
+                2.5,
+            ));
+        }
+        Icon::Thicken => {
+            poly(
+                &[(-12.0, -2.0), (0.0, -9.0), (12.0, -2.0), (0.0, 5.0)],
+                top,
+                st(blue_d),
+            );
+            poly(
+                &[(-12.0, -2.0), (0.0, 5.0), (0.0, 10.0), (-12.0, 3.0)],
+                side,
+                st(blue_d),
+            );
+            poly(
+                &[(0.0, 5.0), (12.0, -2.0), (12.0, 3.0), (0.0, 10.0)],
+                side,
+                st(blue_d),
+            );
+        }
+        Icon::OffsetSurface => {
+            p.add(curve(
+                vec![q(-12.0, 3.0), q(-5.0, -3.0), q(5.0, -3.0), q(12.0, 3.0)],
+                thick(blue_d),
+            ));
+            p.add(Shape::dashed_line(
+                &[q(-12.0, 10.0), q(-5.0, 4.0), q(5.0, 4.0), q(12.0, 10.0)],
+                Stroke::new(1.6, blue),
+                3.0,
+                2.0,
+            ));
+            arrow_up(p, q(0.0, 0.0), 0.0, orange);
+        }
+        Icon::Continuity => {
+            // an edge in the colours of the classes
+            let cols = [red, orange, blue, green];
+            for (k, col) in cols.iter().enumerate() {
+                let a0 = -2.4 + k as f32 * 0.55;
+                let a1 = a0 + 0.55;
+                p.add(curve(
+                    (0..=6)
+                        .map(|i| {
+                            let a = a0 + (a1 - a0) * i as f32 / 6.0;
+                            q(13.0 * a.sin() * 1.1, 8.0 - 14.0 * a.cos().abs())
+                        })
+                        .collect(),
+                    Stroke::new(3.2, *col),
+                ));
+            }
+            line(p, q(-12.0, 11.0), q(12.0, 11.0), grey, 1.2);
+        }
         Icon::Drawing => {
             p.rect_stroke(
                 Rect::from_center_size(c, vec2(22.0 * s, 28.0 * s)),

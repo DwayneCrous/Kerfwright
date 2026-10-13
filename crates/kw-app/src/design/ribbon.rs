@@ -191,7 +191,7 @@ impl DesignWorkspace {
         .enabled_if(cx.sketches >= 2, "it needs at least two profile sketches");
         let patch = it(
             "surf_patch",
-            Icon::Plane,
+            Icon::Patch,
             "Patch",
             "Fill a hole: pick the edges around it, optionally tangent to the surfaces they belong to",
         )
@@ -199,7 +199,7 @@ impl DesignWorkspace {
         .enabled_if(cx.has_body, "there are no edges to fill between yet");
         let ruled = it(
             "surf_ruled",
-            Icon::Loft,
+            Icon::Ruled,
             "Ruled Surface",
             "Straight lines between two picked edges",
         )
@@ -226,7 +226,7 @@ impl DesignWorkspace {
         let need_surface = "there is no surface yet";
         let stitch = it(
             "surf_stitch",
-            Icon::Combine,
+            Icon::Stitch,
             "Stitch",
             "Join surfaces along edges that lie on one another; a closed group becomes a solid",
         )
@@ -234,7 +234,7 @@ impl DesignWorkspace {
         .enabled_if(cx.surfaces >= 1, need_surface);
         let unstitch = it(
             "surf_unstitch",
-            Icon::Split,
+            Icon::Unstitch,
             "Unstitch",
             "Split a body into its faces",
         )
@@ -242,7 +242,7 @@ impl DesignWorkspace {
         .enabled_if(cx.has_body, need_body);
         let thicken = it(
             "surf_thicken",
-            Icon::Shell,
+            Icon::Thicken,
             "Thicken",
             "Give an open, smooth surface thickness: a solid with walls along its open edges",
         )
@@ -250,7 +250,7 @@ impl DesignWorkspace {
         .enabled_if(cx.surfaces >= 1, need_surface);
         let offset = it(
             "surf_offset",
-            Icon::OffsetBody,
+            Icon::OffsetSurface,
             "Offset Surface",
             "Move a smooth surface along its normal",
         )
@@ -258,7 +258,7 @@ impl DesignWorkspace {
         .enabled_if(cx.surfaces >= 1, need_surface);
         let trim = it(
             "surf_trim",
-            Icon::Split,
+            Icon::SurfTrim,
             "Trim",
             "Cut a surface with a plane or another surface and keep one side",
         )
@@ -266,7 +266,7 @@ impl DesignWorkspace {
         .enabled_if(cx.surfaces >= 1, need_surface);
         let extend = it(
             "surf_extend",
-            Icon::Offset,
+            Icon::SurfExtend,
             "Extend",
             "Carry a surface on past an open edge",
         )
@@ -274,7 +274,7 @@ impl DesignWorkspace {
         .enabled_if(cx.surfaces >= 1, need_surface);
         let matching = it(
             "surf_match",
-            Icon::Mirror,
+            Icon::Match,
             "Match",
             "Reshape a patch near an edge to meet a neighbouring face tangentially (G1) or with its curvature (G2)",
         )
@@ -1605,6 +1605,10 @@ impl DesignWorkspace {
             }
             "zebra" => {
                 self.toggle_analysis(super::analysis::AKind::Zebra);
+                return;
+            }
+            "continuity" => {
+                self.toggle_continuity();
                 return;
             }
             "curvature" => {

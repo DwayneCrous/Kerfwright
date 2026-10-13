@@ -7968,22 +7968,10 @@ fn the_trim_and_extend_tools_cut_and_carry_a_surface_on() {
     assert!(grown > area + 5.0 * 20.0 - 1e-3, "{grown} from {area}");
 }
 
-#[test]
-fn the_match_tool_reshapes_a_cap_to_meet_a_wall() {
-    let (mut h, _d) = design_harness("match_tool");
-    open_tube(&mut h);
-    // cap the top
-    h.frame();
-    let rim = display_rim(&mut h, 10.0);
-    run_command(&mut h, "surf_patch");
-    for e in rim {
-        click(&mut h, Some(Pick::Edge(e)));
-        h.frame();
-    }
-    commit(&mut h);
-    h.frame();
+/// With a tube and its cap in the document: match the cap to the wall y = 0 along the edge they share.
+fn match_cap_to_wall(h: &mut Harness) {
     // in the merged view: the cap's edge on the wall y = 0, and the tube's wall face there
-    let heads = proj(&mut h).document().heads();
+    let heads = proj(h).document().heads();
     assert_eq!(heads.len(), 2);
     let (edge, face) = {
         let bodies = h.app.design.bodies.as_ref().expect("bodies");
@@ -8015,12 +8003,29 @@ fn the_match_tool_reshapes_a_cap_to_meet_a_wall() {
             .expect("the wall");
         (edge, face)
     };
-    run_command(&mut h, "surf_match");
-    click(&mut h, Some(Pick::Edge(edge)));
+    run_command(h, "surf_match");
+    click(h, Some(Pick::Edge(edge)));
     h.frame();
-    click(&mut h, Some(Pick::Face(face)));
+    click(h, Some(Pick::Face(face)));
     h.frame();
+    commit(h);
+}
+
+#[test]
+fn the_match_tool_reshapes_a_cap_to_meet_a_wall() {
+    let (mut h, _d) = design_harness("match_tool");
+    open_tube(&mut h);
+    // cap the top
+    h.frame();
+    let rim = display_rim(&mut h, 10.0);
+    run_command(&mut h, "surf_patch");
+    for e in rim {
+        click(&mut h, Some(Pick::Edge(e)));
+        h.frame();
+    }
     commit(&mut h);
+    h.frame();
+    match_cap_to_wall(&mut h);
     // the cap is the model's last body, reshaped: its normal at the middle of that edge lies along y
     let ev = proj(&mut h).evaluation();
     let (_, out) = ev.final_body().unwrap();
@@ -8031,4 +8036,164 @@ fn the_match_tool_reshapes_a_cap_to_meet_a_wall() {
     assert!(uv.distance < 1e-6, "{}", uv.distance);
     let n = kw_nurbs::Surface::normal_at(&s, uv.u, uv.v);
     assert!(n.y.abs() > 0.999, "{n:?}");
+}
+
+#[test]
+fn every_surface_tab_command_opens_its_dialog_or_toggles_its_display() {
+    use kw_app::design::analysis::AKind;
+    let (mut h, _d) = design_harness("surface_commands");
+    open_tube(&mut h);
+    // a second sketch so that Sweep and Loft can be set up
+    sketch_only(
+        &mut h,
+        geom::origin_spec(2),
+        geom::origin_frame(2),
+        square((0.0, 0.0), 3.0),
+    );
+    h.app.design.ribbon_tab = 1;
+    h.frame();
+    h.frame();
+    let dialogs = [
+        ("surf_extrude", "EXTRUDE"),
+        ("surf_revolve", "REVOLVE"),
+        ("surf_sweep", "SWEEP"),
+        ("surf_loft", "LOFT"),
+        ("surf_patch", "PATCH"),
+        ("surf_ruled", "RULED"),
+        ("surf_trim", "TRIM"),
+        ("surf_extend", "EXTEND"),
+        ("surf_match", "MATCH"),
+        ("surf_stitch", "STITCH"),
+        ("surf_unstitch", "UNSTITCH"),
+        ("surf_thicken", "THICKEN"),
+        ("surf_offset", "OFFSET SURFACE"),
+    ];
+    for (id, title) in dialogs {
+        run_command(&mut h, id);
+        let d = h
+            .app
+            .design
+            .dialog
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} opens a dialog"));
+        assert!(
+            d.tool.title().starts_with(title),
+            "{id}: {}",
+            d.tool.title()
+        );
+        // the dialog draws, whatever its fields hold
+        h.frame();
+        h.app.design.close_dialog();
+    }
+    // the inspect buttons switch their display on and off
+    run_command(&mut h, "zebra");
+    assert_eq!(
+        h.app.design.analysis.as_ref().map(|a| a.kind),
+        Some(AKind::Zebra)
+    );
+    run_command(&mut h, "zebra");
+    assert!(h.app.design.analysis.is_none());
+    run_command(&mut h, "curvature");
+    assert!(h
+        .app
+        .design
+        .analysis
+        .as_ref()
+        .is_some_and(|a| a.kind.is_curvature()));
+    run_command(&mut h, "curvature");
+    run_command(&mut h, "draft_analysis");
+    assert_eq!(
+        h.app.design.analysis.as_ref().map(|a| a.kind),
+        Some(AKind::Draft)
+    );
+    run_command(&mut h, "draft_analysis");
+    assert!(h.app.design.continuity.is_none());
+    run_command(&mut h, "continuity");
+    assert!(h.app.design.continuity.is_some());
+    h.frame();
+    run_command(&mut h, "continuity");
+    assert!(h.app.design.continuity.is_none());
+}
+
+#[test]
+fn edge_continuity_colours_the_creases_and_then_the_matched_edge() {
+    use kw_analysis::ContClass;
+    let (mut h, _d) = design_harness("continuity_display");
+    open_tube(&mut h);
+    h.frame();
+    let rim = display_rim(&mut h, 10.0);
+    run_command(&mut h, "surf_patch");
+    for e in rim {
+        click(&mut h, Some(Pick::Edge(e)));
+        h.frame();
+    }
+    commit(&mut h);
+    run_command(&mut h, "surf_stitch");
+    commit(&mut h);
+    assert_eq!(proj(&mut h).document().heads().len(), 1);
+    run_command(&mut h, "continuity");
+    h.frame();
+    h.frame();
+    let classes = |h: &mut Harness| -> Vec<ContClass> {
+        h.app
+            .design
+            .continuity_edges()
+            .iter()
+            .map(|c| c.class)
+            .collect()
+    };
+    let before = classes(&mut h);
+    // the four rim edges are creases, the four vertical edges between the walls too; the bottom is open
+    assert_eq!(
+        before.iter().filter(|c| **c == ContClass::G0).count(),
+        8,
+        "{before:?}"
+    );
+    assert_eq!(before.iter().filter(|c| **c == ContClass::Open).count(), 4);
+    // a wider tolerance makes nothing tangent here, and changing it recomputes
+    if let Some(s) = h.app.design.continuity.as_mut() {
+        s.angle_deg = 5.0;
+    }
+    h.frame();
+    assert_eq!(classes(&mut h).len(), before.len());
+}
+
+#[test]
+fn a_matched_edge_shows_as_tangent_in_the_continuity_display() {
+    use kw_analysis::ContClass;
+    let (mut h, _d) = design_harness("continuity_matched");
+    open_tube(&mut h);
+    h.frame();
+    let rim = display_rim(&mut h, 10.0);
+    run_command(&mut h, "surf_patch");
+    for e in rim {
+        click(&mut h, Some(Pick::Edge(e)));
+        h.frame();
+    }
+    commit(&mut h);
+    h.frame();
+    match_cap_to_wall(&mut h);
+    run_command(&mut h, "surf_stitch");
+    commit(&mut h);
+    run_command(&mut h, "continuity");
+    h.frame();
+    let classes: Vec<ContClass> = h
+        .app
+        .design
+        .continuity_edges()
+        .iter()
+        .map(|c| c.class)
+        .collect();
+    // the edge shared with the wall is tangent now; the other three rim edges and the four vertical
+    // edges are still creases
+    assert_eq!(
+        classes.iter().filter(|c| **c == ContClass::G1).count(),
+        1,
+        "{classes:?}"
+    );
+    assert_eq!(
+        classes.iter().filter(|c| **c == ContClass::G0).count(),
+        7,
+        "{classes:?}"
+    );
 }

@@ -20,6 +20,7 @@ pub mod intersect;
 pub mod knots;
 pub mod pcurve;
 pub mod proj;
+pub mod shape;
 pub mod surface;
 
 pub use curve::{CurveProjection, NurbsCurve, NurbsError};
@@ -29,4 +30,5 @@ pub use geom::{
     Torus,
 };
 pub use knots::{KnotError, KnotVector};
+pub use shape::normal_curvature;
 pub use surface::{ExtendDir, NurbsSurface, SurfaceProjection};

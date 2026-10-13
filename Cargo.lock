@@ -2098,6 +2098,7 @@ name = "kw-analysis"
 version = "0.0.1"
 dependencies = [
  "approx",
+ "kw-blend",
  "kw-boolean",
  "kw-brep",
  "kw-math",

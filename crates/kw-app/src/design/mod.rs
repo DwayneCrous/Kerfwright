@@ -12,6 +12,7 @@ pub mod asm_tree;
 pub mod assembly;
 pub mod bodyprops;
 pub mod browser;
+pub mod continuity;
 pub mod form;
 pub mod geom;
 pub mod measure;
@@ -171,6 +172,9 @@ pub struct DesignWorkspace {
     pub section: Option<section::SectionState>,
     /// The analysis overlay (zebra, curvature, draft), if one is showing.
     pub analysis: Option<analysis::AnalysisState>,
+    /// The edge continuity display, and the edges it last worked out.
+    pub continuity: Option<continuity::ContinuityState>,
+    pub continuity_cache: Option<continuity::ContinuityCache>,
     /// Index into `measure::MATERIALS`.
     pub material: usize,
     /// The bodies drawn in the view (refreshed every frame), and the roots of the bodies hidden from it.
@@ -220,6 +224,8 @@ impl Default for DesignWorkspace {
             asm: Default::default(),
             section: None,
             analysis: None,
+            continuity: None,
+            continuity_cache: None,
             material: 2,
             bodies: None,
             hidden_bodies: HashSet::new(),
