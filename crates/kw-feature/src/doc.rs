@@ -204,6 +204,9 @@ impl Document {
                     used.insert(b);
                 }
             }
+            if let FeatureSpec::Stitch(st) = &f.spec {
+                used.extend(st.bodies.iter().copied());
+            }
             if let FeatureSpec::Combine(c) = &f.spec {
                 used.insert(c.target);
                 if !c.keep_tool {

@@ -16,9 +16,9 @@ use kw_brep::{BRep, BodyId, BuildResult, CopyOptions, EdgeId, EntityRef, FaceId,
 use kw_expr::{Dim, Param, Quantity};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
 use kw_model::{
-    draft_faces, extrude, extrude_sheet, loft, loft_sheet, offset_body, patch_sheet, revolve_sheet,
-    ruled_sheet, shell, sweep, sweep_sheet, Chain, PatchEdge, Profile, ProfileEdge, ProfileLoop,
-    SweepOptions,
+    draft_faces, extrude, extrude_sheet, loft, loft_sheet, offset_body, offset_sheet, patch_sheet,
+    revolve_sheet, ruled_sheet, shell, stitch, sweep, sweep_sheet, thicken, unstitch, Chain,
+    PatchEdge, Profile, ProfileEdge, ProfileLoop, SweepOptions, ThickenSide,
 };
 use kw_nurbs::Curve3;
 use kw_nurbs::CurveGeom;
@@ -1050,6 +1050,70 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             sess.adopt(r);
             finish_with_op(id, inp, sess, w.op, notes)
         }
+        FeatureSpec::Stitch(st) => {
+            if st.bodies.is_empty() {
+                return Err(EvalError::Reference("pick the surfaces to stitch".into()));
+            }
+            let tol = length(&st.tolerance)?;
+            let mut sess = Session::new(id, None);
+            let mut copies = Vec::new();
+            for b in &st.bodies {
+                let src = inp.get(*b)?;
+                let (Some(rep), Some(body)) = (src.brep(), src.body()) else {
+                    return Err(EvalError::Dependency(format!("{b} has no body")));
+                };
+                if !src.is_sheet() {
+                    return Err(EvalError::Dependency(format!(
+                        "{b} is a solid: only surfaces are stitched"
+                    )));
+                }
+                let (nb, map) = sess.rep.copy_body_from(rep, body, &CopyOptions::default());
+                for (n, e) in &src.names.by_name {
+                    if let EntityRef::Face(f) = e {
+                        if let Some(m) = map.faces.get(f) {
+                            sess.names.insert(EntityRef::Face(*m), n.clone());
+                        }
+                    }
+                }
+                copies.push(nb);
+            }
+            let r = stitch(&mut sess.rep, &copies, tol).map_err(|e| kernel("stitch", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
+        FeatureSpec::Unstitch(_) => {
+            let b = any_body_of(inp, "unstitch", true)?;
+            let mut sess = Session::new(id, Some(b));
+            let body = sess.input_body("unstitch")?;
+            let r = unstitch(&mut sess.rep, body).map_err(|e| kernel("unstitch", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
+        FeatureSpec::Thicken(t) => {
+            let b = any_body_of(inp, "thicken", false)?;
+            let thickness = length(&t.thickness)?;
+            let side = match t.side {
+                ThickenDir::Normal => ThickenSide::Normal,
+                ThickenDir::Reverse => ThickenSide::Reverse,
+                ThickenDir::Both => ThickenSide::Both,
+            };
+            let mut sess = Session::new(id, Some(b));
+            let body = sess.input_body("thicken")?;
+            let r =
+                thicken(&mut sess.rep, body, thickness, side).map_err(|e| kernel("thicken", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
+        FeatureSpec::OffsetSurface(o) => {
+            let b = any_body_of(inp, "offset surface", false)?;
+            let d = length(&o.distance)?;
+            let mut sess = Session::new(id, Some(b));
+            let body = sess.input_body("offset surface")?;
+            let r =
+                offset_sheet(&mut sess.rep, body, d).map_err(|e| kernel("offset surface", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
         FeatureSpec::Patch(p) => {
             if p.edges.len() < 3 {
                 return Err(EvalError::Reference(
@@ -1646,6 +1710,28 @@ pub fn sheet_strip(m: &SheetMetalSpec) -> Result<kw_sheet::SheetStrip, EvalError
 
 fn length_of(p: &Param) -> Result<f64, EvalError> {
     length(p)
+}
+
+/// The body before this feature, a surface or (with `solid_too`) a solid as well.
+fn any_body_of<'a>(
+    inp: &Inputs<'a>,
+    what: &str,
+    solid_too: bool,
+) -> Result<&'a Arc<EvalOutput>, EvalError> {
+    let b = inp
+        .body_out()
+        .ok_or_else(|| EvalError::Dependency(format!("{what} needs a body before it")))?;
+    if b.brep().is_none() {
+        return Err(EvalError::Dependency(format!(
+            "{what}: the input has no body"
+        )));
+    }
+    if !b.is_sheet() && !solid_too {
+        return Err(EvalError::Dependency(format!(
+            "{what} needs a surface, but the body before it is a solid"
+        )));
+    }
+    Ok(b)
 }
 
 fn body_of<'a>(inp: &Inputs<'a>, what: &str) -> Result<&'a Arc<EvalOutput>, EvalError> {

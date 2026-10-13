@@ -1,4 +1,4 @@
-use crate::curve::{averaged_knots, chord_length_params, NurbsCurve, NurbsError};
+use crate::curve::{averaged_knots, chord_length_params, greville, NurbsCurve, NurbsError};
 use crate::hom::{binom, insert_knot_once, Hom};
 use crate::knots::KnotVector;
 use nalgebra::{DMatrix, Point3, Vector3};
@@ -61,6 +61,16 @@ impl NurbsSurface {
         du: usize,
         dv: usize,
     ) -> Result<NurbsSurface, NurbsError> {
+        Self::interpolate_with_params(grid, du, dv).map(|(s, _, _)| s)
+    }
+
+    /// [`interpolate`](Self::interpolate), also returning the parameters `u_i` and `v_j` at which the
+    /// surface passes through the grid points.
+    pub fn interpolate_with_params(
+        grid: &[Vec<Point3<f64>>],
+        du: usize,
+        dv: usize,
+    ) -> Result<(NurbsSurface, Vec<f64>, Vec<f64>), NurbsError> {
         let (nu, nv) = Self::grid_size(grid)?;
         let mut pu = vec![0.0; nu];
         for j in 0..nv {
@@ -75,7 +85,54 @@ impl NurbsSurface {
                 *a += b / nu as f64;
             }
         }
-        Self::interpolate_at(grid, &pu, &pv, du, dv)
+        let s = Self::interpolate_at(grid, &pu, &pv, du, dv)?;
+        Ok((s, pu, pv))
+    }
+
+    /// The surface on the clamped knot vectors that passes through `f` at the Greville abscissae in both
+    /// directions (collocation): a fit that keeps the parameters of `f`, with breaks where the knot
+    /// vectors have them.
+    pub fn collocate(
+        ku: KnotVector,
+        kv: KnotVector,
+        f: &dyn Fn(f64, f64) -> Point3<f64>,
+    ) -> Result<NurbsSurface, NurbsError> {
+        let (gu, gv) = (greville(&ku), greville(&kv));
+        let grid: Vec<Vec<Point3<f64>>> = gu
+            .iter()
+            .map(|u| gv.iter().map(|v| f(*u, *v)).collect())
+            .collect();
+        let (du, dv) = (ku.degree(), kv.degree());
+        let matrix = |k: &KnotVector, g: &[f64], d: usize| {
+            let n = g.len();
+            let mut a = DMatrix::<f64>::zeros(n, n);
+            for (r, &t) in g.iter().enumerate() {
+                let span = k.find_span(t);
+                for (j, b) in k.basis_funs(span, t).iter().enumerate() {
+                    a[(r, span - d + j)] = *b;
+                }
+            }
+            a.lu()
+        };
+        let (nu, nv) = (gu.len(), gv.len());
+        let (lu_u, lu_v) = (matrix(&ku, &gu, du), matrix(&kv, &gv, dv));
+        let mut mid = vec![Point3::origin(); nu * nv];
+        for j in 0..nv {
+            let rhs = DMatrix::from_fn(nu, 3, |i, c| grid[i][j][c]);
+            let sol = lu_u.solve(&rhs).ok_or(NurbsError::SingularSystem)?;
+            for i in 0..nu {
+                mid[i * nv + j] = Point3::new(sol[(i, 0)], sol[(i, 1)], sol[(i, 2)]);
+            }
+        }
+        let mut pts = vec![Point3::origin(); nu * nv];
+        for i in 0..nu {
+            let rhs = DMatrix::from_fn(nv, 3, |j, c| mid[i * nv + j][c]);
+            let sol = lu_v.solve(&rhs).ok_or(NurbsError::SingularSystem)?;
+            for j in 0..nv {
+                pts[i * nv + j] = Point3::new(sol[(j, 0)], sol[(j, 1)], sol[(j, 2)]);
+            }
+        }
+        NurbsSurface::new(ku, kv, pts, vec![1.0; nu * nv])
     }
 
     /// Like [`interpolate`](Self::interpolate) but with evenly spaced parameters, so that a boundary

@@ -325,6 +325,32 @@ impl NurbsCurve {
         NurbsCurve::new_polynomial(kv, ctrl)
     }
 
+    /// The curve on the clamped `knots` that passes through `f` at the Greville abscissae of the
+    /// knots (collocation): a fit that keeps the parameters of `f`, with a break wherever the knot
+    /// vector has one.
+    pub fn collocate(
+        knots: KnotVector,
+        f: &dyn Fn(f64) -> Point3<f64>,
+    ) -> Result<NurbsCurve, NurbsError> {
+        let p = knots.degree();
+        let n = knots.num_ctrl();
+        let g = greville(&knots);
+        let mut a = DMatrix::<f64>::zeros(n, n);
+        for (r, &t) in g.iter().enumerate() {
+            let span = knots.find_span(t);
+            for (j, b) in knots.basis_funs(span, t).iter().enumerate() {
+                a[(r, span - p + j)] = *b;
+            }
+        }
+        let pts: Vec<Point3<f64>> = g.iter().map(|t| f(*t)).collect();
+        let rhs = DMatrix::from_fn(n, 3, |i, c| pts[i][c]);
+        let sol = a.lu().solve(&rhs).ok_or(NurbsError::SingularSystem)?;
+        let ctrl = (0..n)
+            .map(|i| Point3::new(sol[(i, 0)], sol[(i, 1)], sol[(i, 2)]))
+            .collect();
+        NurbsCurve::new_polynomial(knots, ctrl)
+    }
+
     /// Least-squares fit with `num_ctrl` control points; end points are
     /// interpolated exactly (Piegl & Tiller A9.7, no end derivatives).
     pub fn approximate(
@@ -490,6 +516,15 @@ fn elevate_bezier_once(b: &[Hom]) -> Vec<Hom> {
         q.push(prev + cur);
     }
     q
+}
+
+/// The Greville abscissae of a knot vector: the average of `degree` consecutive knots.
+pub(crate) fn greville(k: &KnotVector) -> Vec<f64> {
+    let p = k.degree();
+    let ks = k.as_slice();
+    (0..k.num_ctrl())
+        .map(|i| ks[i + 1..=i + p].iter().sum::<f64>() / p as f64)
+        .collect()
 }
 
 pub(crate) fn chord_length_params(pts: &[Point3<f64>]) -> Vec<f64> {

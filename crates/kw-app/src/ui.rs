@@ -610,7 +610,7 @@ impl KerfwrightApp {
                     _ => AKind::Draft,
                 }));
             }
-            "surface" | "surface-zebra" => {
+            "surface" | "surface-zebra" | "thicken" => {
                 // a vase: a smooth surface through three rings, its open edges marked
                 use kw_expr::Param;
                 use kw_feature::{BodyOp, FeatureSpec, LoftSpec, PlaneSpec};
@@ -637,6 +637,27 @@ impl KerfwrightApp {
                         }),
                     )
                 });
+                if what == "thicken" {
+                    // the vase gets a wall: a solid, cut open to show it
+                    use kw_expr::Param;
+                    use kw_feature::{FeatureSpec, ThickenDir, ThickenSpec};
+                    let _ = self.design.model.edit(project, |d| {
+                        d.add(
+                            "Wall",
+                            FeatureSpec::Thicken(ThickenSpec {
+                                thickness: Param::length(1.5),
+                                side: ThickenDir::Both,
+                                base: None,
+                            }),
+                        )
+                    });
+                    self.design.section = Some(crate::design::section::SectionState {
+                        which: 2,
+                        datum: None,
+                        offset: 0.0,
+                        flip: true,
+                    });
+                }
                 self.design.ribbon_tab = 1;
                 if what == "surface-zebra" {
                     use crate::design::analysis::{AKind, AnalysisState};

@@ -183,6 +183,44 @@ pub struct SweepSpec {
     pub guide: Option<FeatureId>,
 }
 
+/// Which way a thickened surface grows from the direction its faces look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThickenDir {
+    Normal,
+    Reverse,
+    Both,
+}
+
+/// Join surface bodies along coincident edges; a group that closes becomes a solid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StitchSpec {
+    /// The features whose bodies are joined (they are used up).
+    pub bodies: Vec<FeatureId>,
+    /// Open edges closer than this are joined.
+    pub tolerance: Param,
+}
+
+/// Split a body into its faces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnstitchSpec {
+    pub base: Option<FeatureId>,
+}
+
+/// Give a surface thickness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThickenSpec {
+    pub thickness: Param,
+    pub side: ThickenDir,
+    pub base: Option<FeatureId>,
+}
+
+/// Move a surface along its normal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OffsetSurfaceSpec {
+    pub distance: Param,
+    pub base: Option<FeatureId>,
+}
+
 /// An edge picked as the boundary of a surface: one between two named faces, or an open edge of a
 /// surface, named by its face and its place among that face's open edges.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -542,6 +580,10 @@ pub enum FeatureSpec {
     Sweep(SweepSpec),
     Patch(PatchSpec),
     Ruled(RuledSpec),
+    Stitch(StitchSpec),
+    Unstitch(UnstitchSpec),
+    Thicken(ThickenSpec),
+    OffsetSurface(OffsetSurfaceSpec),
     Fillet(FilletSpec),
     Chamfer(ChamferSpec),
     VariableFillet(VariableFilletSpec),
@@ -596,6 +638,10 @@ impl FeatureSpec {
             FeatureSpec::Sweep(_) => "Sweep",
             FeatureSpec::Patch(_) => "Patch",
             FeatureSpec::Ruled(_) => "Ruled",
+            FeatureSpec::Stitch(_) => "Stitch",
+            FeatureSpec::Unstitch(_) => "Unstitch",
+            FeatureSpec::Thicken(_) => "Thicken",
+            FeatureSpec::OffsetSurface(_) => "OffsetSurface",
             FeatureSpec::Fillet(_) => "Fillet",
             FeatureSpec::Chamfer(_) => "Chamfer",
             FeatureSpec::VariableFillet(_) => "VariableFillet",
@@ -718,7 +764,8 @@ impl FeatureSpec {
             FeatureSpec::Loft(_)
             | FeatureSpec::Combine(_)
             | FeatureSpec::Patch(_)
-            | FeatureSpec::Ruled(_) => {}
+            | FeatureSpec::Ruled(_)
+            | FeatureSpec::Unstitch(_) => {}
             FeatureSpec::Fillet(x) => f(&mut x.radius),
             FeatureSpec::Chamfer(x) => {
                 f(&mut x.d1);
@@ -737,6 +784,9 @@ impl FeatureSpec {
             }
             FeatureSpec::Thread(x) => f(&mut x.length),
             FeatureSpec::Offset(x) => f(&mut x.distance),
+            FeatureSpec::Thicken(x) => f(&mut x.thickness),
+            FeatureSpec::OffsetSurface(x) => f(&mut x.distance),
+            FeatureSpec::Stitch(x) => f(&mut x.tolerance),
             FeatureSpec::Hole(h) => {
                 plane_params(&mut h.plane, &mut |p| f(p));
                 for pt in &mut h.points {
@@ -902,6 +952,9 @@ impl FeatureSpec {
             FeatureSpec::Draft(x) => x.base,
             FeatureSpec::Thread(x) => x.base,
             FeatureSpec::Offset(x) => x.base,
+            FeatureSpec::Unstitch(x) => x.base,
+            FeatureSpec::Thicken(x) => x.base,
+            FeatureSpec::OffsetSurface(x) => x.base,
             FeatureSpec::Hole(x) => x.base,
             FeatureSpec::LinearPattern(x) => x.base,
             FeatureSpec::CircularPattern(x) => x.base,
@@ -930,6 +983,9 @@ impl FeatureSpec {
             FeatureSpec::Draft(x) => x.base = b,
             FeatureSpec::Thread(x) => x.base = b,
             FeatureSpec::Offset(x) => x.base = b,
+            FeatureSpec::Unstitch(x) => x.base = b,
+            FeatureSpec::Thicken(x) => x.base = b,
+            FeatureSpec::OffsetSurface(x) => x.base = b,
             FeatureSpec::Hole(x) => x.base = b,
             FeatureSpec::LinearPattern(x) => x.base = b,
             FeatureSpec::CircularPattern(x) => x.base = b,
@@ -957,6 +1013,7 @@ impl FeatureSpec {
             | FeatureSpec::Combine(_)
             | FeatureSpec::Patch(_)
             | FeatureSpec::Ruled(_)
+            | FeatureSpec::Stitch(_)
             | FeatureSpec::SheetMetal(_)
             | FeatureSpec::Import(_)
             | FeatureSpec::Subd(_) => false,
@@ -1059,11 +1116,15 @@ impl FeatureSpec {
             FeatureSpec::Shell(x) => refs(&x.open, &mut v),
             FeatureSpec::Draft(x) => refs(&x.faces, &mut v),
             FeatureSpec::Thread(x) => refs(std::slice::from_ref(&x.face), &mut v),
-            FeatureSpec::Offset(_) => {}
+            FeatureSpec::Offset(_)
+            | FeatureSpec::Unstitch(_)
+            | FeatureSpec::Thicken(_)
+            | FeatureSpec::OffsetSurface(_) => {}
             FeatureSpec::Combine(x) => {
                 v.push(x.target);
                 v.push(x.tool);
             }
+            FeatureSpec::Stitch(x) => v.extend(x.bodies.iter().copied()),
             FeatureSpec::Patch(x) => v.extend(x.edges.iter().map(|e| e.source)),
             FeatureSpec::Ruled(x) => {
                 v.push(x.a.source);

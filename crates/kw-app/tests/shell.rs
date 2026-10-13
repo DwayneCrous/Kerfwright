@@ -7606,6 +7606,8 @@ fn the_surface_dialogs_build_surface_specs_and_keep_the_operation_new() {
         base: None,
         picks: &[],
         boundary: &[],
+        picked_bodies: &[],
+        surfaces: &[],
         hole_plane: None,
     };
     // the operation is forced to New whatever the dialog held
@@ -7788,4 +7790,141 @@ fn a_patch_with_too_few_edges_says_what_to_do() {
         .and_then(|p| p.error.clone())
         .unwrap_or_default();
     assert!(err.contains("surround the hole"), "{err:?}");
+}
+
+/// The open edges at height `z` in what the viewport shows (all bodies, merged if there are several).
+fn display_rim(h: &mut Harness, z: f64) -> Vec<kw_brep::EdgeId> {
+    let rep = h.app.design.bodies.as_ref().expect("bodies").brep.clone();
+    rep.edges
+        .keys()
+        .filter(|e| rep.radial_ring(*e).len() == 1)
+        .filter(|e| {
+            let ed = &rep.edges[*e];
+            (rep.vertices[ed.start].point.z - z).abs() < 1e-9
+                && (rep.vertices[ed.end].point.z - z).abs() < 1e-9
+        })
+        .collect()
+}
+
+#[test]
+fn stitch_closes_a_tube_and_two_caps_into_a_solid_and_thicken_and_offset_work() {
+    let (mut h, _d) = design_harness("stitch_tool");
+    open_tube(&mut h);
+    // cap the bottom, then the top: with two bodies the viewport shows both in one merged B-rep
+    for z in [0.0, 10.0] {
+        h.frame();
+        let rim = display_rim(&mut h, z);
+        assert_eq!(rim.len(), 4, "rim at {z}");
+        run_command(&mut h, "surf_patch");
+        for e in rim {
+            click(&mut h, Some(Pick::Edge(e)));
+            h.frame();
+        }
+        commit(&mut h);
+    }
+    assert_eq!(proj(&mut h).document().heads().len(), 3);
+    // Stitch with nothing picked takes every surface
+    run_command(&mut h, "surf_stitch");
+    assert!(matches!(
+        h.app.design.dialog.as_ref().map(|d| &d.tool),
+        Some(Tool::Stitch { .. })
+    ));
+    commit(&mut h);
+    assert_eq!(proj(&mut h).document().heads().len(), 1);
+    let v = vol(&mut h);
+    assert!((v - 6000.0).abs() < 1e-2, "{v}");
+
+    // a pipe: Thicken and Offset Surface from the Surface tab
+    let (mut h, _d) = design_harness("thicken_tool");
+    open_tube(&mut h);
+    run_command(&mut h, "surf_thicken");
+    if let Some(Tool::Thicken {
+        thickness, side, ..
+    }) = h.app.design.dialog.as_mut().map(|d| &mut d.tool)
+    {
+        *thickness = "2 mm".into();
+        *side = 1;
+    }
+    // the tube's walls meet at creases: the dialog says why it cannot be done
+    h.frame();
+    let err = h
+        .app
+        .design
+        .preview
+        .as_ref()
+        .and_then(|p| p.error.clone())
+        .unwrap_or_default();
+    assert!(err.contains("crease"), "{err:?}");
+    h.app.design.close_dialog();
+}
+
+#[test]
+fn the_stitch_unstitch_thicken_and_offset_dialogs_build_their_specs() {
+    use kw_app::design::tools::BuildCtx;
+    use kw_expr::Param;
+    use kw_feature::{BodyOp, Document, FeatureId, FeatureSpec, PlaneSpec, ThickenDir};
+    let mut doc = Document::new();
+    let mm = Param::length;
+    doc.add_circle_sketch("A", PlaneSpec::Xy(mm(0.0)), mm(0.0), mm(0.0), mm(10.0))
+        .unwrap();
+    let _ = BodyOp::New;
+    let surfaces: Vec<FeatureId> = doc.features.iter().map(|f| f.id).collect();
+    fn ctx<'a>(
+        doc: &'a Document,
+        picked: &'a [FeatureId],
+        surfaces: &'a [FeatureId],
+    ) -> BuildCtx<'a> {
+        BuildCtx {
+            doc,
+            base: None,
+            picks: &[],
+            boundary: &[],
+            picked_bodies: picked,
+            surfaces,
+            hole_plane: None,
+        }
+    }
+    // nothing picked: every surface; something picked: just that
+    let t = Tool::Stitch {
+        tolerance: "0.05 mm".into(),
+    };
+    match t.spec(&ctx(&doc, &[], &surfaces), None) {
+        Ok(FeatureSpec::Stitch(s)) => assert_eq!(s.bodies, surfaces),
+        t => panic!("{t:?}"),
+    }
+    match t.spec(&ctx(&doc, &surfaces[..1], &surfaces), None) {
+        Ok(FeatureSpec::Stitch(s)) => assert_eq!(s.bodies.len(), 1),
+        t => panic!("{t:?}"),
+    }
+    let none = ctx(&doc, &[], &[]);
+    assert!(t.spec(&none, None).is_err());
+    assert!(matches!(
+        Tool::Unstitch.spec(&ctx(&doc, &[], &surfaces), None),
+        Ok(FeatureSpec::Unstitch(_))
+    ));
+    let th = Tool::Thicken {
+        thickness: "2 mm".into(),
+        side: 2,
+    };
+    match th.spec(&ctx(&doc, &[], &surfaces), None) {
+        Ok(FeatureSpec::Thicken(t)) => {
+            assert_eq!(t.side, ThickenDir::Both);
+            // and back into the dialog
+            match Tool::for_feature(&FeatureSpec::Thicken(t)) {
+                Some(Tool::Thicken { side, thickness }) => {
+                    assert_eq!(side, 2);
+                    assert!(thickness.contains('2'));
+                }
+                t => panic!("{t:?}"),
+            }
+        }
+        t => panic!("{t:?}"),
+    }
+    let off = Tool::OffsetSurface {
+        distance: "-1.5 mm".into(),
+    };
+    assert!(matches!(
+        off.spec(&ctx(&doc, &[], &surfaces), None),
+        Ok(FeatureSpec::OffsetSurface(_))
+    ));
 }

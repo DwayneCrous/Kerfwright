@@ -14,6 +14,7 @@ mod patch;
 mod profile;
 mod rebuild;
 mod revolve;
+mod sheetops;
 mod skin;
 
 pub use extrude::{extrude, extrude_sheet, ExtrudeOptions};
@@ -22,6 +23,7 @@ pub use patch::{loftable, patch_sheet, ruled_sheet, NormalFn, PatchEdge};
 pub use profile::{Chain, ModelError, Profile, ProfileEdge, ProfileLoop};
 pub use rebuild::{rebuild, Rebuilt};
 pub use revolve::{revolve, revolve_sheet};
+pub use sheetops::{offset_sheet, stitch, thicken, unstitch, ThickenSide};
 pub use skin::{loft, loft_ring, loft_sheet, sweep, sweep_sheet, SweepOptions};
 
 pub use kw_brep::BuildResult;

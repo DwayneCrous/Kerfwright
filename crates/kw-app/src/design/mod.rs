@@ -491,6 +491,8 @@ impl DesignWorkspace {
                             base: None,
                             picks: &[],
                             boundary: &[],
+                            picked_bodies: &[],
+                            surfaces: &[],
                             hole_plane: self.hole_plane.clone(),
                         };
                         return dlg.tool.spec(&ctx, dlg.editing.as_ref().map(|(_, s)| s));
@@ -499,13 +501,21 @@ impl DesignWorkspace {
             }
         };
         // a surface bounded by edges may take them from several bodies
-        let multi = matches!(dlg.tool, Tool::Patch { .. } | Tool::Ruled);
+        let multi = matches!(
+            dlg.tool,
+            Tool::Patch { .. } | Tool::Ruled | Tool::Stitch { .. }
+        );
+        let mut picked_heads: Vec<FeatureId> = Vec::new();
         let mut boundary: Vec<(FeatureId, kw_feature::BoundaryRef)> = Vec::new();
         let mut picked_body: Option<usize> = None;
         let mut local: Vec<Pick> = Vec::new();
         for p in &self.model.picks {
             if let Some((i, lp)) = bodies.origin(*p) {
                 if multi {
+                    let head = bodies.list[i].head;
+                    if !picked_heads.contains(&head) {
+                        picked_heads.push(head);
+                    }
                     if let Pick::Edge(e) = lp {
                         let body = &bodies.list[i];
                         boundary.push((body.head, kw_feature::ops::boundary_ref(&body.output, e)?));
@@ -519,6 +529,12 @@ impl DesignWorkspace {
                 local.push(lp);
             }
         }
+        let sheet_heads: Vec<FeatureId> = bodies
+            .list
+            .iter()
+            .filter(|b| b.output.is_sheet())
+            .map(|b| b.head)
+            .collect();
         let idx = picked_body
             .or_else(|| self.target_index())
             .unwrap_or(bodies.list.len() - 1);
@@ -528,6 +544,8 @@ impl DesignWorkspace {
             base: body.output.brep().map(|b| (b, &body.output.names)),
             picks: &local,
             boundary: &boundary,
+            picked_bodies: &picked_heads,
+            surfaces: &sheet_heads,
             hole_plane: self.hole_plane.clone(),
         };
         let orig = dlg.editing.as_ref().map(|(_, s)| s);

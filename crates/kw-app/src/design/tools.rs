@@ -24,6 +24,9 @@ pub struct BuildCtx<'a> {
     /// The edges picked for a surface (Patch, Ruled), each with the feature whose body it is on: they may
     /// belong to different bodies.
     pub boundary: &'a [(FeatureId, kw_feature::BoundaryRef)],
+    /// The bodies the picked faces and edges belong to, and every surface body of the document.
+    pub picked_bodies: &'a [FeatureId],
+    pub surfaces: &'a [FeatureId],
     /// Plane picked for a hole, and the spot on it (plane coordinates).
     pub hole_plane: Option<PlaneSpec>,
 }
@@ -316,6 +319,21 @@ pub enum Tool {
     },
     /// A surface of straight lines between two picked edges.
     Ruled,
+    /// Join the picked surfaces (all of them if none is picked) along edges closer than `tolerance`.
+    Stitch {
+        tolerance: String,
+    },
+    /// Split a body into its faces.
+    Unstitch,
+    /// Give a surface thickness: 0 = along its normal, 1 = against it, 2 = half each way.
+    Thicken {
+        thickness: String,
+        side: u8,
+    },
+    /// Move a surface along its normal.
+    OffsetSurface {
+        distance: String,
+    },
     /// Tilt the picked faces about the neutral plane `axis = position`; `axis` is the pull direction.
     Draft {
         angle: String,
@@ -633,6 +651,10 @@ impl Tool {
             Tool::Sweep { .. } => "SWEEP",
             Tool::Patch { .. } => "PATCH",
             Tool::Ruled => "RULED SURFACE",
+            Tool::Stitch { .. } => "STITCH",
+            Tool::Unstitch => "UNSTITCH",
+            Tool::Thicken { .. } => "THICKEN",
+            Tool::OffsetSurface { .. } => "OFFSET SURFACE",
             Tool::Draft { .. } => "DRAFT",
             Tool::Thread { .. } => "THREAD",
             Tool::SheetMetal { .. } => "SHEET METAL",
@@ -668,6 +690,10 @@ impl Tool {
             Tool::Sweep { .. } => "Sweep",
             Tool::Patch { .. } => "Patch",
             Tool::Ruled => "Ruled",
+            Tool::Stitch { .. } => "Stitch",
+            Tool::Unstitch => "Unstitch",
+            Tool::Thicken { .. } => "Thicken",
+            Tool::OffsetSurface { .. } => "Offset Surface",
             Tool::Draft { .. } => "Draft",
             Tool::Thread { .. } => "Thread",
             Tool::SheetMetal { .. } => "Sheet Metal",
@@ -875,6 +901,21 @@ impl Tool {
                 tangent: x.edges.iter().any(|e| e.tangent),
             },
             FeatureSpec::Ruled(_) => Tool::Ruled,
+            FeatureSpec::Stitch(x) => Tool::Stitch {
+                tolerance: param_text(&x.tolerance),
+            },
+            FeatureSpec::Unstitch(_) => Tool::Unstitch,
+            FeatureSpec::Thicken(x) => Tool::Thicken {
+                thickness: param_text(&x.thickness),
+                side: match x.side {
+                    kw_feature::ThickenDir::Normal => 0,
+                    kw_feature::ThickenDir::Reverse => 1,
+                    kw_feature::ThickenDir::Both => 2,
+                },
+            },
+            FeatureSpec::OffsetSurface(x) => Tool::OffsetSurface {
+                distance: param_text(&x.distance),
+            },
             FeatureSpec::Sweep(x) => Tool::Sweep {
                 profile: Some(x.profile),
                 path: Some(x.path),
@@ -1552,6 +1593,39 @@ impl Tool {
                     );
                 }
                 FeatureSpec::Patch(kw_feature::PatchSpec { edges })
+            }
+            Tool::Stitch { tolerance } => {
+                let bodies: Vec<FeatureId> = if !ctx.picked_bodies.is_empty() {
+                    ctx.picked_bodies.to_vec()
+                } else if let (Some(FeatureSpec::Stitch(o)), true) = (orig, ctx.surfaces.is_empty())
+                {
+                    o.bodies.clone()
+                } else {
+                    ctx.surfaces.to_vec()
+                };
+                if bodies.is_empty() {
+                    return Err("there are no surfaces to stitch".into());
+                }
+                FeatureSpec::Stitch(kw_feature::StitchSpec {
+                    bodies,
+                    tolerance: len(tolerance)?,
+                })
+            }
+            Tool::Unstitch => FeatureSpec::Unstitch(kw_feature::UnstitchSpec { base: None }),
+            Tool::Thicken { thickness, side } => FeatureSpec::Thicken(kw_feature::ThickenSpec {
+                thickness: len(thickness)?,
+                side: match side {
+                    1 => kw_feature::ThickenDir::Reverse,
+                    2 => kw_feature::ThickenDir::Both,
+                    _ => kw_feature::ThickenDir::Normal,
+                },
+                base: None,
+            }),
+            Tool::OffsetSurface { distance } => {
+                FeatureSpec::OffsetSurface(kw_feature::OffsetSurfaceSpec {
+                    distance: len(distance)?,
+                    base: None,
+                })
             }
             Tool::Ruled => {
                 let pair: Vec<kw_feature::BoundaryEdge> = if ctx.boundary.is_empty() {
@@ -2392,6 +2466,58 @@ impl Tool {
                 ui.label(
                     egui::RichText::new(
                         "Click the edges around the hole (Shift adds): three or more, closing a loop. Four edges give one smooth patch; other counts are split about the centre. Only open edges of a surface can be tangent.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Stitch { tolerance } => {
+                let n = picks.len();
+                row(ui, "Surfaces", |ui| {
+                    ui.label(if n == 0 {
+                        "all surfaces".to_string()
+                    } else {
+                        format!("{n} picked")
+                    });
+                });
+                text_field(ui, "Tolerance", tolerance);
+                ui.label(
+                    egui::RichText::new(
+                        "Open edges that lie on one another within the tolerance are joined; a group that closes becomes a solid. Click faces to stitch only some surfaces.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Unstitch => {
+                ui.label(
+                    egui::RichText::new(
+                        "The body falls apart into its faces, which share no edges. Click a face to choose the body.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::Thicken { thickness, side } => {
+                text_field(ui, "Thickness", thickness);
+                row(ui, "Direction", |ui| {
+                    ui.selectable_value(side, 0, "Normal");
+                    ui.selectable_value(side, 1, "Reverse");
+                    ui.selectable_value(side, 2, "Both");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "An open, smooth surface becomes a solid with walls along its open edges.",
+                    )
+                    .color(TEXT_WEAK)
+                    .size(10.5),
+                );
+            }
+            Tool::OffsetSurface { distance } => {
+                text_field(ui, "Distance", distance);
+                ui.label(
+                    egui::RichText::new(
+                        "Moves the surface along its normal; a negative distance goes the other way. The surface must be smooth.",
                     )
                     .color(TEXT_WEAK)
                     .size(10.5),

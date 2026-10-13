@@ -17,6 +17,7 @@ pub mod history;
 pub mod ids;
 pub mod mass;
 pub mod mutate;
+pub mod sew;
 pub mod store;
 pub mod topology;
 pub mod uvgeom;

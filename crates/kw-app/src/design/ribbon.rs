@@ -91,6 +91,8 @@ struct Ctx {
     has_solid: bool,
     /// Whether there is any body at all, a surface included.
     has_body: bool,
+    /// How many of the bodies are surfaces.
+    surfaces: usize,
     has_tool_feature: bool,
     /// How many bodies there are (Combine needs two).
     bodies: usize,
@@ -218,6 +220,55 @@ impl DesignWorkspace {
                 Section::new("FROM CURVES", vec![extrude, revolve, sweep, loft]),
                 Section::new("FROM EDGES", vec![patch, ruled]),
             ],
+        ) {
+            picked.push(id);
+        }
+        let need_surface = "there is no surface yet";
+        let stitch = it(
+            "surf_stitch",
+            Icon::Combine,
+            "Stitch",
+            "Join surfaces along edges that lie on one another; a closed group becomes a solid",
+        )
+        .active(dlg("STITCH"))
+        .enabled_if(cx.surfaces >= 1, need_surface);
+        let unstitch = it(
+            "surf_unstitch",
+            Icon::Split,
+            "Unstitch",
+            "Split a body into its faces",
+        )
+        .active(dlg("UNSTITCH"))
+        .enabled_if(cx.has_body, need_body);
+        let thicken = it(
+            "surf_thicken",
+            Icon::Shell,
+            "Thicken",
+            "Give an open, smooth surface thickness: a solid with walls along its open edges",
+        )
+        .active(dlg("THICKEN"))
+        .enabled_if(cx.surfaces >= 1, need_surface);
+        let offset = it(
+            "surf_offset",
+            Icon::OffsetBody,
+            "Offset Surface",
+            "Move a smooth surface along its normal",
+        )
+        .active(dlg("OFFSET SURFACE"))
+        .enabled_if(cx.surfaces >= 1, need_surface);
+        if let Some(id) = rb::menu_group(
+            ui,
+            "MODIFY",
+            &[
+                stitch.clone().into(),
+                unstitch.clone().into(),
+                thicken.clone().into(),
+                offset.clone().into(),
+            ],
+            &[Section::new(
+                "SURFACES",
+                vec![stitch, unstitch, thicken, offset],
+            )],
         ) {
             picked.push(id);
         }
@@ -552,6 +603,13 @@ impl DesignWorkspace {
             sketches,
             has_solid: project.evaluation().final_solid().is_some(),
             has_body: project.evaluation().final_body().is_some(),
+            surfaces: {
+                let ev = project.evaluation();
+                doc.heads()
+                    .iter()
+                    .filter(|h| ev.output(**h).is_some_and(|o| o.is_sheet()))
+                    .count()
+            },
             bodies: doc.heads().len(),
             components: project.assembly.as_ref().map_or(0, |a| a.instances.len()),
             editing: project.editing().is_some(),
@@ -1147,6 +1205,17 @@ impl DesignWorkspace {
                 surface: true,
                 twist: String::new(),
                 guide: None,
+            },
+            "surf_stitch" => Tool::Stitch {
+                tolerance: "0.01 mm".into(),
+            },
+            "surf_unstitch" => Tool::Unstitch,
+            "surf_thicken" => Tool::Thicken {
+                thickness: "1 mm".into(),
+                side: 0,
+            },
+            "surf_offset" => Tool::OffsetSurface {
+                distance: "1 mm".into(),
             },
             "surf_patch" => Tool::Patch { tangent: false },
             "surf_ruled" => Tool::Ruled,
