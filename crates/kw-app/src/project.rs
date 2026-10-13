@@ -53,12 +53,24 @@ fn mm(v: f64) -> Param {
     Param::length(v)
 }
 
+/// The folder a project file is in (the working folder for a bare file name).
+fn dir_of(path: &Path) -> Option<PathBuf> {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
+        _ => std::env::current_dir().ok(),
+    }
+}
+
 impl Project {
     fn from_file(path: Option<PathBuf>, file: KwfFile) -> Result<Project, String> {
         let cam = kw_store::cam_from_file(&file).transpose()?;
         let fea = kw_store::fea_from_file(&file).transpose()?;
         let board = kw_store::board_from_file(&file).transpose()?;
-        let assembly = kw_assembly::Assembly::from_file(&file).transpose()?;
+        let mut assembly = kw_assembly::Assembly::from_file(&file).transpose()?;
+        // linked files are found again from where the project is now (it may have been moved)
+        if let (Some(a), Some(dir)) = (assembly.as_mut(), path.as_deref().and_then(dir_of)) {
+            a.rebase_links(Some(&dir), &dir);
+        }
         let drawings = kw_store::drawings_from_file(&file)
             .transpose()?
             .unwrap_or_default();
@@ -111,6 +123,11 @@ impl Project {
     pub fn open(path: &Path) -> Result<Project, String> {
         let file = KwfFile::load(path).map_err(|e| e.to_string())?;
         Project::from_file(Some(path.to_path_buf()), file)
+    }
+
+    /// The folder the project is saved in, if it has been saved (linked files are relative to it).
+    pub fn base_dir(&self) -> Option<PathBuf> {
+        self.path.as_deref().and_then(dir_of)
     }
 
     /// File name without the extension, or "Untitled".
@@ -230,6 +247,12 @@ impl Project {
             return Err(
                 "a sub-assembly has no design of its own; open one of its components".into(),
             );
+        }
+        if p.link.is_some() {
+            return Err(format!(
+                "'{}' is linked to a file: edit that file, or break the link to edit the copy here",
+                p.name
+            ));
         }
         let doc = p.document.clone();
         let synced = doc.content_hash();
@@ -362,6 +385,11 @@ impl Project {
             kw_store::attach_drawings(&mut self.file, &self.drawings);
         }
         self.file.extra_entries.remove("assembly.cbor");
+        // links are kept relative to where the project is saved now
+        if let (Some(new_dir), Some(a)) = (dir_of(path), self.assembly.as_mut()) {
+            let old_dir = self.path.as_deref().and_then(dir_of);
+            a.rebase_links(old_dir.as_deref(), &new_dir);
+        }
         if let Some(a) = &self.assembly {
             a.attach(&mut self.file);
         }

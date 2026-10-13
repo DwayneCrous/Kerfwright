@@ -99,6 +99,8 @@ struct Ctx {
     /// How many components the assembly has, and whether one is open for editing.
     components: usize,
     editing: bool,
+    /// Linked components update on their own when their files change.
+    auto_links: bool,
 }
 
 fn it(id: &'static str, icon: Icon, label: &'static str, tip: &str) -> Item {
@@ -640,6 +642,10 @@ impl DesignWorkspace {
             bodies: doc.heads().len(),
             components: project.assembly.as_ref().map_or(0, |a| a.instances.len()),
             editing: project.editing().is_some(),
+            auto_links: project
+                .assembly
+                .as_ref()
+                .is_some_and(|a| a.auto_update_links),
             has_tool_feature: doc.features.iter().any(|f| {
                 matches!(
                     f.spec,
@@ -1072,6 +1078,29 @@ impl DesignWorkspace {
             "Insert Component",
             "Insert the design of another .kwf file as a component",
         );
+        let asm_insert_copy = it(
+            "asm_insert_copy",
+            Icon::Folder,
+            "Insert Copy",
+            "Insert the design of another .kwf file as an independent copy that does not follow the file",
+        );
+        let asm_links = it(
+            "asm_links",
+            Icon::Fit,
+            "Update Links",
+            "Take the changes of the files that linked components come from",
+        )
+        .enabled_if(
+            !self.asm.links.stale().is_empty(),
+            "no linked component is out of date",
+        );
+        let asm_auto_links = it(
+            "asm_auto_links",
+            Icon::Gear,
+            "Auto-Update",
+            "Update linked components as soon as their files change",
+        )
+        .active(cx.auto_links);
         let asm_activate = if cx.editing {
             it(
                 "asm_finish",
@@ -1172,6 +1201,7 @@ impl DesignWorkspace {
                     "JOINTS",
                     vec![asm_joint, asm_as_built, asm_rigid, asm_ground],
                 ),
+                Section::new("LINKS", vec![asm_insert_copy, asm_links, asm_auto_links]),
                 Section::new("MOTION", vec![asm_view, asm_move, asm_motion]),
                 Section::new("INSPECT", vec![asm_check, asm_bom]),
             ],
@@ -1556,6 +1586,18 @@ impl DesignWorkspace {
             }
             "asm_insert" => {
                 self.asm.request = Some(super::assembly::FileRequest::Insert);
+                return;
+            }
+            "asm_insert_copy" => {
+                self.asm.request = Some(super::assembly::FileRequest::InsertCopy);
+                return;
+            }
+            "asm_links" => {
+                self.actions.push(Action::Asm(AsmAction::UpdateLinks(None)));
+                return;
+            }
+            "asm_auto_links" => {
+                self.actions.push(Action::Asm(AsmAction::ToggleAutoUpdate));
                 return;
             }
             "asm_activate" => {

@@ -11,7 +11,10 @@
 //!   that keeps the relative positions they had when it was made, and an **as-built joint** takes the
 //!   current relative position as the joint's zero.
 //! * The joints form a kinematic tree rooted at the grounded instances; [`Assembly::solve`] walks it and
-//!   returns every instance's placement. A joint that would close a loop is refused with an explanation.
+//!   returns every instance's placement. A joint that closes a **kinematic loop** (a four-bar, a
+//!   slider-crank) is a loop-closure constraint: the values of the joints marked `solved` are found
+//!   numerically so that the loop closes, and the others are the inputs that drive the mechanism
+//!   ([`Assembly::settle`], [`Assembly::mobility`], [`Assembly::sweep`]).
 //! * [`Assembly::pose`] builds the posed bodies in one B-rep; [`Pose::interference`] finds overlaps with the
 //!   kernel's Boolean; [`Pose::bom`] lists the parts; [`Pose::to_step`] writes one STEP file.
 //!
@@ -28,6 +31,11 @@
 
 pub mod drag;
 pub use drag::{Drag, Ray};
+mod link;
+pub use link::{relative_path, LinkKind, LinkStatus, PartLink, UpdateReport};
+mod loops;
+pub use loops::{Mobility, SweepStep};
+pub(crate) mod numeric;
 
 use kw_boolean::{boolean, BoolOptions, BooleanError, Op};
 use kw_brep::{BRep, BodyId, CopyMap, CopyOptions};
@@ -150,6 +158,9 @@ pub struct Part {
     /// Material name for the bill of materials (a name the application knows).
     #[serde(default)]
     pub material: Option<String>,
+    /// The file this part's model comes from, if it is linked (`document` is then a cached copy of it).
+    #[serde(default)]
+    pub link: Option<PartLink>,
 }
 
 impl Part {
@@ -160,6 +171,7 @@ impl Part {
             frames,
             sub: None,
             material: None,
+            link: None,
         }
     }
 
@@ -308,6 +320,10 @@ pub struct Joint {
     /// Made from the positions the components already had (zero motion reproduces them).
     #[serde(default)]
     pub as_built: bool,
+    /// The values are unknowns of a kinematic loop: found by the loop solve so that the loops close,
+    /// rather than given. A driven joint (`false`) keeps the values it has.
+    #[serde(default)]
+    pub solved: bool,
 }
 
 impl Joint {
@@ -324,6 +340,7 @@ impl Joint {
             offset: [0.0; 3],
             angle: 0.0,
             as_built: false,
+            solved: false,
         }
     }
 }
@@ -368,6 +385,10 @@ pub struct Assembly {
     pub grounds: Option<Vec<usize>>,
     #[serde(default)]
     pub groups: Vec<RigidGroup>,
+    /// Take the model of a linked part again as soon as its file changes (otherwise the application only
+    /// says that the part is out of date).
+    #[serde(default)]
+    pub auto_update_links: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -383,6 +404,14 @@ pub enum AssemblyError {
     Loop {
         joint: String,
         instance: String,
+    },
+    /// The kinematic loop through this joint does not close at the given inputs: the mechanism cannot be
+    /// assembled there (out of reach, locked up, or over-constrained). `residual` is the gap in mm
+    /// (rotation counted as 100 mm per radian); `free` is how many values the loop solve may change.
+    LoopNotClosed {
+        joint: String,
+        residual: f64,
+        free: usize,
     },
     /// The instance is not connected to a grounded one by any joint.
     Disconnected(String),
@@ -433,6 +462,23 @@ impl fmt::Display for AssemblyError {
                 f,
                 "joint '{joint}' would close a loop: '{instance}' is already placed by another chain of joints, and assemblies are solved as a tree"
             ),
+            AssemblyError::LoopNotClosed {
+                joint,
+                residual,
+                free,
+            } => {
+                if *free == 0 {
+                    write!(
+                        f,
+                        "joint '{joint}' closes a kinematic loop that does not close at these values (gap {residual:.4}); mark a joint of the loop as solved so its value can be found"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "the kinematic loop through joint '{joint}' does not close at these inputs (gap {residual:.4}): the mechanism cannot reach this position, is locked up, or is over-constrained"
+                    )
+                }
+            }
             AssemblyError::Disconnected(n) => {
                 write!(f, "'{n}' is not connected to a grounded component by any joint")
             }
@@ -491,6 +537,7 @@ impl Assembly {
             params: Vec::new(),
             grounds: None,
             groups: Vec::new(),
+            auto_update_links: false,
         }
     }
 
@@ -521,9 +568,103 @@ impl Assembly {
         self.instances.len() - 1
     }
 
+    /// Add a joint. One that closes a kinematic loop gets its values solved (see
+    /// [`mark_loop_closures`](Self::mark_loop_closures)).
     pub fn add_joint(&mut self, joint: Joint) -> usize {
         self.joints.push(joint);
+        self.mark_loop_closures();
         self.joints.len() - 1
+    }
+
+    /// Add a joint, and take it back (with the loop marks it made) if the assembly can no longer be
+    /// solved. Returns the new joint's index, or why it was refused.
+    pub fn try_add_joint(&mut self, joint: Joint) -> Result<usize, AssemblyError> {
+        let flags: Vec<bool> = self.joints.iter().map(|j| j.solved).collect();
+        let k = self.add_joint(joint);
+        match self.solve() {
+            Ok(_) => Ok(k),
+            Err(e) => {
+                self.joints.pop();
+                for (j, f) in self.joints.iter_mut().zip(flags) {
+                    j.solved = f;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Make the loops of the assembly solvable. For every joint that closes a kinematic loop, the joints
+    /// of the loop are marked `solved` (their values are found so that the loop closes) except one **input**,
+    /// the one next to the top of the loop, which stays driven and moves the mechanism. A joint that is
+    /// already driven and is the only one left keeps that role. Returns whether anything was marked. Does
+    /// nothing if the tree cannot be walked (the caller finds out when it solves).
+    pub fn mark_loop_closures(&mut self) -> bool {
+        let Ok(scope) = self.scope() else {
+            return false;
+        };
+        let Ok(pass) = self.place_tree(&scope, &[]) else {
+            return false;
+        };
+        // the joints from instance `x` up to the instance that was placed first: (joint, instance above)
+        let chain = |mut x: usize| -> Vec<(usize, usize)> {
+            let mut out = Vec::new();
+            while let Some((j, up)) = pass.via[x] {
+                out.push((j, up));
+                x = up;
+                if out.len() > self.instances.len() {
+                    break;
+                }
+            }
+            out
+        };
+        let mut any = false;
+        for &ci in &pass.closing {
+            let (p, c) = (
+                self.joints[ci].parent.instance,
+                self.joints[ci].child.instance,
+            );
+            let (mut up_p, mut up_c) = (chain(p), chain(c));
+            // cut both chains where they meet
+            let anc_p: Vec<usize> = std::iter::once(p)
+                .chain(up_p.iter().map(|(_, i)| *i))
+                .collect();
+            let meet = std::iter::once(c)
+                .chain(up_c.iter().map(|(_, i)| *i))
+                .find(|i| anc_p.contains(i));
+            if let Some(m) = meet {
+                let cut = |v: &mut Vec<(usize, usize)>, start: usize| {
+                    let mut at = start;
+                    let mut keep = 0;
+                    while at != m && keep < v.len() {
+                        at = v[keep].1;
+                        keep += 1;
+                    }
+                    v.truncate(keep);
+                };
+                cut(&mut up_p, p);
+                cut(&mut up_c, c);
+            }
+            // the loop's joints, the one next to the top first
+            let mut ring: Vec<usize> = up_p.iter().rev().map(|(j, _)| *j).collect();
+            ring.extend(up_c.iter().rev().map(|(j, _)| *j));
+            let movable = |j: &usize| self.joints[*j].kind.arity() > 0;
+            let input = ring
+                .iter()
+                .copied()
+                .filter(movable)
+                .find(|j| !self.joints[*j].solved);
+            for j in ring.into_iter().chain(std::iter::once(ci)) {
+                if Some(j) == input {
+                    continue;
+                }
+                let jt = &mut self.joints[j];
+                if !jt.solved && jt.kind.arity() > 0 {
+                    jt.solved = true;
+                    any = true;
+                }
+            }
+        }
+        any
     }
 
     // ------------------------------------------------------------------------------ grounding
@@ -665,6 +806,17 @@ impl Assembly {
         j: &Joint,
         scope: &HashMap<String, Quantity>,
     ) -> Result<Vec<f64>, AssemblyError> {
+        self.joint_values_with(j, scope, true)
+    }
+
+    /// The evaluated values of a joint, with the limits enforced or not (a loop solve starts from values
+    /// that may lie outside them and clamps).
+    pub(crate) fn joint_values_with(
+        &self,
+        j: &Joint,
+        scope: &HashMap<String, Quantity>,
+        check_limits: bool,
+    ) -> Result<Vec<f64>, AssemblyError> {
         if j.values.len() != j.kind.arity() {
             return Err(AssemblyError::WrongValues {
                 joint: j.name.clone(),
@@ -682,7 +834,7 @@ impl Assembly {
                 joint: j.name.clone(),
                 message: e.to_string(),
             })?;
-            if let Some(Some((lo, hi))) = j.limits.get(i) {
+            if let (true, Some(Some((lo, hi)))) = (check_limits, j.limits.get(i)) {
                 if v < *lo - 1e-12 || v > *hi + 1e-12 {
                     return Err(AssemblyError::OutOfLimits {
                         joint: j.name.clone(),
@@ -745,176 +897,23 @@ impl Assembly {
     pub fn solve_traced(
         &self,
     ) -> Result<(Vec<Transform3>, Vec<Option<(usize, usize)>>), AssemblyError> {
-        if self.instances.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        let n = self.instances.len();
-        if let Some(g) = &self.grounds {
-            if let Some(bad) = g.iter().find(|i| **i >= n) {
-                return Err(AssemblyError::UnknownInstance(*bad));
-            }
-        } else if self.ground >= n {
-            return Err(AssemblyError::UnknownInstance(self.ground));
-        }
-        let scope = self.scope()?;
-        let grounded = self.grounded();
-        // a joint between two members of one rigid group cannot move anything
-        for j in &self.joints {
-            if let (Some(a), Some(b)) = (
-                self.group_of(j.parent.instance),
-                self.group_of(j.child.instance),
-            ) {
-                if a == b {
-                    return Err(AssemblyError::Redundant {
-                        joint: j.name.clone(),
-                        group: self.groups[a].name.clone(),
-                    });
-                }
-            }
-        }
-        // anything a joint or a rigid group touches is placed by them; the rest floats where it is
-        let mut tied = vec![false; n];
-        for j in &self.joints {
-            for e in [&j.parent, &j.child] {
-                if e.instance < n {
-                    tied[e.instance] = true;
-                }
-            }
-        }
-        // a group that nothing else places floats as one: its first member stays where it is
-        let mut group_seeds: Vec<usize> = Vec::new();
-        for g in &self.groups {
-            let anchored = g
-                .members
-                .iter()
-                .any(|m| *m < n && (tied[*m] || grounded.contains(m)));
-            if let Some(&a) = g.members.first() {
-                if !anchored && a < n {
-                    group_seeds.push(a);
-                }
-            }
-            for m in &g.members {
-                if *m < n {
-                    tied[*m] = true;
-                }
-            }
-        }
-        let own = |i: usize| self.instances[i].at.to_transform();
-        let mut placed: Vec<Option<Transform3>> = vec![None; n];
-        let mut seeded = vec![false; n];
-        let mut via: Vec<Option<(usize, usize)>> = vec![None; n];
-        for i in 0..n {
-            if grounded.contains(&i) || !tied[i] || group_seeds.contains(&i) {
-                placed[i] = Some(own(i));
-                seeded[i] = true;
-            }
-        }
-        let mut done = vec![false; self.joints.len()];
-        loop {
-            let mut progress = false;
-            // rigid groups: one placed member places the rest
-            for g in &self.groups {
-                let Some(&anchor) = g.members.first() else {
-                    continue;
-                };
-                if anchor >= n || g.rel.len() != g.members.len() {
-                    continue;
-                }
-                let rel = |k: usize| g.rel[k].to_transform();
-                let known = g
-                    .members
-                    .iter()
-                    .position(|m| *m < n && placed[*m].is_some());
-                let Some(k) = known else { continue };
-                let anchor_placed = if k == 0 {
-                    placed[anchor].unwrap()
-                } else {
-                    rel(k).inverse().then(&placed[g.members[k]].unwrap())
-                };
-                for (idx, m) in g.members.iter().enumerate() {
-                    if *m < n && placed[*m].is_none() {
-                        placed[*m] = Some(rel(idx).then(&anchor_placed));
-                        progress = true;
-                    }
-                }
-            }
-            for (ji, j) in self.joints.iter().enumerate() {
-                if done[ji] {
-                    continue;
-                }
-                let (p, c) = (j.parent.instance, j.child.instance);
-                if p >= n {
-                    return Err(AssemblyError::UnknownInstance(p));
-                }
-                if c >= n {
-                    return Err(AssemblyError::UnknownInstance(c));
-                }
-                // joints may be given in either direction: orient towards the unplaced instance
-                let (from, to, flipped) = match (placed[p].is_some(), placed[c].is_some()) {
-                    (true, false) => (&j.parent, &j.child, false),
-                    (false, true) => (&j.child, &j.parent, true),
-                    (true, true) => {
-                        return Err(if seeded[p] && seeded[c] {
-                            AssemblyError::BothGrounded {
-                                joint: j.name.clone(),
-                            }
-                        } else {
-                            AssemblyError::Loop {
-                                joint: j.name.clone(),
-                                instance: self.instances[c].name.clone(),
-                            }
-                        })
-                    }
-                    (false, false) => continue,
-                };
-                let vals = self.joint_values(j, &scope)?;
-                let fa = self.frame_of(from)?;
-                let fb = self.frame_of(to)?;
-                let mut motion = Self::joint_transform(j, &vals);
-                if flipped {
-                    motion = motion.inverse();
-                }
-                // child coordinates → child frame → motion → parent frame → parent coordinates → world
-                let t = world_of(&fb)
-                    .inverse()
-                    .then(&motion)
-                    .then(&world_of(&fa))
-                    .then(placed[from.instance].as_ref().unwrap());
-                placed[to.instance] = Some(t);
-                via[to.instance] = Some((ji, from.instance));
-                done[ji] = true;
-                progress = true;
-            }
-            if !progress {
-                break;
-            }
-        }
-        for (i, p) in placed.iter().enumerate() {
-            if p.is_none() {
-                return Err(AssemblyError::Disconnected(self.instances[i].name.clone()));
-            }
-        }
-        for (ji, j) in self.joints.iter().enumerate() {
-            if !done[ji] {
-                return Err(AssemblyError::Loop {
-                    joint: j.name.clone(),
-                    instance: self.instances[j.child.instance].name.clone(),
-                });
-            }
-        }
-        Ok((placed.into_iter().map(|p| p.unwrap()).collect(), via))
+        let pass = self.solve_pass()?;
+        Ok((pass.placed, pass.via))
     }
 
-    /// The joint that moves instance `i` when it is dragged: the nearest joint towards the grounded
-    /// components, looking through rigid joints (which cannot move) and across rigid groups. `None` when
+    /// The joint that moves instance `i` when it is dragged: the nearest driven joint towards the grounded
+    /// components, looking through rigid joints (which cannot move), joints solved by a loop (the pointer
+    /// drives the inputs, not them) and across rigid groups. When only solved joints lie that way (the
+    /// rocker of a four-bar), the driven joint that moves the instance is found by trying them. `None` when
     /// the instance is grounded or held rigidly to a grounded one, or floats (then it moves freely).
     pub fn drive_joint(&self, i: usize) -> Option<usize> {
         let (_, via) = self.solve_traced().ok()?;
         let mut x = i;
         let mut seen: Vec<usize> = Vec::new();
+        let mut through_solved = false;
         'walk: loop {
             if seen.contains(&x) {
-                return None;
+                break;
             }
             seen.push(x);
             let mates: Vec<usize> = match self.group_of(x) {
@@ -923,15 +922,53 @@ impl Assembly {
             };
             for m in mates {
                 if let Some((j, from)) = via.get(m).copied().flatten() {
-                    if self.joints[j].kind.arity() > 0 {
+                    let jt = &self.joints[j];
+                    if jt.kind.arity() > 0 && !jt.solved {
                         return Some(j);
                     }
+                    through_solved |= jt.solved && jt.kind.arity() > 0;
                     x = from;
                     continue 'walk;
                 }
             }
-            return None;
+            break;
         }
+        if through_solved {
+            self.driven_joint_moving(i)
+        } else {
+            None
+        }
+    }
+
+    /// The first driven joint whose value, nudged, moves instance `i` (loops are re-solved each time).
+    fn driven_joint_moving(&self, i: usize) -> Option<usize> {
+        let base = self.solve().ok()?.get(i)?.to_matrix();
+        let scope = self.scope().ok()?;
+        let mut probe = self.clone();
+        for (ji, j) in self.joints.iter().enumerate() {
+            if j.solved || j.kind.arity() == 0 {
+                continue;
+            }
+            let vals = self.joint_values_with(j, &scope, false).ok()?;
+            for (c, dim) in j.kind.dims().iter().enumerate() {
+                let eps = if *dim == Dim::ANGLE { 1e-4 } else { 1e-3 };
+                for sign in [1.0, -1.0] {
+                    let mut v = vals.clone();
+                    v[c] += sign * eps;
+                    if let Some(Some((lo, hi))) = j.limits.get(c) {
+                        v[c] = v[c].clamp(*lo, *hi);
+                    }
+                    probe.joints = self.joints.clone();
+                    probe.joints[ji].values = loops::lit_values(j.kind, &v);
+                    if let Ok(p) = probe.settle() {
+                        if (p[i].to_matrix() - base).norm() > 1e-9 {
+                            return Some(ji);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Whether instance `i` moves as a free body: not grounded, no joint above it, not held by a ground.
@@ -1151,20 +1188,28 @@ impl Assembly {
             },
         );
         j.as_built = true;
+        let flags: Vec<bool> = self.joints.iter().map(|j| j.solved).collect();
+        let undo = |a: &mut Assembly| {
+            a.joints.pop();
+            for (j, f) in a.joints.iter_mut().zip(&flags) {
+                j.solved = *f;
+            }
+        };
         self.joints.push(j);
+        self.mark_loop_closures();
         // the child must still be placed where it was: the joint it gets is the one that places it
         match self.solve() {
             Ok(after) => {
                 let moved = (after[child].to_matrix() - pc.to_matrix()).norm();
                 if moved > 1e-6 {
-                    self.joints.pop();
+                    undo(self);
                     return Err(AssemblyError::Invalid(
                         "the as-built joint would move the component".into(),
                     ));
                 }
             }
             Err(e) => {
-                self.joints.pop();
+                undo(self);
                 return Err(e);
             }
         }

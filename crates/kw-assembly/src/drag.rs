@@ -2,6 +2,7 @@
 //! facing the camera; a component on a joint moves the joint's values so that the grabbed point stays as
 //! near the pointer ray as the joint allows (within its limits).
 
+use crate::numeric::solve_small;
 use crate::{Assembly, AssemblyError, Placement};
 use kw_expr::{Param, Quantity};
 use kw_math::{Point3, Transform3, Vector3};
@@ -143,7 +144,7 @@ impl Drag {
                 let residual =
                     |asm: &mut Assembly, u: &[f64]| -> Result<Vector3<f64>, AssemblyError> {
                         set(asm, u);
-                        let placed = asm.solve()?;
+                        let placed = asm.settle()?;
                         let w = placed[i].apply_point(&Point3::from(grab)).coords;
                         let rel = w - o;
                         Ok(rel - d * rel.dot(&d))
@@ -224,8 +225,8 @@ impl Drag {
                 }
                 set(asm, &u);
                 *values = u;
-                // the final values must be a valid pose
-                asm.solve().map(|_| ())
+                // the final values must be a valid pose (and the solved joints keep theirs)
+                asm.settle().map(|_| ())
             }
         }
     }
@@ -241,31 +242,4 @@ impl Drag {
             Kind::Joint { .. } => {}
         }
     }
-}
-
-/// Solve a small dense system by Gaussian elimination with partial pivoting.
-fn solve_small(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
-    let n = b.len();
-    for col in 0..n {
-        let piv = (col..n).max_by(|x, y| a[*x][col].abs().total_cmp(&a[*y][col].abs()))?;
-        if a[piv][col].abs() < 1e-300 {
-            return None;
-        }
-        a.swap(col, piv);
-        b.swap(col, piv);
-        for r in col + 1..n {
-            let f = a[r][col] / a[col][col];
-            for c in col..n {
-                let v = a[col][c];
-                a[r][c] -= f * v;
-            }
-            b[r] -= f * b[col];
-        }
-    }
-    let mut x = vec![0.0; n];
-    for r in (0..n).rev() {
-        let s: f64 = (r + 1..n).map(|c| a[r][c] * x[c]).sum();
-        x[r] = (b[r] - s) / a[r][r];
-    }
-    Some(x)
 }

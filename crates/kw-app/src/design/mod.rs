@@ -7,6 +7,7 @@ pub mod analysis;
 pub mod asm_drag;
 pub mod asm_inspect;
 pub mod asm_joint;
+pub mod asm_link;
 pub mod asm_snap;
 pub mod asm_tree;
 pub mod assembly;
@@ -965,6 +966,7 @@ impl DesignWorkspace {
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.viewport_ui(ui, project, rs));
         }
+        self.asm_links_tick(ui.ctx(), project);
         self.run_actions(project);
         // a component being edited in place is copied into the assembly after every change
         project.sync_component();

@@ -1116,6 +1116,24 @@ impl KerfwrightApp {
                 };
                 self.insert_component_path(&path);
             }
+            FileRequest::InsertCopy => {
+                let Some(path) = self.dialogs.open_file("Kerfwright project", &["kwf"]) else {
+                    return;
+                };
+                self.insert_component_copy_path(&path);
+            }
+            FileRequest::Relink(part) => {
+                let Some(path) = self.dialogs.open_file("Kerfwright project", &["kwf"]) else {
+                    return;
+                };
+                let Screen::Project { project, .. } = &mut self.screen else {
+                    return;
+                };
+                self.design.asm_action(
+                    project,
+                    crate::design::assembly::AsmAction::Relink(part, path),
+                );
+            }
             FileRequest::Import => self.import_file_dialog(),
             FileRequest::Export(f) => self.export_file_dialog(f),
             FileRequest::ExportDxf => {
@@ -1200,6 +1218,7 @@ impl KerfwrightApp {
             self.design.asm.selected_joint = None;
             self.design.asm.edit_joint = None;
             self.design.asm.edit = None;
+            self.design.asm.links.forget();
         } else if undo {
             p.history.undo();
         } else {
@@ -1213,6 +1232,17 @@ impl KerfwrightApp {
         };
         self.message = match self.design.asm_insert_path(project, path) {
             Ok(_) => format!("inserted {}", path.display()),
+            Err(e) => format!("insert failed: {e}"),
+        };
+    }
+
+    /// Insert the design of the file at `path` as an independent copy (no link).
+    pub fn insert_component_copy_path(&mut self, path: &Path) {
+        let Screen::Project { project, .. } = &mut self.screen else {
+            return;
+        };
+        self.message = match self.design.asm_insert_path_as(project, path, false) {
+            Ok(_) => format!("inserted a copy of {}", path.display()),
             Err(e) => format!("insert failed: {e}"),
         };
     }

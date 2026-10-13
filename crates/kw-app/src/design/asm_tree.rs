@@ -1,14 +1,14 @@
 //! The assembly in the browser: components (with sub-assemblies below them), joints and rigid groups, and the
 //! commands the tree and its menus run on the assembly.
 
-use super::assembly::AsmAction;
+use super::assembly::{AsmAction, FileRequest};
 use super::browser::row;
 use super::{Action, DesignWorkspace};
-use crate::chrome::theme::{ACCENT, BAD};
+use crate::chrome::theme::{ACCENT, BAD, GOOD, TEXT_WEAK};
 use crate::chrome::Icon;
 use crate::project::Project;
 use eframe::egui::{self, Ui};
-use kw_assembly::Assembly;
+use kw_assembly::{Assembly, LinkStatus};
 
 impl DesignWorkspace {
     // --------------------------------------------------------------------------------- commands
@@ -79,6 +79,7 @@ impl DesignWorkspace {
             _ => {}
         }
         let project_editing = project.editing();
+        let base = project.base_dir();
         let Some(asm) = project.assembly.as_mut() else {
             return;
         };
@@ -248,6 +249,58 @@ impl DesignWorkspace {
                     asm.instances[i].name = new;
                 }
             }
+            AsmAction::UpdateLinks(only) => {
+                let reports = match only {
+                    Some(p) => vec![(p, asm.update_link(p, base.as_deref()))],
+                    None => asm.update_links(base.as_deref()),
+                };
+                let mut taken = Vec::new();
+                let mut failed = Vec::new();
+                for (_, r) in reports {
+                    match r {
+                        Ok(u) if u.changed => taken.push(u.part),
+                        Ok(_) => {}
+                        Err(e) => failed.push(e.to_string()),
+                    }
+                }
+                if only.is_some() && !failed.is_empty() {
+                    *asm = backup;
+                    self.model.error = failed.remove(0);
+                    self.asm_links_check(project);
+                    return;
+                }
+                if !failed.is_empty() {
+                    self.model.error = failed.join("; ");
+                }
+                changed = !taken.is_empty();
+                if changed {
+                    note = format!("Updated from file: {}.", taken.join(", "));
+                }
+            }
+            AsmAction::BreakLink(p) => {
+                changed = asm.break_link(p);
+                if changed {
+                    note = "The link is cut: the component keeps the model it has.".into();
+                }
+            }
+            AsmAction::Relink(p, path) => match asm.relink(p, &path, base.as_deref()) {
+                Ok(u) => note = format!("{} is now linked to {}.", u.part, path.display()),
+                Err(e) => {
+                    *asm = backup;
+                    self.model.error = e.to_string();
+                    return;
+                }
+            },
+            AsmAction::ToggleAutoUpdate => {
+                asm.auto_update_links = !asm.auto_update_links;
+                // look at the files again: with it on, links that are already out of date are taken
+                self.asm.links.forget();
+                note = if asm.auto_update_links {
+                    "Linked components now update when their files change.".into()
+                } else {
+                    "Linked components are only marked out of date.".into()
+                };
+            }
             AsmAction::RenameJoint(j, new) => {
                 let new = new.trim().to_string();
                 if j < asm.joints.len() && !new.is_empty() {
@@ -256,11 +309,14 @@ impl DesignWorkspace {
             }
         }
         if !changed {
+            self.asm_links_check(project);
             return;
         }
+        // a joint of a loop that cannot close any more, or a model that no longer evaluates, is refused
         if let Err(e) = asm.solve() {
             *asm = backup;
             self.model.error = e.to_string();
+            self.asm_links_check(project);
             return;
         }
         if !note.is_empty() {
@@ -269,6 +325,7 @@ impl DesignWorkspace {
         project.asm_checkpoint_with(Some(backup.to_bytes()));
         project.mark_extras_dirty();
         self.asm.overlaps = None;
+        self.asm_links_check(project);
     }
 
     // -------------------------------------------------------------------------------------- tree
@@ -317,6 +374,41 @@ impl DesignWorkspace {
                         egui::Color32::WHITE,
                     );
                 }
+                // a linked component: a badge for how its file stands
+                let link = part.and_then(|p| p.link.as_ref());
+                let state = link.and_then(|_| self.asm.links.of(inst.part)).cloned();
+                if let (Some(l), Some(st)) = (link, &state) {
+                    let (colour, mark, what) = match st {
+                        LinkStatus::Current => (GOOD, "L", "up to date with its file".to_string()),
+                        LinkStatus::Stale => (
+                            egui::Color32::from_rgb(222, 140, 20),
+                            "!",
+                            "its file has changed: Update takes the changes".to_string(),
+                        ),
+                        LinkStatus::Missing => (
+                            BAD,
+                            "?",
+                            "its file is missing: the copy in the project is used".to_string(),
+                        ),
+                        LinkStatus::Unreadable(e) => {
+                            (BAD, "!", format!("its file cannot be read: {e}"))
+                        }
+                    };
+                    let c = egui::pos2(
+                        resp.rect.right() - if grounded { 30.0 } else { 12.0 },
+                        resp.rect.center().y,
+                    );
+                    ui.painter().circle_filled(c, 6.5, colour);
+                    ui.painter().text(
+                        c,
+                        egui::Align2::CENTER_CENTER,
+                        mark,
+                        egui::FontId::proportional(9.0),
+                        egui::Color32::WHITE,
+                    );
+                    resp.clone()
+                        .on_hover_text(format!("Linked to {}: {what}", l.abs));
+                }
                 if resp.hovered() {
                     self.asm.hover = Some(i);
                 }
@@ -363,6 +455,35 @@ impl DesignWorkspace {
                     if ui.button("Copy").clicked() {
                         self.actions.push(Action::Asm(AsmAction::Copy(i)));
                         ui.close();
+                    }
+                    if let Some(l) = link {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Linked: {}",
+                                l.rel.as_deref().unwrap_or(&l.abs)
+                            ))
+                            .size(10.5)
+                            .color(TEXT_WEAK),
+                        );
+                        let stale = state.as_ref() == Some(&LinkStatus::Stale);
+                        if ui
+                            .add_enabled(stale, egui::Button::new("Update from file"))
+                            .clicked()
+                        {
+                            self.actions
+                                .push(Action::Asm(AsmAction::UpdateLinks(Some(part_idx))));
+                            ui.close();
+                        }
+                        if ui.button("Link to another file…").clicked() {
+                            self.asm.request = Some(FileRequest::Relink(part_idx));
+                            ui.close();
+                        }
+                        if ui.button("Break link").clicked() {
+                            self.actions
+                                .push(Action::Asm(AsmAction::BreakLink(part_idx)));
+                            ui.close();
+                        }
                     }
                     ui.separator();
                     if ui.button("Isolate").clicked() {
@@ -427,9 +548,14 @@ impl DesignWorkspace {
                         false,
                     );
                     resp.clone().on_hover_text(format!(
-                        "{} joint{}",
+                        "{} joint{}{}",
                         joint.kind.name(),
-                        if joint.as_built { " (as-built)" } else { "" }
+                        if joint.as_built { " (as-built)" } else { "" },
+                        if joint.solved {
+                            ", solved by a loop"
+                        } else {
+                            ""
+                        }
                     ));
                     if resp.clicked() {
                         self.actions.push(Action::Asm(AsmAction::SelectJoint(j)));

@@ -3975,9 +3975,12 @@ fn components_joints_and_motion_make_an_assembly_that_is_saved_with_the_project(
             panic!()
         };
         h.app.design.asm_add_joint(project).unwrap();
-        // the same two components cannot be joined twice (that would close a loop)
-        assert!(h.app.design.asm_add_joint(project).is_err());
+        // the same two components joined twice close a loop: the second joint is solved for, and agrees
+        h.app.design.asm_add_joint(project).unwrap();
         let a = project.assembly.as_mut().unwrap();
+        assert_eq!(a.joints.len(), 2);
+        assert!(a.joints[1].solved && !a.joints[0].solved);
+        a.remove_joint(1);
         a.joints[0].values[0] = kw_expr::Param::angle_deg(90.0);
         let placed = a.solve().unwrap();
         // the copy's point (20, 0, 0) turns a quarter about the vertical line through (10, 10): (10, 30, 10)
@@ -8196,4 +8199,324 @@ fn a_matched_edge_shows_as_tangent_in_the_continuity_display() {
         7,
         "{classes:?}"
     );
+}
+
+// ------------------------------------------------------------------------------------ linked files
+
+/// Write a `.kwf` holding a cube of the given side.
+fn write_cube_file(path: &std::path::Path, side: f64) {
+    let m = kw_expr::Param::length;
+    let mut doc = kw_feature::Document::new();
+    let s = doc
+        .add_rect_sketch(
+            "S",
+            kw_feature::PlaneSpec::Xy(m(0.0)),
+            m(0.0),
+            m(0.0),
+            m(side),
+            m(side),
+        )
+        .unwrap();
+    doc.add_extrude("Box", s, m(side), kw_feature::BodyOp::New)
+        .unwrap();
+    kw_feature::kwf::KwfFile::new(doc).save(path).unwrap();
+    // file times have a granularity: make sure the next write is seen as a change
+    std::thread::sleep(std::time::Duration::from_millis(30));
+}
+
+fn part_volume(h: &mut Harness, part: usize) -> f64 {
+    doc_volume(&asm_of(h).parts[part].document)
+}
+
+#[test]
+fn a_linked_component_notices_its_file_changing_and_updates_on_request() {
+    use kw_app::design::assembly::AsmAction as A;
+    use kw_assembly::LinkStatus;
+    let (mut h, dir) = design_harness("links");
+    let file = dir.join("cube.kwf");
+    write_cube_file(&file, 10.0);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_insert_path(project, &file).unwrap();
+        let link = project.assembly.as_ref().unwrap().parts[0]
+            .link
+            .clone()
+            .expect("an inserted file stays linked");
+        assert_eq!(link.rel.as_deref(), Some("cube.kwf"));
+        h.app.design.asm_links_check(project);
+    }
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Current));
+    assert!((part_volume(&mut h, 0) - 1000.0).abs() < 1e-6);
+    // the file is made bigger elsewhere: the component says so, and keeps the model it has
+    write_cube_file(&file, 20.0);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_links_check(project);
+    }
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Stale));
+    assert!(
+        h.app.design.status.contains("out of date"),
+        "{}",
+        h.app.design.status
+    );
+    assert!((part_volume(&mut h, 0) - 1000.0).abs() < 1e-6);
+    // Update Links takes the change, and Undo gives the old model back
+    act(&mut h, Action::Asm(A::UpdateLinks(None)));
+    assert!((part_volume(&mut h, 0) - 8000.0).abs() < 1e-6);
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Current));
+    assert!(proj(&mut h).is_dirty());
+    assert!(proj(&mut h).asm_undo());
+    assert!((part_volume(&mut h, 0) - 1000.0).abs() < 1e-6);
+    // a component linked to a file cannot be edited in place: break the link first
+    let err = proj(&mut h).activate_component(0).unwrap_err();
+    assert!(err.contains("linked"), "{err}");
+    act(&mut h, Action::Asm(A::BreakLink(0)));
+    assert!(asm_of(&mut h).parts[0].link.is_none());
+    assert!(proj(&mut h).activate_component(0).is_ok());
+}
+
+#[test]
+fn linked_files_are_watched_while_the_workspace_runs_and_can_update_by_themselves() {
+    use kw_app::design::assembly::AsmAction as A;
+    use kw_assembly::LinkStatus;
+    let (mut h, dir) = design_harness("links_watch");
+    let file = dir.join("cube.kwf");
+    write_cube_file(&file, 10.0);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_insert_path(project, &file).unwrap();
+    }
+    h.app.design.asm.links.poll_every = 1;
+    h.frame();
+    h.frame();
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Current));
+    // nobody asked for the file to be read again, yet a change shows up within a frame or two
+    write_cube_file(&file, 20.0);
+    h.frame();
+    h.frame();
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Stale));
+    assert!((part_volume(&mut h, 0) - 1000.0).abs() < 1e-6);
+    // with auto-update on, the next change is taken without being asked
+    act(&mut h, Action::Asm(A::ToggleAutoUpdate));
+    assert!(asm_of(&mut h).auto_update_links);
+    h.frame();
+    h.frame();
+    assert!(
+        (part_volume(&mut h, 0) - 8000.0).abs() < 1e-6,
+        "the stale link is taken at once"
+    );
+    write_cube_file(&file, 30.0);
+    h.frame();
+    h.frame();
+    assert!((part_volume(&mut h, 0) - 27000.0).abs() < 1e-6);
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Current));
+    // a file that disappears is marked, and the copy goes on being used
+    std::fs::remove_file(&file).unwrap();
+    h.frame();
+    h.frame();
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Missing));
+    assert!((part_volume(&mut h, 0) - 27000.0).abs() < 1e-6);
+    assert!(asm_of(&mut h).solve().is_ok());
+}
+
+#[test]
+fn links_survive_saving_reopening_and_saving_elsewhere() {
+    use kw_assembly::LinkStatus;
+    let (mut h, dir) = design_harness("links_save");
+    let file = dir.join("cube.kwf");
+    write_cube_file(&file, 10.0);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_insert_path(project, &file).unwrap();
+        project.save().unwrap();
+    }
+    // the file changes while the project is closed: it opens saying so, with the old model in it
+    write_cube_file(&file, 20.0);
+    let path = proj(&mut h).path.clone().unwrap();
+    let reopened = kw_app::project::Project::open(&path).unwrap();
+    let a = reopened.assembly.as_ref().unwrap();
+    assert_eq!(
+        a.link_status(reopened.base_dir().as_deref()),
+        vec![(0, LinkStatus::Stale)]
+    );
+    assert!((doc_volume(&a.parts[0].document) - 1000.0).abs() < 1e-6);
+    // saved in a folder below, the link leads up to the same file
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    proj(&mut h).save_as(&sub.join("moved.kwf")).unwrap();
+    let again = kw_app::project::Project::open(&sub.join("moved.kwf")).unwrap();
+    let link = again.assembly.as_ref().unwrap().parts[0]
+        .link
+        .clone()
+        .unwrap();
+    assert_eq!(link.rel.as_deref(), Some("../cube.kwf"));
+    assert_eq!(
+        again
+            .assembly
+            .as_ref()
+            .unwrap()
+            .link_status(again.base_dir().as_deref()),
+        vec![(0, LinkStatus::Stale)]
+    );
+}
+
+#[test]
+fn a_copy_inserted_from_a_file_does_not_follow_it() {
+    let (mut h, dir) = design_harness("links_copy");
+    let file = dir.join("cube.kwf");
+    write_cube_file(&file, 10.0);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app
+            .design
+            .asm_insert_path_as(project, &file, false)
+            .unwrap();
+        assert!(project.assembly.as_ref().unwrap().parts[0].link.is_none());
+    }
+    h.frame();
+    assert!(h.app.design.asm.links.status.is_empty());
+}
+
+#[test]
+fn a_four_bar_is_built_from_joints_and_the_window_shows_its_freedom() {
+    use kw_assembly::{Frame, Joint, JointEnd, JointKind, Part};
+    let (mut h, _dir) = design_harness("fourbar");
+    // four thin bars with a frame at each end
+    let bar = |name: &str, len: f64| {
+        let m = kw_expr::Param::length;
+        let mut doc = kw_feature::Document::new();
+        let s = doc
+            .add_rect_sketch(
+                "S",
+                kw_feature::PlaneSpec::Xy(m(0.0)),
+                m(0.0),
+                m(-2.0),
+                m(len),
+                m(2.0),
+            )
+            .unwrap();
+        doc.add_extrude("Bar", s, m(4.0), kw_feature::BodyOp::New)
+            .unwrap();
+        Part::new(
+            name,
+            doc,
+            vec![
+                Frame::new("a", [0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+                Frame::new("b", [len, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            ],
+        )
+    };
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let mut m = kw_assembly::Assembly::new("Four-bar");
+        let g = m.add_part(bar("Ground", 70.0));
+        let k = m.add_part(bar("Crank", 40.0));
+        let c = m.add_part(bar("Coupler", 80.0));
+        let r = m.add_part(bar("Rocker", 60.0));
+        let gi = m.add_instance("ground", g);
+        let ki = m.add_instance("crank", k);
+        let ci = m.add_instance("coupler", c);
+        let ri = m.add_instance("rocker", r);
+        m.ground = gi;
+        let end = |i: usize, f: &str| JointEnd {
+            instance: i,
+            frame: f.into(),
+        };
+        let rev = |n: &str, p: JointEnd, c: JointEnd| Joint::new(n, JointKind::Revolute, p, c);
+        m.add_joint(rev("input", end(gi, "a"), end(ki, "a")));
+        m.add_joint(rev("elbow", end(ki, "b"), end(ci, "a")));
+        m.add_joint(rev("wrist", end(ci, "b"), end(ri, "b")));
+        // the last joint closes the loop: the loop's joints become solved, the input stays driven
+        m.try_add_joint(rev("pivot", end(gi, "b"), end(ri, "a")))
+            .unwrap();
+        project.assembly = Some(m);
+    }
+    let a = asm_of(&mut h);
+    assert_eq!(
+        a.joints.iter().map(|j| j.solved).collect::<Vec<_>>(),
+        vec![false, true, true, true]
+    );
+    let mob = a.mobility().unwrap();
+    assert_eq!((mob.dof, mob.driven, mob.solved), (1, 1, 3));
+    // the window and the posed view draw it, and know its freedom
+    h.app.design.asm.open = true;
+    h.app.design.asm.view = true;
+    h.frame();
+    h.frame();
+    assert_eq!(h.app.design.asm.mobility().map(|m| m.dof), Some(1));
+    // the input is turned a little: the other joints follow and the loop stays closed
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        let a = project.assembly.as_mut().unwrap();
+        a.joints[0].values = vec![kw_expr::Param::angle_deg(25.0)];
+        a.settle().unwrap();
+        let t = a.solve().unwrap();
+        let joint_a = t[2].apply_point(&kw_math::Point3::new(80.0, 0.0, 0.0));
+        let joint_b = t[3].apply_point(&kw_math::Point3::new(60.0, 0.0, 0.0));
+        assert!((joint_a - joint_b).norm() < 1e-6);
+    }
+}
+
+#[test]
+fn a_file_that_holds_an_assembly_is_inserted_as_a_linked_sub_assembly() {
+    use kw_assembly::LinkStatus;
+    let (mut h, dir) = design_harness("links_sub");
+    // an assembly saved in a file of its own
+    let file = dir.join("pair.kwf");
+    {
+        let mut inner = kw_assembly::Assembly::new("Pair");
+        let part = {
+            write_cube_file(&dir.join("seed.kwf"), 10.0);
+            let doc = kw_feature::kwf::KwfFile::load(&dir.join("seed.kwf"))
+                .unwrap()
+                .document;
+            kw_assembly::Part::new(
+                "Cube",
+                doc,
+                vec![kw_assembly::Frame::new(
+                    "f",
+                    [0.0; 3],
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                )],
+            )
+        };
+        let p = inner.add_part(part);
+        let a = inner.add_instance("a", p);
+        inner.add_instance("b", p);
+        inner.ground = a;
+        let mut f = kw_feature::kwf::KwfFile::new(kw_feature::Document::new());
+        inner.attach(&mut f);
+        f.save(&file).unwrap();
+    }
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.asm_insert_path(project, &file).unwrap();
+        h.app.design.asm_links_check(project);
+        let a = project.assembly.as_ref().unwrap();
+        let part = &a.parts[0];
+        assert_eq!(part.sub.as_ref().map(|s| s.instances.len()), Some(2));
+        assert_eq!(
+            part.link.as_ref().map(|l| l.kind),
+            Some(kw_assembly::LinkKind::Assembly)
+        );
+        assert!(a.solve().is_ok());
+    }
+    assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Current));
 }

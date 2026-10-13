@@ -767,8 +767,13 @@ impl DesignWorkspace {
             _ => JointEdit::load(asm, j),
         };
         let joint = &asm.joints[j];
-        let (name, kind, flip, as_built) =
-            (joint.name.clone(), joint.kind, joint.flip, joint.as_built);
+        let (name, kind, flip, as_built, solved) = (
+            joint.name.clone(),
+            joint.kind,
+            joint.flip,
+            joint.as_built,
+            joint.solved,
+        );
         let pair = {
             let n = |i: usize| {
                 asm.instances
@@ -787,6 +792,7 @@ impl DesignWorkspace {
         let mut changed = false;
         let mut new_kind = None;
         let mut flip_now = flip;
+        let mut solved_now = solved;
         let mut close = false;
         let mut delete = false;
         let mut open = true;
@@ -819,6 +825,16 @@ impl DesignWorkspace {
                 new_kind = Some(k);
             }
             if ui.checkbox(&mut flip_now, "Flip").changed() {
+                changed = true;
+            }
+            if kind.arity() > 0
+                && ui
+                    .checkbox(&mut solved_now, "Solved by a loop")
+                    .on_hover_text(
+                        "Its values are found so that the kinematic loops close, instead of being set by hand. Leave one joint of every loop driven: that is the input.",
+                    )
+                    .changed()
+            {
                 changed = true;
             }
             ui.horizontal(|ui| {
@@ -923,7 +939,7 @@ impl DesignWorkspace {
             self.actions.push(Action::Asm(AsmAction::DeleteJoint(j)));
             return;
         }
-        if new_kind.is_some() || flip_now != flip || changed {
+        if new_kind.is_some() || flip_now != flip || solved_now != solved || changed {
             let asm = project.assembly.as_mut().unwrap();
             let backup = asm.joints[j].clone();
             if let Some(k) = new_kind {
@@ -933,12 +949,14 @@ impl DesignWorkspace {
                 jt.limits = vec![None; k.arity()];
             }
             asm.joints[j].flip = flip_now;
+            asm.joints[j].solved = solved_now;
             let result = if new_kind.is_some() {
                 Ok(())
             } else {
                 edit.apply(asm)
             }
-            .and_then(|_| asm.solve().map(|_| ()).map_err(|e| e.to_string()));
+            // the joints of the loops follow the value that was set (and a change that leaves a loop open is refused)
+            .and_then(|_| asm.settle().map(|_| ()).map_err(|e| e.to_string()));
             match result {
                 Ok(()) => {
                     edit.error.clear();

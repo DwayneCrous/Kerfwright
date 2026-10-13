@@ -174,12 +174,325 @@ fn loops_are_refused_with_an_explanation_and_loose_components_float() {
         vec![],
         vec![],
     ));
+    // the lid is open 10 degrees and the copy is not: a rigid joint between them cannot close
     let err = a.solve().unwrap_err();
     assert!(
-        matches!(&err, AssemblyError::Loop { joint, .. } if joint == "closing joint"),
+        matches!(&err, AssemblyError::LoopNotClosed { joint, free: 0, .. } if joint == "closing joint"),
         "{err}"
     );
     assert!(err.to_string().contains("loop"));
+    // with the lid shut the loop closes by itself (the joints agree)
+    a.joints[0].values = vec![Param::angle_deg(0.0)];
+    assert!(a.solve().is_ok());
+}
+
+// ------------------------------------------------------------------------------- kinematic loops
+
+/// A part that is a thin bar with named frames (z out of the plane, x along the bar).
+fn bar(name: &str, frames: &[(&str, [f64; 3])]) -> Part {
+    box_part(
+        name,
+        1.0,
+        1.0,
+        1.0,
+        frames
+            .iter()
+            .map(|(n, o)| Frame::new(n, *o, [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]))
+            .collect(),
+    )
+}
+
+fn angle_of(p: &Param) -> f64 {
+    p.eval(&std::collections::HashMap::new())
+        .unwrap()
+        .expect(kw_expr::Dim::ANGLE)
+        .unwrap()
+}
+
+fn wrap(a: f64) -> f64 {
+    (a + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI
+}
+
+/// A planar four-bar: ground pivots at (0,0) and (d,0), crank `a`, coupler `b`, rocker `c`. The crank is
+/// the driven input; the other joints are found by the loop solve.
+fn four_bar(a: f64, b: f64, c: f64, d: f64) -> Assembly {
+    let mut m = Assembly::new("Four-bar");
+    let ground = m.add_part(bar("Ground", &[("g0", [0.0; 3]), ("g1", [d, 0.0, 0.0])]));
+    let crank = m.add_part(bar("Crank", &[("o", [0.0; 3]), ("tip", [a, 0.0, 0.0])]));
+    let coupler = m.add_part(bar("Coupler", &[("p", [0.0; 3]), ("q", [b, 0.0, 0.0])]));
+    let rocker = m.add_part(bar("Rocker", &[("s", [0.0; 3]), ("t", [c, 0.0, 0.0])]));
+    let g = m.add_instance("ground", ground);
+    let k = m.add_instance("crank", crank);
+    let p = m.add_instance("coupler", coupler);
+    let r = m.add_instance("rocker", rocker);
+    m.ground = g;
+    let rev = |n: &str, pa: (usize, &str), ch: (usize, &str)| {
+        joint(
+            n,
+            JointKind::Revolute,
+            pa,
+            ch,
+            vec![Param::angle_deg(0.0)],
+            vec![None],
+        )
+    };
+    m.add_joint(rev("input", (g, "g0"), (k, "o")));
+    m.add_joint(rev("elbow", (k, "tip"), (p, "p")));
+    m.add_joint(rev("wrist", (p, "q"), (r, "t")));
+    // this one closes the loop
+    m.add_joint(rev("pivot", (g, "g1"), (r, "s")));
+    m
+}
+
+/// The closed-form solution of the four-bar for a crank angle: (coupler angle, rocker angle) in the world.
+fn four_bar_angles(a: f64, b: f64, c: f64, d: f64, theta: f64, up: bool) -> (f64, f64) {
+    let (ax, ay) = (a * theta.cos(), a * theta.sin());
+    let (vx, vy) = (d - ax, -ay);
+    let l = (vx * vx + vy * vy).sqrt();
+    let x = (b * b - c * c + l * l) / (2.0 * l);
+    let h = (b * b - x * x).sqrt() * if up { 1.0 } else { -1.0 };
+    let (bx, by) = (ax + (x * vx - h * vy) / l, ay + (x * vy + h * vx) / l);
+    ((by - ay).atan2(bx - ax), by.atan2(bx - d))
+}
+
+#[test]
+fn a_four_bar_closes_its_loop_and_follows_the_closed_form_solution() {
+    let (a, b, c, d) = (40.0, 80.0, 60.0, 70.0);
+    let mut m = four_bar(a, b, c, d);
+    // the loop's joints are solved for, the input is not
+    let solved: Vec<bool> = m.joints.iter().map(|j| j.solved).collect();
+    assert_eq!(solved, vec![false, true, true, true]);
+    // start near the branch we want
+    let theta0 = 30f64.to_radians();
+    let (psi, phi) = four_bar_angles(a, b, c, d, theta0, true);
+    m.joints[0].values = vec![Param::Lit(Quantity::angle(theta0))];
+    m.joints[1].values = vec![Param::Lit(Quantity::angle(psi - theta0 + 0.05))];
+    m.joints[2].values = vec![Param::Lit(Quantity::angle(phi - psi - 0.05))];
+    m.joints[3].values = vec![Param::Lit(Quantity::angle(phi + 0.05))];
+    let mut prev = None;
+    for deg in (30..=150).step_by(10) {
+        let theta = (deg as f64).to_radians();
+        m.joints[0].values = vec![Param::Lit(Quantity::angle(theta))];
+        let t = m.settle().unwrap();
+        let (psi, phi) = four_bar_angles(a, b, c, d, theta, true);
+        // the coupler and rocker joints really meet, and sit where the closed form puts them
+        let q = t[2].apply_point(&Point3::new(b, 0.0, 0.0));
+        let tip = t[3].apply_point(&Point3::new(c, 0.0, 0.0));
+        assert!((q - tip).norm() < 1e-6, "{deg}: {}", (q - tip).norm());
+        let rocker_end = Point3::new(d + c * phi.cos(), c * phi.sin(), 0.0);
+        assert!(
+            (tip - rocker_end).norm() < 1e-5,
+            "{deg}: {tip} vs {rocker_end}"
+        );
+        let v = angle_of(&m.joints[3].values[0]);
+        assert!(wrap(v - phi).abs() < 1e-6, "{deg}: {v} vs {phi}");
+        let elbow = angle_of(&m.joints[1].values[0]);
+        assert!(wrap(elbow - (psi - theta)).abs() < 1e-6);
+        // one step of the input moves the output a little: the same branch is followed
+        if let Some(p) = prev {
+            assert!(wrap(v - p).abs() < 0.5);
+        }
+        prev = Some(v);
+    }
+    // a four-bar has one degree of freedom (three of its six closure equations are independent)
+    let mob = m.mobility().unwrap();
+    assert_eq!(mob.dof, 1, "{mob:?}");
+    assert_eq!((mob.variables, mob.equations, mob.rank), (4, 6, 3));
+    assert_eq!((mob.driven, mob.solved), (1, 3));
+}
+
+#[test]
+fn a_sweep_follows_one_branch_and_leaves_the_assembly_as_it_was() {
+    let (a, b, c, d) = (40.0, 80.0, 60.0, 70.0);
+    let mut m = four_bar(a, b, c, d);
+    let theta0 = 20f64.to_radians();
+    let (psi, phi) = four_bar_angles(a, b, c, d, theta0, true);
+    m.joints[0].values = vec![Param::Lit(Quantity::angle(theta0))];
+    m.joints[1].values = vec![Param::Lit(Quantity::angle(psi - theta0))];
+    m.joints[2].values = vec![Param::Lit(Quantity::angle(phi - psi))];
+    m.joints[3].values = vec![Param::Lit(Quantity::angle(phi))];
+    m.settle().unwrap();
+    let before = m.joints.clone();
+    let (steps, stopped) = m.sweep(0, 0, theta0, 170f64.to_radians(), 60).unwrap();
+    assert!(stopped.is_none(), "{stopped:?}");
+    assert_eq!(steps.len(), 61);
+    // each step is a valid, closed pose and the rocker never jumps
+    let mut last = f64::NAN;
+    for st in &steps {
+        let (_, phi) = four_bar_angles(a, b, c, d, st.value, true);
+        let tip = st.placed[3].apply_point(&Point3::new(c, 0.0, 0.0));
+        assert!((tip - Point3::new(d + c * phi.cos(), c * phi.sin(), 0.0)).norm() < 1e-5);
+        let ang = tip.y.atan2(tip.x - d);
+        if last.is_finite() {
+            assert!(wrap(ang - last).abs() < 0.2);
+        }
+        last = ang;
+    }
+    assert_eq!(m.joints, before, "a sweep puts the joint values back");
+    // a solved joint cannot be swept
+    assert!(m.sweep(2, 0, 0.0, 1.0, 4).is_err());
+}
+
+#[test]
+fn a_slider_crank_puts_the_piston_where_the_closed_form_says() {
+    let (r, l) = (30.0, 90.0);
+    let mut m = Assembly::new("Slider-crank");
+    let ground = m.add_part(Part::new(
+        "Ground",
+        box_part("g", 1.0, 1.0, 1.0, vec![]).document,
+        vec![
+            Frame::new("o", [0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            // the rail: the slider moves along the joint's z, which is the world x here
+            Frame::new("rail", [0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ],
+    ));
+    let crank = m.add_part(bar("Crank", &[("o", [0.0; 3]), ("tip", [r, 0.0, 0.0])]));
+    let rod = m.add_part(bar("Rod", &[("p", [0.0; 3]), ("q", [l, 0.0, 0.0])]));
+    let piston = m.add_part(Part::new(
+        "Piston",
+        box_part("p", 1.0, 1.0, 1.0, vec![]).document,
+        vec![
+            Frame::new("pin", [0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            Frame::new("slide", [0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ],
+    ));
+    let g = m.add_instance("ground", ground);
+    let k = m.add_instance("crank", crank);
+    let o = m.add_instance("rod", rod);
+    let p = m.add_instance("piston", piston);
+    m.ground = g;
+    let rev = |n: &str, pa: (usize, &str), ch: (usize, &str)| {
+        joint(
+            n,
+            JointKind::Revolute,
+            pa,
+            ch,
+            vec![Param::angle_deg(0.0)],
+            vec![None],
+        )
+    };
+    m.add_joint(rev("input", (g, "o"), (k, "o")));
+    m.add_joint(rev("big end", (k, "tip"), (o, "p")));
+    m.add_joint(rev("gudgeon", (o, "q"), (p, "pin")));
+    m.add_joint(joint(
+        "bore",
+        JointKind::Slider,
+        (g, "rail"),
+        (p, "slide"),
+        vec![mm(0.0)],
+        vec![None],
+    ));
+    assert_eq!(
+        m.joints.iter().map(|j| j.solved).collect::<Vec<_>>(),
+        vec![false, true, true, true]
+    );
+    // start at top dead centre, where the rod lies along the rail
+    m.joints[3].values = vec![mm(r + l)];
+    m.joints[2].values = vec![Param::angle_deg(0.0)];
+    let mut worst = 0.0f64;
+    for deg in (0..=360).step_by(15) {
+        let th = (deg as f64).to_radians();
+        m.joints[0].values = vec![Param::Lit(Quantity::angle(th))];
+        let t = m.settle().unwrap();
+        let x = r * th.cos() + (l * l - r * r * th.sin().powi(2)).sqrt();
+        let at = t[3].apply_point(&Point3::origin());
+        worst = worst.max((at - Point3::new(x, 0.0, 0.0)).norm());
+    }
+    assert!(worst < 1e-5, "piston error {worst}");
+    assert_eq!(m.mobility().unwrap().dof, 1);
+}
+
+#[test]
+fn a_mechanism_that_cannot_reach_a_position_says_so() {
+    // a crank longer than the other links can reach: at 90 degrees the loop cannot close
+    let mut m = four_bar(40.0, 30.0, 20.0, 70.0);
+    m.joints[1].values = vec![Param::angle_deg(10.0)];
+    m.joints[2].values = vec![Param::angle_deg(-10.0)];
+    m.joints[3].values = vec![Param::angle_deg(0.0)];
+    m.joints[0].values = vec![Param::angle_deg(0.0)];
+    assert!(m.settle().is_ok());
+    m.joints[0].values = vec![Param::angle_deg(90.0)];
+    let err = m.solve().unwrap_err();
+    assert!(
+        matches!(err, AssemblyError::LoopNotClosed { free, .. } if free == 3),
+        "{err}"
+    );
+    assert!(err.to_string().contains("cannot reach"), "{err}");
+    // a failed settle changes nothing
+    let before = m.joints.clone();
+    assert!(m.settle().is_err());
+    assert_eq!(m.joints, before);
+}
+
+#[test]
+fn limits_of_a_solved_joint_stop_the_mechanism() {
+    let (a, b, c, d) = (40.0, 80.0, 60.0, 70.0);
+    let mut m = four_bar(a, b, c, d);
+    let theta0 = 30f64.to_radians();
+    let (psi, phi) = four_bar_angles(a, b, c, d, theta0, true);
+    m.joints[0].values = vec![Param::Lit(Quantity::angle(theta0))];
+    m.joints[1].values = vec![Param::Lit(Quantity::angle(psi - theta0))];
+    m.joints[2].values = vec![Param::Lit(Quantity::angle(phi - psi))];
+    m.joints[3].values = vec![Param::Lit(Quantity::angle(phi))];
+    // the rocker may only swing a quarter turn either side of where it starts
+    m.joints[3].limits = vec![Some((phi - 0.25, phi + 0.25))];
+    m.settle().unwrap();
+    let (steps, stopped) = m.sweep(0, 0, theta0, 170f64.to_radians(), 70).unwrap();
+    assert!(!steps.is_empty() && steps.len() < 71, "{}", steps.len());
+    assert!(
+        matches!(stopped, Some(AssemblyError::LoopNotClosed { .. })),
+        "{stopped:?}"
+    );
+}
+
+#[test]
+fn dragging_any_link_of_a_four_bar_turns_the_input() {
+    let (a, b, c, d) = (40.0, 80.0, 60.0, 70.0);
+    let mut m = four_bar(a, b, c, d);
+    let theta0 = 30f64.to_radians();
+    let (psi, phi) = four_bar_angles(a, b, c, d, theta0, true);
+    m.joints[0].values = vec![Param::Lit(Quantity::angle(theta0))];
+    m.joints[1].values = vec![Param::Lit(Quantity::angle(psi - theta0))];
+    m.joints[2].values = vec![Param::Lit(Quantity::angle(phi - psi))];
+    m.joints[3].values = vec![Param::Lit(Quantity::angle(phi))];
+    m.settle().unwrap();
+    // the crank is dragged by its own joint; the coupler and rocker by the input, since their own joints are solved
+    assert_eq!(m.drive_joint(1), Some(0));
+    assert_eq!(m.drive_joint(2), Some(0));
+    assert_eq!(m.drive_joint(3), Some(0));
+    assert_eq!(m.drive_joint(0), None);
+}
+
+#[test]
+fn dragging_the_coupler_of_a_four_bar_follows_the_pointer_along_its_path() {
+    let (a, b, c, d) = (40.0, 80.0, 60.0, 70.0);
+    let mut m = four_bar(a, b, c, d);
+    let theta0 = 30f64.to_radians();
+    let (psi, phi) = four_bar_angles(a, b, c, d, theta0, true);
+    m.joints[0].values = vec![Param::Lit(Quantity::angle(theta0))];
+    m.joints[1].values = vec![Param::Lit(Quantity::angle(psi - theta0))];
+    m.joints[2].values = vec![Param::Lit(Quantity::angle(phi - psi))];
+    m.joints[3].values = vec![Param::Lit(Quantity::angle(phi))];
+    m.settle().unwrap();
+    // grab the coupler's far end, where it meets the rocker
+    let t = m.solve().unwrap();
+    let grab = t[2].apply_point(&Point3::new(b, 0.0, 0.0));
+    let mut drag = Drag::begin(&m, 2, [grab.x, grab.y, grab.z], [0.0, 0.0, -1.0]).unwrap();
+    assert_eq!(drag.joint(), Some(0), "the pointer turns the input");
+    // the pointer goes to where that end is when the crank is at 70 degrees
+    let theta = 70f64.to_radians();
+    let (psi, _) = four_bar_angles(a, b, c, d, theta, true);
+    let target = [
+        a * theta.cos() + b * psi.cos(),
+        a * theta.sin() + b * psi.sin(),
+        0.0,
+    ];
+    drag.update(&mut m, &ray_through(target, [0.0, 0.0, -1.0]))
+        .unwrap();
+    let v = angle_of(&m.joints[0].values[0]);
+    assert!((v - theta).abs() < 1e-4, "{}°", v.to_degrees());
+    let end = m.solve().unwrap()[2].apply_point(&Point3::new(b, 0.0, 0.0));
+    assert!((end - Point3::new(target[0], target[1], target[2])).norm() < 1e-3);
 }
 
 #[test]
@@ -1153,4 +1466,287 @@ fn parts_nobody_uses_are_pruned_and_the_rest_renumbered() {
     assert!(a.solve().is_ok());
     // nothing to prune the second time
     assert_eq!(a.prune_unused_parts(), 0);
+}
+
+// ------------------------------------------------------------------------------------ linked files
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let d = std::env::temp_dir().join(format!(
+        "kw-asm-{name}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn frame0() -> Vec<Frame> {
+    vec![Frame::new("f", [0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0])]
+}
+
+/// Write a `.kwf` holding a cube of the given side and return its model.
+fn write_cube(path: &std::path::Path, side: f64) -> Document {
+    let doc = box_part("Cube", side, side, side, vec![]).document;
+    KwfFile::new(doc.clone()).save(path).unwrap();
+    doc
+}
+
+/// An assembly with one part linked to `file`, taken as a cube of side 10.
+fn linked(dir: &std::path::Path, file: &std::path::Path) -> Assembly {
+    let doc = write_cube(file, 10.0);
+    let mut part = Part::new("Cube", doc.clone(), frame0());
+    part.link = Some(PartLink::new(file, Some(dir), &doc));
+    let mut a = Assembly::new("Linked");
+    let p = a.add_part(part);
+    a.ground = a.add_instance("cube", p);
+    a
+}
+
+fn volume(a: &Assembly) -> f64 {
+    a.pose(&mut Engine::with_threads(2))
+        .unwrap()
+        .mass()
+        .unwrap()
+        .0
+}
+
+#[test]
+fn a_linked_part_goes_stale_when_its_file_changes_and_updates_on_request() {
+    let dir = scratch("stale");
+    let file = dir.join("cube.kwf");
+    let mut a = linked(&dir, &file);
+    assert_eq!(a.link_status(Some(&dir)), vec![(0, LinkStatus::Current)]);
+    assert!((volume(&a) - 1000.0).abs() < 1e-6);
+    let frames = a.parts[0].frames.clone();
+    // someone makes the cube bigger upstream
+    write_cube(&file, 20.0);
+    assert_eq!(a.link_status(Some(&dir)), vec![(0, LinkStatus::Stale)]);
+    // nothing changes until asked: the cached model is still the old one
+    assert!((volume(&a) - 1000.0).abs() < 1e-6);
+    let report = a.update_link(0, Some(&dir)).unwrap();
+    assert!(report.changed && report.part == "Cube");
+    assert_eq!(a.link_status(Some(&dir)), vec![(0, LinkStatus::Current)]);
+    assert!((volume(&a) - 8000.0).abs() < 1e-6);
+    assert_eq!(a.parts[0].frames, frames, "frames survive an update");
+    // updating when nothing changed says so
+    assert!(!a.update_link(0, Some(&dir)).unwrap().changed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn update_links_takes_every_out_of_date_part_and_reports_the_rest() {
+    let dir = scratch("many");
+    let (f1, f2) = (dir.join("one.kwf"), dir.join("two.kwf"));
+    let mut a = linked(&dir, &f1);
+    let doc2 = write_cube(&f2, 5.0);
+    let mut p2 = Part::new("Two", doc2.clone(), frame0());
+    p2.link = Some(PartLink::new(&f2, Some(&dir), &doc2));
+    a.add_part(p2);
+    write_cube(&f1, 30.0);
+    let done = a.update_links(Some(&dir));
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].0, 0);
+    assert!(done[0].1.as_ref().unwrap().changed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_missing_or_damaged_file_leaves_the_cached_model_in_use() {
+    let dir = scratch("missing");
+    let file = dir.join("cube.kwf");
+    let mut a = linked(&dir, &file);
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(a.link_status(Some(&dir)), vec![(0, LinkStatus::Missing)]);
+    // the assembly still solves and poses from the copy it carries
+    assert!(a.solve().is_ok());
+    assert!((volume(&a) - 1000.0).abs() < 1e-6);
+    let err = a.update_link(0, Some(&dir)).unwrap_err().to_string();
+    assert!(err.contains("not there"), "{err}");
+    assert!((volume(&a) - 1000.0).abs() < 1e-6);
+    // a file that is not a model is reported as unreadable
+    std::fs::write(&file, b"this is not a kwf file").unwrap();
+    assert!(matches!(
+        a.link_status(Some(&dir))[0].1,
+        LinkStatus::Unreadable(_)
+    ));
+    assert!(a.update_link(0, Some(&dir)).is_err());
+    assert!((volume(&a) - 1000.0).abs() < 1e-6);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn links_are_relative_to_the_project_and_follow_it_when_it_moves() {
+    let root = scratch("move");
+    let project = root.join("project");
+    let parts = root.join("parts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&parts).unwrap();
+    let file = parts.join("cube.kwf");
+    let mut a = linked(&project, &file);
+    let link = a.parts[0].link.clone().unwrap();
+    assert_eq!(link.rel.as_deref(), Some("../parts/cube.kwf"));
+    // the whole tree is moved: the relative path still leads to the file, the absolute one does not
+    let moved = std::env::temp_dir().join(format!("kw-asm-moved-{}", std::process::id()));
+    std::fs::remove_dir_all(&moved).ok();
+    std::fs::rename(&root, &moved).unwrap();
+    let project2 = moved.join("project");
+    assert_eq!(
+        a.link_status(Some(&project2)),
+        vec![(0, LinkStatus::Current)]
+    );
+    assert_eq!(a.link_status(None), vec![(0, LinkStatus::Missing)]);
+    // opening refreshes the stored paths
+    assert!(a.rebase_links(Some(&project2), &project2));
+    assert!(
+        !a.rebase_links(Some(&project2), &project2),
+        "nothing more to change"
+    );
+    assert_eq!(a.link_status(None), vec![(0, LinkStatus::Current)]);
+    // saving in another folder keeps the link pointing at the same file
+    let elsewhere = moved.join("deeper").join("again");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    a.rebase_links(Some(&project2), &elsewhere);
+    assert_eq!(
+        a.parts[0].link.as_ref().unwrap().rel.as_deref(),
+        Some("../../parts/cube.kwf")
+    );
+    assert_eq!(
+        a.link_status(Some(&elsewhere)),
+        vec![(0, LinkStatus::Current)]
+    );
+    std::fs::remove_dir_all(&moved).ok();
+}
+
+#[test]
+fn links_can_be_broken_or_pointed_elsewhere_and_are_stored_with_the_assembly() {
+    let dir = scratch("break");
+    let file = dir.join("cube.kwf");
+    let other = dir.join("other.kwf");
+    let mut a = linked(&dir, &file);
+    // stored with the assembly and read back the same
+    let back = Assembly::from_bytes(&a.to_bytes()).unwrap();
+    assert_eq!(a, back);
+    // pointing it at another file takes that file's model
+    write_cube(&other, 40.0);
+    let r = a.relink(0, &other, Some(&dir)).unwrap();
+    assert!(r.changed);
+    assert!((volume(&a) - 64000.0).abs() < 1e-6);
+    assert_eq!(a.link_status(Some(&dir)), vec![(0, LinkStatus::Current)]);
+    // breaking it keeps the model and stops tracking the file
+    assert!(a.break_link(0));
+    assert!(a.link_status(Some(&dir)).is_empty());
+    assert!(!a.break_link(0));
+    write_cube(&other, 50.0);
+    assert!((volume(&a) - 64000.0).abs() < 1e-6);
+    assert!(a.update_link(0, Some(&dir)).is_err());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn write_asm_file(path: &std::path::Path, asm: &Assembly) {
+    let mut f = KwfFile::new(Document::new());
+    asm.attach(&mut f);
+    f.save(path).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+}
+
+/// A part that is a sub-assembly linked to the assembly stored in `file`.
+fn sub_part(name: &str, file: &std::path::Path, dir: &std::path::Path, sub: Assembly) -> Part {
+    let mut p = Part::new(name, Document::new(), frame0());
+    p.link = Some(PartLink::to_assembly(file, Some(dir), &sub.to_bytes()));
+    p.sub = Some(Box::new(sub));
+    p
+}
+
+#[test]
+fn an_assembly_file_can_be_linked_as_a_sub_assembly_and_follows_its_file() {
+    let dir = scratch("subasm");
+    let file = dir.join("hinge.kwf");
+    let sub = hinge(Param::angle_deg(0.0));
+    write_asm_file(&file, &sub);
+    let mut top = Assembly::new("Top");
+    let p = top.add_part(sub_part("Hinge", &file, &dir, sub));
+    top.ground = top.add_instance("hinge", p);
+    assert_eq!(top.link_status(Some(&dir)), vec![(0, LinkStatus::Current)]);
+    assert!(top.solve().is_ok());
+    // the hinge is opened in its own file
+    let mut opened = hinge(Param::angle_deg(90.0));
+    opened.name = "Hinged lid".into();
+    write_asm_file(&file, &opened);
+    assert_eq!(top.link_status(Some(&dir)), vec![(0, LinkStatus::Stale)]);
+    let r = top.update_link(0, Some(&dir)).unwrap();
+    assert!(r.changed);
+    assert_eq!(top.parts[0].sub.as_deref(), Some(&opened));
+    assert_eq!(top.link_status(Some(&dir)), vec![(0, LinkStatus::Current)]);
+    // the lid really is open in the combined assembly
+    let leaves = top.leaves().unwrap();
+    assert_eq!(leaves.len(), 2);
+    let lid = leaves.iter().find(|l| l.name.ends_with("lid")).unwrap();
+    let p = lid.transform.apply_point(&Point3::new(10.0, 20.0, 0.0));
+    assert!((p - Point3::new(10.0, 0.0, 24.0)).norm() < 1e-9, "{p}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn links_inside_a_linked_assembly_are_followed_down_to_their_own_files() {
+    let root = scratch("nested");
+    let lib = root.join("lib");
+    let proj = root.join("proj");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    // lib/inner.kwf is an assembly of one part linked to lib/cube.kwf
+    let cube = lib.join("cube.kwf");
+    let doc = write_cube(&cube, 10.0);
+    let mut inner = Assembly::new("Inner");
+    let mut part = Part::new("Cube", doc.clone(), frame0());
+    part.link = Some(PartLink::new(&cube, Some(&lib), &doc));
+    let ip = inner.add_part(part);
+    inner.ground = inner.add_instance("cube", ip);
+    let inner_file = lib.join("inner.kwf");
+    write_asm_file(&inner_file, &inner);
+    // proj links to lib/inner.kwf
+    let mut top = Assembly::new("Top");
+    let p = top.add_part(sub_part("Inner", &inner_file, &proj, inner));
+    top.ground = top.add_instance("inner", p);
+    assert_eq!(top.link_status(Some(&proj)), vec![(0, LinkStatus::Current)]);
+    assert!((volume(&top) - 1000.0).abs() < 1e-6);
+    // the cube changes; the inner assembly's own file does not
+    write_cube(&cube, 20.0);
+    assert_eq!(top.link_status(Some(&proj)), vec![(0, LinkStatus::Stale)]);
+    assert!(top.update_link(0, Some(&proj)).unwrap().changed);
+    assert_eq!(top.link_status(Some(&proj)), vec![(0, LinkStatus::Current)]);
+    assert!((volume(&top) - 8000.0).abs() < 1e-6);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn files_that_link_to_each_other_in_a_circle_are_refused() {
+    let dir = scratch("circle");
+    let (fa, fb) = (dir.join("a.kwf"), dir.join("b.kwf"));
+    // placeholders so that the links can be made
+    write_asm_file(&fa, &Assembly::new("A"));
+    write_asm_file(&fb, &Assembly::new("B"));
+    let make = |name: &str, to: &std::path::Path| {
+        let mut a = Assembly::new(name);
+        let mut p = Part::new("Other", Document::new(), frame0());
+        p.link = Some(PartLink::to_assembly(to, Some(&dir), b"x"));
+        p.sub = Some(Box::new(Assembly::new("Other")));
+        let i = a.add_part(p);
+        a.ground = a.add_instance("other", i);
+        a
+    };
+    let (a, b) = (make("A", &fb), make("B", &fa));
+    write_asm_file(&fa, &a);
+    write_asm_file(&fb, &b);
+    // a project that links to a.kwf
+    let mut top = Assembly::new("Top");
+    let mut p = Part::new("A", Document::new(), frame0());
+    p.link = Some(PartLink::to_assembly(&fa, Some(&dir), b"x"));
+    p.sub = Some(Box::new(Assembly::new("A")));
+    let i = top.add_part(p);
+    top.ground = top.add_instance("a", i);
+    let err = top.update_link(0, Some(&dir)).unwrap_err().to_string();
+    assert!(err.contains("circle"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
 }

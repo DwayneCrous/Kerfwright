@@ -39,8 +39,12 @@ fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 /// A file the assembly wants the application to ask for (the dialogs live in the application).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileRequest {
-    /// Choose a `.kwf` to insert as a component.
+    /// Choose a `.kwf` to insert as a component that stays linked to the file.
     Insert,
+    /// Choose a `.kwf` to insert as an independent copy.
+    InsertCopy,
+    /// Choose the `.kwf` that component (part index) is linked to from now on.
+    Relink(usize),
     /// Choose where to write the assembly as STEP.
     ExportStep,
     /// Choose where to write the flat pattern as DXF.
@@ -87,6 +91,86 @@ struct PoseCache {
     edge_body: HashMap<kw_brep::EdgeId, usize>,
     /// Interference has been checked for this pose.
     checked: bool,
+    /// The degrees of freedom of the mechanism (only worked out when some joints are solved by loops).
+    mobility: Option<kw_assembly::Mobility>,
+}
+
+/// A joint value moved back and forth to show a mechanism working (Animate in the Drive Joints window).
+pub struct Animation {
+    pub joint: usize,
+    pub index: usize,
+    /// Where in the value's range it is (0 to 1) and which way it is going.
+    pos: f64,
+    dir: f64,
+    /// The joints as they were when it started; they come back when it stops.
+    saved: Vec<Joint>,
+}
+
+impl Animation {
+    /// Start moving value `index` of joint `joint` from where it is now.
+    fn start(asm: &Assembly, joint: usize, index: usize) -> Animation {
+        let j = &asm.joints[joint];
+        let (lo, hi) = Self::range(j, index);
+        let now = match j.values.get(index) {
+            Some(Param::Lit(q)) => q.value,
+            _ => 0.5 * (lo + hi),
+        };
+        Animation {
+            joint,
+            index,
+            pos: ((now - lo) / (hi - lo)).clamp(0.0, 1.0),
+            dir: 1.0,
+            saved: asm.joints.clone(),
+        }
+    }
+
+    /// The limits of a value, or a sensible range when it has none.
+    fn range(j: &Joint, index: usize) -> (f64, f64) {
+        let angle = j.kind.dims().get(index) == Some(&Dim::ANGLE);
+        j.limits.get(index).copied().flatten().unwrap_or(if angle {
+            (-std::f64::consts::PI, std::f64::consts::PI)
+        } else {
+            (-100.0, 100.0)
+        })
+    }
+
+    /// Advance by `dt` seconds (one sweep of the range takes three). A position the mechanism cannot reach
+    /// turns it round.
+    fn step(&mut self, asm: &mut Assembly, dt: f64) {
+        let Some(j) = asm.joints.get(self.joint) else {
+            return;
+        };
+        let (lo, hi) = Self::range(j, self.index);
+        let angle = j.kind.dims().get(self.index) == Some(&Dim::ANGLE);
+        let before = j.values.get(self.index).cloned();
+        let last = self.pos;
+        self.pos += self.dir * dt / 3.0;
+        if self.pos >= 1.0 {
+            self.pos = 1.0;
+            self.dir = -1.0;
+        } else if self.pos <= 0.0 {
+            self.pos = 0.0;
+            self.dir = 1.0;
+        }
+        let v = lo + (hi - lo) * self.pos;
+        let Some(slot) = asm.joints[self.joint].values.get_mut(self.index) else {
+            return;
+        };
+        *slot = if angle {
+            Param::Lit(kw_expr::Quantity::angle(v))
+        } else {
+            Param::length(v)
+        };
+        if asm.settle().is_err() {
+            if let (Some(slot), Some(b)) =
+                (asm.joints[self.joint].values.get_mut(self.index), before)
+            {
+                *slot = b;
+            }
+            self.pos = last;
+            self.dir = -self.dir;
+        }
+    }
 }
 
 /// A command on the assembly from the browser tree, a menu or a dialog.
@@ -120,6 +204,14 @@ pub enum AsmAction {
     ActivateSelected,
     /// Ground the selected components, or release them when they are all grounded.
     GroundSelected,
+    /// Take the model of a linked part (`None`: of every linked part that is out of date) again from its file.
+    UpdateLinks(Option<usize>),
+    /// Cut a part loose from its file; it keeps the model it has.
+    BreakLink(usize),
+    /// Point a part at another file and take its model.
+    Relink(usize, std::path::PathBuf),
+    /// Switch updating linked parts as soon as their files change.
+    ToggleAutoUpdate,
 }
 
 pub struct AssemblyUi {
@@ -164,12 +256,22 @@ pub struct AssemblyUi {
     /// The assembly as it was when the pointer last went down (what Undo returns to after a slider or a
     /// field was changed).
     pub press_snapshot: Option<Option<Vec<u8>>>,
+    /// The files of linked components, and whether they are out of date.
+    pub links: super::asm_link::LinkWatch,
+    /// A joint value being moved to show the mechanism, and the one the Animate button would move.
+    pub anim: Option<Animation>,
+    pub anim_joint: usize,
 }
 
 impl AssemblyUi {
     /// The posed assembly of the last refresh, or why it could not be posed.
     pub fn pose_ref(&self) -> Option<&Result<Pose, String>> {
         self.cache.as_ref().map(|c| &c.pose)
+    }
+
+    /// The degrees of freedom of the posed mechanism, if some joints are solved by loops.
+    pub fn mobility(&self) -> Option<kw_assembly::Mobility> {
+        self.cache.as_ref().and_then(|c| c.mobility)
     }
 
     /// The B-rep the view shows (the posed assembly), if there is one.
@@ -211,6 +313,9 @@ impl Default for AssemblyUi {
             view_hover: None,
             move_form: None,
             press_snapshot: None,
+            links: Default::default(),
+            anim: None,
+            anim_joint: 0,
         }
     }
 }
@@ -461,12 +566,24 @@ impl DesignWorkspace {
         Ok(())
     }
 
-    /// Insert the design in the `.kwf` file at `path` as a component.
+    /// Insert the `.kwf` file at `path` as a component that stays linked to the file: its design, or its
+    /// assembly as a sub-assembly if it holds one.
     pub fn asm_insert_path(
         &mut self,
         project: &mut Project,
         path: &std::path::Path,
     ) -> Result<usize, String> {
+        self.asm_insert_path_as(project, path, true)
+    }
+
+    /// Insert the design in the `.kwf` file at `path` as a component, linked to the file or a copy.
+    pub fn asm_insert_path_as(
+        &mut self,
+        project: &mut Project,
+        path: &std::path::Path,
+        link: bool,
+    ) -> Result<usize, String> {
+        let base = project.base_dir();
         let file = kw_feature::kwf::KwfFile::load(path).map_err(|e| e.to_string())?;
         let name = path
             .file_stem()
@@ -480,11 +597,42 @@ impl DesignWorkspace {
         )];
         project.asm_checkpoint();
         let asm = project.assembly.get_or_insert_with(|| Assembly::new(&name));
-        let part = asm.add_part_unique(Part::new(&name, file.document, frames));
+        // a file that holds an assembly is inserted as a sub-assembly; any other as a part
+        let inner = Assembly::from_file(&file)
+            .transpose()?
+            .filter(|a| !a.instances.is_empty());
+        let mut new_part;
+        match inner {
+            Some(inner) => {
+                new_part = Part::new(&name, kw_feature::Document::new(), frames);
+                if link {
+                    // the hash is of the stored bytes, as the file will be read again
+                    let bytes = file
+                        .extra_entries
+                        .get("assembly.cbor")
+                        .cloned()
+                        .unwrap_or_else(|| inner.to_bytes());
+                    new_part.link = Some(kw_assembly::PartLink::to_assembly(
+                        path,
+                        base.as_deref(),
+                        &bytes,
+                    ));
+                }
+                new_part.sub = Some(Box::new(inner));
+            }
+            None => {
+                let l =
+                    link.then(|| kw_assembly::PartLink::new(path, base.as_deref(), &file.document));
+                new_part = Part::new(&name, file.document, frames);
+                new_part.link = l;
+            }
+        }
+        let part = asm.add_part_unique(new_part);
         let inst_name = asm.unique_instance_name(&asm.parts[part].name.clone());
         let inst = asm.add_instance(&inst_name, part);
         project.mark_extras_dirty();
         self.asm.overlaps = None;
+        self.asm.links.forget();
         Ok(inst)
     }
 
@@ -512,7 +660,8 @@ impl DesignWorkspace {
         let n = asm.joints.len() + 1;
         let kind = form.kind;
         let before = asm.to_bytes();
-        asm.add_joint(Joint::new(
+        // the form must still produce a solvable assembly: the joint is taken back if it does not
+        asm.try_add_joint(Joint::new(
             &format!("{} {n}", kind_name(kind)),
             kind,
             JointEnd {
@@ -523,12 +672,8 @@ impl DesignWorkspace {
                 instance: form.child,
                 frame: cfn.clone(),
             },
-        ));
-        // the form must still produce a solvable tree: take the joint back if it does not
-        if let Err(e) = asm.solve() {
-            asm.joints.pop();
-            return Err(e.to_string());
-        }
+        ))
+        .map_err(|e| e.to_string())?;
         project.asm_checkpoint_with(Some(before));
         project.mark_extras_dirty();
         self.asm.overlaps = None;
@@ -562,6 +707,12 @@ impl DesignWorkspace {
             return;
         }
         let pose = asm.pose(&mut self.asm.engine).map_err(|e| e.to_string());
+        let mobility = asm
+            .joints
+            .iter()
+            .any(|j| j.solved)
+            .then(|| asm.mobility().ok())
+            .flatten();
         let (rep, tops, face_body, edge_body) = match &pose {
             Ok(p) => {
                 let mut fb = HashMap::new();
@@ -591,6 +742,7 @@ impl DesignWorkspace {
             face_body,
             edge_body,
             checked: false,
+            mobility,
         });
         self.asm.overlap_edges.clear();
         // the numbers belonged to the old pose (live checking makes them again)
@@ -734,6 +886,23 @@ impl DesignWorkspace {
                                     ui.label(
                                         egui::RichText::new(names[vi]).color(TEXT_WEAK).size(10.5),
                                     );
+                                    if j.solved {
+                                        // found by the loop solve: shown, not set
+                                        if let Param::Lit(q) = &j.values[vi] {
+                                            let text = if angle {
+                                                format!("{:.2}°", q.value.to_degrees())
+                                            } else {
+                                                format!("{:.3} mm", q.value)
+                                            };
+                                            ui.label(egui::RichText::new(text).size(10.5));
+                                            ui.label(
+                                                egui::RichText::new("(solved by the loop)")
+                                                    .color(TEXT_WEAK)
+                                                    .size(10.0),
+                                            );
+                                        }
+                                        return;
+                                    }
                                     let Param::Lit(q) = &j.values[vi] else {
                                         ui.label(
                                             egui::RichText::new(format!(
@@ -778,6 +947,71 @@ impl DesignWorkspace {
                                     }
                                 });
                             }
+                        }
+                        // ---- mechanisms: degrees of freedom, and a way to see them move
+                        if let Some(m) = self.asm.cache.as_ref().and_then(|c| c.mobility) {
+                            ui.separator();
+                            let note = if m.driven == m.dof {
+                                format!(
+                                    "Mechanism: {} degree{} of freedom, all driven.",
+                                    m.dof,
+                                    if m.dof == 1 { "" } else { "s" }
+                                )
+                            } else if m.driven < m.dof {
+                                format!(
+                                    "Mechanism: {} degrees of freedom but only {} driven: the rest can move freely.",
+                                    m.dof, m.driven
+                                )
+                            } else {
+                                format!(
+                                    "Mechanism: {} degree{} of freedom but {} values driven: unlock one.",
+                                    m.dof,
+                                    if m.dof == 1 { "" } else { "s" },
+                                    m.driven
+                                )
+                            };
+                            ui.label(
+                                egui::RichText::new(note)
+                                    .size(10.5)
+                                    .color(if m.driven == m.dof { TEXT_WEAK } else { BAD }),
+                            );
+                        }
+                        let movable: Vec<usize> = (0..a.joints.len())
+                            .filter(|i| !a.joints[*i].solved && a.joints[*i].kind.arity() > 0)
+                            .collect();
+                        if !movable.is_empty() {
+                            ui.horizontal(|ui| {
+                                if self.asm.anim.is_some() {
+                                    if ui.button("Stop").clicked() {
+                                        if let Some(an) = self.asm.anim.take() {
+                                            a.joints = an.saved;
+                                        }
+                                    }
+                                } else {
+                                    if !movable.contains(&self.asm.anim_joint) {
+                                        self.asm.anim_joint = movable[0];
+                                    }
+                                    if ui
+                                        .button("Animate")
+                                        .on_hover_text("Moves the first value of this joint through its range")
+                                        .clicked()
+                                    {
+                                        self.asm.anim =
+                                            Some(Animation::start(a, self.asm.anim_joint, 0));
+                                    }
+                                    egui::ComboBox::from_id_salt("anim_joint")
+                                        .selected_text(a.joints[self.asm.anim_joint].name.clone())
+                                        .show_ui(ui, |ui| {
+                                            for &i in &movable {
+                                                ui.selectable_value(
+                                                    &mut self.asm.anim_joint,
+                                                    i,
+                                                    &a.joints[i].name,
+                                                );
+                                            }
+                                        });
+                                }
+                            });
                         }
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -913,6 +1147,18 @@ impl DesignWorkspace {
             self.asm_commit_snapshot(project);
             project.mark_extras_dirty();
             self.asm.overlaps = None;
+            // the joints solved by loops follow the input that moved (a position the mechanism cannot
+            // reach is explained by the pose below, and moving back recovers)
+            if let Some(a) = project.assembly.as_mut() {
+                if let Err(e) = a.settle() {
+                    self.asm.message = e.to_string();
+                }
+            }
+        }
+        if let (Some(an), Some(a)) = (self.asm.anim.as_mut(), project.assembly.as_mut()) {
+            let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
+            an.step(a, dt);
+            ctx.request_repaint();
         }
         if let Some(j) = edit_joint {
             self.asm.edit_joint = Some(j);
