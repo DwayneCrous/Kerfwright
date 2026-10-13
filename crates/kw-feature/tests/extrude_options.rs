@@ -41,6 +41,7 @@ fn extrude_with(
     doc.add(
         name,
         FeatureSpec::Extrude(ExtrudeSpec {
+            surface: false,
             sketch: s,
             depth: mm(depth),
             symmetric: false,
@@ -569,6 +570,7 @@ fn revolve_about_a_body_edge_straight_sweep_and_pipe() {
         .add(
             "Revolve",
             FeatureSpec::Revolve(RevolveSpec {
+                surface: false,
                 sketch: prof,
                 axis: AxisSpec::Edge(Box::new(edge)),
                 angle: Param::angle_deg(360.0),
@@ -599,6 +601,9 @@ fn revolve_about_a_body_edge_straight_sweep_and_pipe() {
         .add(
             "Sweep",
             FeatureSpec::Sweep(SweepSpec {
+                surface: false,
+                twist: None,
+                guide: None,
                 profile: sp,
                 path: spath,
                 op: BodyOp::New,

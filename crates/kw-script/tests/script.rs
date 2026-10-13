@@ -47,6 +47,7 @@ fn rust_bracket() -> Document {
     d.add(
         "Hole",
         FeatureSpec::Extrude(ExtrudeSpec {
+            surface: false,
             sketch: hs,
             depth: mm(12.0),
             symmetric: false,

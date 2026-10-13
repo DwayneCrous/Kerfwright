@@ -63,6 +63,7 @@ fn revolve_loft_and_sweep() {
         .add(
             "Ring",
             FeatureSpec::Revolve(RevolveSpec {
+                surface: false,
                 sketch: s,
                 axis: AxisSpec::SketchY,
                 angle: Param::angle_deg(360.0),
@@ -105,6 +106,8 @@ fn revolve_loft_and_sweep() {
         .add(
             "Loft",
             FeatureSpec::Loft(LoftSpec {
+                surface: false,
+                ruled: false,
                 sketches: vec![a, b],
                 op: BodyOp::New,
                 base: None,
@@ -558,6 +561,9 @@ fn sweep_along_an_arc() {
         .add(
             "Sweep",
             FeatureSpec::Sweep(SweepSpec {
+                surface: false,
+                twist: None,
+                guide: None,
                 profile: prof,
                 path,
                 op: BodyOp::New,
@@ -826,6 +832,7 @@ fn block_with_extent(depth: f64, extent: ExtrudeExtent) -> (Document, FeatureId)
         .add(
             "Cut",
             FeatureSpec::Extrude(ExtrudeSpec {
+                surface: false,
                 sketch: s,
                 depth: mm(depth),
                 symmetric: false,

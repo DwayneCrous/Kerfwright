@@ -51,6 +51,8 @@ shot design_form --design-demo form
 shot design_tools_tab --design-demo tools
 shot drawing_sheet --drawing-demo
 shot analysis_zebra --design-demo zebra
+shot surface_loft --design-demo surface
+shot surface_zebra --design-demo surface-zebra
 shot analysis_curvature --design-demo curvature
 shot analysis_draft --design-demo draft
 shot design_sketch_text --design-demo text

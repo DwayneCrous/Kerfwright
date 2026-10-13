@@ -170,6 +170,7 @@ fn build(m: &Model) -> (Document, Ids) {
                 .add(
                     "Hole",
                     FeatureSpec::Extrude(ExtrudeSpec {
+                        surface: false,
                         sketch: s,
                         depth: mm(m.d + 1.0),
                         symmetric: false,
@@ -211,6 +212,7 @@ fn build(m: &Model) -> (Document, Ids) {
             .add(
                 "Pocket",
                 FeatureSpec::Extrude(ExtrudeSpec {
+                    surface: false,
                     sketch: s,
                     depth: mm(p.pd),
                     symmetric: false,
@@ -232,6 +234,7 @@ fn build(m: &Model) -> (Document, Ids) {
             .add(
                 "Slot",
                 FeatureSpec::Extrude(ExtrudeSpec {
+                    surface: false,
                     sketch: s,
                     depth: mm(sl.sd),
                     symmetric: false,
@@ -516,6 +519,7 @@ fn edited_doc(m1: &Model) -> Document {
             at + 1,
             "Extra",
             FeatureSpec::Extrude(ExtrudeSpec {
+                surface: false,
                 sketch: s,
                 depth: mm(e.bd),
                 symmetric: false,

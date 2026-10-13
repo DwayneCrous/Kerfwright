@@ -46,6 +46,7 @@ fn long_model(groups: usize) -> (Document, FeatureId, FeatureId) {
                 .add(
                     &format!("Hole {k}"),
                     FeatureSpec::Extrude(ExtrudeSpec {
+                        surface: false,
                         sketch: cs,
                         depth: mm(9.0),
                         symmetric: false,
@@ -127,6 +128,7 @@ fn parts_model(parts: usize, per_part: usize) -> (Document, FeatureId, FeatureId
                     .add(
                         &format!("P{part} hole {k}"),
                         FeatureSpec::Extrude(ExtrudeSpec {
+                            surface: false,
                             sketch: cs,
                             depth: mm(h + 1.0),
                             symmetric: false,

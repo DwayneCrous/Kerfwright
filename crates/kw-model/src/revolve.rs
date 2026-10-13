@@ -1,6 +1,6 @@
 //! Revolution of a planar profile about an axis lying in its plane.
 
-use crate::profile::{ModelError, Profile, ProfileLoop};
+use crate::profile::{Chain, ModelError, Profile};
 use kw_brep::{
     add_face_auto, BRep, BodyKind, BuildResult, EdgeId, EntityRef, LoopKind, LoopSpec, Origin,
     Sense, ShapeHistory, VertexId,
@@ -51,36 +51,80 @@ pub fn revolve(
     axis: Vector3<f64>,
     angle: f64,
 ) -> Result<BuildResult, ModelError> {
+    let np = profile.plane.z;
+    let scale = 1.0 + profile.plane.origin.coords.amax() + axis_origin.coords.amax();
+    let tol = 1e-9 * scale;
+    let mut loops: Vec<(Chain, LoopKind, bool)> = Vec::new();
+    for (l, kind) in std::iter::once((&profile.outer, LoopKind::Outer))
+        .chain(profile.holes.iter().map(|h| (h, LoopKind::Inner)))
+    {
+        let area = l.check(&np, tol)?;
+        if area.abs() < 1e-14 {
+            return Err(ModelError::BadProfile("loop has zero area"));
+        }
+        loops.push((
+            Chain::new(profile.plane, l.edges.clone(), true),
+            kind,
+            area > 0.0,
+        ));
+    }
+    revolve_core(rep, &profile.plane, &loops, axis_origin, axis, angle, false)
+}
+
+/// Revolve chains (open or closed) into a surface: one face per segment, no caps. Normals follow
+/// `tangent × profile normal` for an open chain and point away from the inside of a closed one.
+pub fn revolve_sheet(
+    rep: &mut BRep,
+    chains: &[Chain],
+    axis_origin: Point3<f64>,
+    axis: Vector3<f64>,
+    angle: f64,
+) -> Result<BuildResult, ModelError> {
+    let first = chains
+        .first()
+        .ok_or(ModelError::BadProfile("nothing to revolve"))?;
+    let tol = 1e-9 * (1.0 + first.plane.origin.coords.amax() + axis_origin.coords.amax());
+    let mut loops: Vec<(Chain, LoopKind, bool)> = Vec::new();
+    for c in chains {
+        c.check(tol)?;
+        let area = c.signed_area(&c.plane.z);
+        loops.push((c.clone(), LoopKind::Outer, !c.closed || area > 0.0));
+    }
+    revolve_core(rep, &first.plane, &loops, axis_origin, axis, angle, true)
+}
+
+/// The shared builder: `loops` are the chains with their kind and (for closed ones) whether they run
+/// counter-clockwise about the profile normal; a `sheet` has no caps and is a surface.
+fn revolve_core(
+    rep: &mut BRep,
+    plane: &Frame3,
+    loops: &[(Chain, LoopKind, bool)],
+    axis_origin: Point3<f64>,
+    axis: Vector3<f64>,
+    angle: f64,
+    sheet: bool,
+) -> Result<BuildResult, ModelError> {
     if !(angle > 1e-9 && angle <= TAU + 1e-12) {
         return Err(ModelError::BadParameter(
             "revolution angle must be in (0, 2π]",
         ));
     }
     let full = (angle - TAU).abs() < 1e-9;
-    let np = profile.plane.z;
+    let np = plane.z;
     let a = axis.normalize();
     if a.dot(&np).abs() > 1e-9
-        || (axis_origin - profile.plane.origin).dot(&np).abs()
-            > 1e-9 * (1.0 + axis_origin.coords.amax())
+        || (axis_origin - plane.origin).dot(&np).abs() > 1e-9 * (1.0 + axis_origin.coords.amax())
     {
         return Err(ModelError::BadProfile(
             "the axis must lie in the plane of the profile",
         ));
     }
-    let scale = 1.0 + profile.plane.origin.coords.amax() + axis_origin.coords.amax();
+    let scale = 1.0 + plane.origin.coords.amax() + axis_origin.coords.amax();
     let tol = 1e-9 * scale;
     // the profile must stay on one side of the axis
     let mut r = np.cross(&a).normalize();
-    let mut loops: Vec<(&ProfileLoop, LoopKind)> = vec![(&profile.outer, LoopKind::Outer)];
-    loops.extend(profile.holes.iter().map(|h| (h, LoopKind::Inner)));
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    let mut ccw: Vec<bool> = Vec::new();
-    for (l, _) in &loops {
-        let area = l.check(&np, tol)?;
-        if area.abs() < 1e-14 {
-            return Err(ModelError::BadProfile("loop has zero area"));
-        }
-        ccw.push(area > 0.0);
+    for (l, _, _) in loops {
         for e in &l.edges {
             for k in 0..=24 {
                 let t = e.range.0 + (e.range.1 - e.range.0) * k as f64 / 24.0;
@@ -103,7 +147,11 @@ pub fn revolve(
     };
 
     let mut history = ShapeHistory::default();
-    let body = rep.add_body(BodyKind::Solid);
+    let body = rep.add_body(if sheet {
+        BodyKind::Sheet
+    } else {
+        BodyKind::Solid
+    });
     let lump = rep.add_lump(body);
     let shell = rep.add_shell(lump);
     let rot = Transform3::translation(-axis_origin.coords)
@@ -115,11 +163,10 @@ pub fn revolve(
     let mut eb: Vec<Vec<Option<EdgeId>>> = Vec::new();
     let mut er: Vec<Vec<Option<EdgeId>>> = Vec::new();
     let mut edge_on_axis: Vec<Vec<bool>> = Vec::new();
-    for (l, _) in &loops {
+    for (l, _, _) in loops {
         let n = l.edges.len();
         let mut js: Vec<JunctionData> = Vec::new();
-        for e in &l.edges {
-            let p = e.start();
+        for p in l.junctions() {
             let (rho, z) = ax.rho_z(&p);
             let on_axis = rho.abs() < tol;
             let vb = rep.add_vertex(p);
@@ -151,7 +198,7 @@ pub fn revolve(
         let mut on_ax = Vec::new();
         for i in 0..n {
             let e = &l.edges[i];
-            let (s, t) = (&js[i], &js[(i + 1) % n]);
+            let (s, t) = (&js[i], &js[l.next(i)]);
             let axis_edge = s.on_axis && t.on_axis && matches!(e.curve, CurveGeom::Line(_));
             on_ax.push(axis_edge);
             let (vs, ve) = if e.reversed { (t, s) } else { (s, t) };
@@ -177,18 +224,18 @@ pub fn revolve(
     }
 
     // ---- swept faces
-    for (li, (l, kind)) in loops.iter().enumerate() {
+    for (li, (l, kind, ccw)) in loops.iter().enumerate() {
         let n = l.edges.len();
         for i in 0..n {
             if edge_on_axis[li][i] {
                 continue;
             }
             let e = &l.edges[i];
-            let (s, t) = (&jd[li][i], &jd[li][(i + 1) % n]);
+            let (s, t) = (&jd[li][i], &jd[li][l.next(i)]);
             let surface = swept_surface(&ax, &e.curve, e.range, s, t, tol)?;
             let is_plane = matches!(surface, SurfaceGeom::Plane(_));
             // outward direction (in-plane, at angle 0)
-            let sign = if ccw[li] == (*kind == LoopKind::Outer) {
+            let sign = if *ccw == (*kind == LoopKind::Outer) {
                 1.0
             } else {
                 -1.0
@@ -272,23 +319,16 @@ pub fn revolve(
     }
 
     // ---- end caps for partial revolutions
-    if !full {
+    if !full && !sheet {
         let tangent0 = a.cross(&r); // rotation direction at angle 0 (profile side is +r)
         for (cap, frame, outward) in [
-            (
-                0,
-                Frame3 {
-                    z: np,
-                    ..profile.plane
-                },
-                -tangent0,
-            ),
+            (0, Frame3 { z: np, ..*plane }, -tangent0),
             (
                 1,
                 Frame3 {
-                    origin: rot.apply_point(&profile.plane.origin),
-                    x: rot.apply_vector(&profile.plane.x),
-                    y: rot.apply_vector(&profile.plane.y),
+                    origin: rot.apply_point(&plane.origin),
+                    x: rot.apply_vector(&plane.x),
+                    y: rot.apply_vector(&plane.y),
                     z: rot.apply_vector(&np),
                 },
                 rot.apply_vector(&tangent0),
@@ -298,7 +338,7 @@ pub fn revolve(
             let specs: Vec<LoopSpec> = loops
                 .iter()
                 .enumerate()
-                .map(|(li, (l, kind))| LoopSpec {
+                .map(|(li, (l, kind, _))| LoopSpec {
                     kind: *kind,
                     chain: (0..l.edges.len())
                         .map(|i| {

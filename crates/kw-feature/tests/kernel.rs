@@ -291,6 +291,7 @@ fn sketches_far_from_the_origin_and_tools_that_miss() {
         doc.add(
             name,
             FeatureSpec::Extrude(ExtrudeSpec {
+                surface: false,
                 sketch: sk,
                 depth: mm(7.0),
                 symmetric: false,

@@ -213,6 +213,7 @@ impl ScriptDoc {
         let r = self.0.borrow_mut().doc.add(
             &name,
             FeatureSpec::Extrude(ExtrudeSpec {
+                surface: false,
                 sketch: id(sketch),
                 depth,
                 symmetric: false,

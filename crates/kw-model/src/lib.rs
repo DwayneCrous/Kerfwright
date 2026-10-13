@@ -15,11 +15,11 @@ mod rebuild;
 mod revolve;
 mod skin;
 
-pub use extrude::{extrude, ExtrudeOptions};
+pub use extrude::{extrude, extrude_sheet, ExtrudeOptions};
 pub use offset::{draft_faces, offset_body, shell};
-pub use profile::{ModelError, Profile, ProfileEdge, ProfileLoop};
+pub use profile::{Chain, ModelError, Profile, ProfileEdge, ProfileLoop};
 pub use rebuild::{rebuild, Rebuilt};
-pub use revolve::revolve;
-pub use skin::{loft, loft_ring, sweep, SweepOptions};
+pub use revolve::{revolve, revolve_sheet};
+pub use skin::{loft, loft_ring, loft_sheet, sweep, sweep_sheet, SweepOptions};
 
 pub use kw_brep::BuildResult;

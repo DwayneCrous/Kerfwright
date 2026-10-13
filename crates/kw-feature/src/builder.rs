@@ -130,6 +130,7 @@ impl Document {
         self.add(
             name,
             FeatureSpec::Extrude(ExtrudeSpec {
+                surface: false,
                 sketch,
                 depth,
                 symmetric: false,

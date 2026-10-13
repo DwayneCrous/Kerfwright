@@ -610,6 +610,39 @@ impl KerfwrightApp {
                     _ => AKind::Draft,
                 }));
             }
+            "surface" | "surface-zebra" => {
+                // a vase: a smooth surface through three rings, its open edges marked
+                use kw_expr::Param;
+                use kw_feature::{BodyOp, FeatureSpec, LoftSpec, PlaneSpec};
+                let mm = Param::length;
+                let _ = self.design.model.edit(project, |d| {
+                    let mut rings = Vec::new();
+                    for (z, dia) in [(0.0, 26.0), (16.0, 14.0), (34.0, 22.0)] {
+                        rings.push(d.add_circle_sketch(
+                            &format!("Ring {z}"),
+                            PlaneSpec::Xy(mm(z)),
+                            mm(0.0),
+                            mm(0.0),
+                            mm(dia),
+                        )?);
+                    }
+                    d.add(
+                        "Vase",
+                        FeatureSpec::Loft(LoftSpec {
+                            sketches: rings,
+                            op: BodyOp::New,
+                            base: None,
+                            surface: true,
+                            ruled: false,
+                        }),
+                    )
+                });
+                self.design.ribbon_tab = 1;
+                if what == "surface-zebra" {
+                    use crate::design::analysis::{AKind, AnalysisState};
+                    self.design.analysis = Some(AnalysisState::new(AKind::Zebra));
+                }
+            }
             "construct" => {
                 use crate::design::tools::{PlaneInput, PointInput};
                 let pt = |x: &str, y: &str, z: &str| PointInput {
@@ -659,14 +692,14 @@ impl KerfwrightApp {
                 let _ = self.design.asm_demo(project, what);
             }
             "sheet" => {
-                self.design.ribbon_tab = 1;
+                self.design.ribbon_tab = 2;
                 self.design
                     .open_tool(project, crate::design::sheetmetal::preset("u"));
                 self.design.commit_dialog(project);
                 let _ = self.design.sheet_flat_pattern(project);
             }
             "form" => {
-                self.design.ribbon_tab = 2;
+                self.design.ribbon_tab = 3;
                 let (size, sides) = crate::design::form::defaults(1);
                 self.design.open_tool(
                     project,
@@ -682,7 +715,7 @@ impl KerfwrightApp {
                     },
                 );
             }
-            "tools" => self.design.ribbon_tab = 3,
+            "tools" => self.design.ribbon_tab = 4,
             "text" => {
                 self.design
                     .begin_sketch(project, geom::origin_spec(0), geom::origin_frame(0));

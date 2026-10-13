@@ -185,3 +185,68 @@ impl Profile {
         Self::new(plane, ProfileLoop::polygon(&pts))
     }
 }
+
+/// A run of consecutive curve segments in a plane that need not enclose anything: the input of the
+/// surface (sheet) builders. A closed chain returns to its start.
+#[derive(Debug, Clone)]
+pub struct Chain {
+    pub plane: Frame3,
+    pub edges: Vec<ProfileEdge>,
+    pub closed: bool,
+}
+
+impl Chain {
+    pub fn new(plane: Frame3, edges: Vec<ProfileEdge>, closed: bool) -> Self {
+        Self {
+            plane,
+            edges,
+            closed,
+        }
+    }
+
+    /// The points where consecutive edges meet: the start of every edge, then (for an open chain)
+    /// the end of the last one. `junctions()[i + 1]` is where edge `i` ends (wrapping if closed).
+    pub fn junctions(&self) -> Vec<Point3<f64>> {
+        let mut pts: Vec<Point3<f64>> = self.edges.iter().map(|e| e.start()).collect();
+        if !self.closed {
+            if let Some(last) = self.edges.last() {
+                pts.push(last.end());
+            }
+        }
+        pts
+    }
+
+    /// Index of the junction at which edge `i` ends.
+    pub fn next(&self, i: usize) -> usize {
+        if self.closed {
+            (i + 1) % self.edges.len()
+        } else {
+            i + 1
+        }
+    }
+
+    /// Check that the edges are consecutive (and, if closed, that the last meets the first).
+    pub fn check(&self, tol: f64) -> Result<(), ModelError> {
+        let n = self.edges.len();
+        if n == 0 {
+            return Err(ModelError::BadProfile("empty chain"));
+        }
+        let last = if self.closed { n } else { n - 1 };
+        for i in 0..last {
+            if (self.edges[i].end() - self.edges[(i + 1) % n].start()).norm() > tol {
+                return Err(ModelError::BadProfile("chain edges are not consecutive"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Signed area about `normal` of a closed chain (positive = counter-clockwise); 0 if open.
+    pub fn signed_area(&self, normal: &Vector3<f64>) -> f64 {
+        if !self.closed {
+            return 0.0;
+        }
+        ProfileLoop::new(self.edges.clone())
+            .check(normal, f64::INFINITY)
+            .unwrap_or(0.0)
+    }
+}

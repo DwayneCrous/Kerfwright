@@ -7,7 +7,7 @@ use crate::eval::{
 use crate::id::FeatureId;
 use crate::namer::Namer;
 use crate::naming::{NameMap, NameOrigin, Reference, ResolveKind, Resolved, TopoName};
-use crate::profile::sketch_profile_labeled;
+use crate::profile::{sketch_profile_labeled, sketch_wires};
 use crate::spec::*;
 use crate::tools::{instance_names, BuiltTool, Place, ToolGen, ToolShape};
 use kw_blend::{chamfer, fillet, fillet_law, RadiusLaw};
@@ -16,7 +16,8 @@ use kw_brep::{BRep, BodyId, BuildResult, CopyOptions, EdgeId, EntityRef, FaceId,
 use kw_expr::{Dim, Param, Quantity};
 use kw_math::{Frame3, Point3, Transform3, Vector3};
 use kw_model::{
-    draft_faces, extrude, loft, offset_body, shell, sweep, Profile, ProfileLoop, SweepOptions,
+    draft_faces, extrude, extrude_sheet, loft, loft_sheet, offset_body, revolve_sheet, shell,
+    sweep, sweep_sheet, Chain, Profile, ProfileLoop, SweepOptions,
 };
 use kw_nurbs::Curve3;
 use kw_nurbs::CurveGeom;
@@ -694,6 +695,35 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 notes,
             ))
         }
+        FeatureSpec::Extrude(x) if x.surface => {
+            surface_only_new(x.op, "an extruded surface")?;
+            if x.extent != ExtrudeExtent::default() {
+                return Err(EvalError::Kernel(
+                    "a surface extrude has only a distance (no taper, thin wall, second side or end condition)".into(),
+                ));
+            }
+            let sk = inp.sketch(x.sketch)?;
+            let chains = chains_of(&sk)?;
+            let d = length(&x.depth)?;
+            if !(d > 0.0) {
+                return Err(EvalError::Kernel(
+                    "the extrusion depth must be positive".into(),
+                ));
+            }
+            let dir = if x.flip { -sk.plane.z } else { sk.plane.z };
+            let mut sess = Session::new(id, None);
+            let r = extrude_sheet(
+                &mut sess.rep,
+                &chains,
+                dir * d,
+                &kw_model::ExtrudeOptions {
+                    symmetric: x.symmetric,
+                },
+            )
+            .map_err(|e| kernel("extrude", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
+        }
         FeatureSpec::Extrude(x) => {
             let sk = inp.sketch(x.sketch)?;
             let ext = &x.extent;
@@ -922,6 +952,15 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             if axis.norm() < 1e-12 {
                 return Err(EvalError::Sketch("the revolve axis has no length".into()));
             }
+            if r.surface {
+                surface_only_new(r.op, "a revolved surface")?;
+                let chains = chains_of(&sk)?;
+                let mut sess = Session::new(id, None);
+                let built = revolve_sheet(&mut sess.rep, &chains, axis_origin, axis.normalize(), a)
+                    .map_err(|e| kernel("revolve", e))?;
+                sess.adopt(built);
+                return sess.finish(None, notes);
+            }
             let gen = ToolGen {
                 tag: String::new(),
                 shape: ToolShape::Revolve {
@@ -934,6 +973,17 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 },
             };
             from_gens(id, inp, vec![gen], r.op, notes)
+        }
+        FeatureSpec::Loft(l) if l.surface => {
+            surface_only_new(l.op, "a lofted surface")?;
+            let mut sections = Vec::new();
+            for s in &l.sketches {
+                sections.push(chains_of(&*inp.sketch(*s)?)?);
+            }
+            let mut sess = Session::new(id, None);
+            let r = loft_sheet(&mut sess.rep, &sections, l.ruled).map_err(|e| kernel("loft", e))?;
+            sess.adopt(r);
+            sess.finish(None, notes)
         }
         FeatureSpec::Loft(l) => {
             let mut profiles = Vec::new();
@@ -949,11 +999,41 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
         FeatureSpec::Sweep(w) => {
             let prof = inp.sketch(w.profile)?;
             let path = inp.sketch(w.path)?;
-            let profile = sketch_profile_labeled(&prof.sketch, &prof.entities, prof.plane)?.profile;
+            let twist = match &w.twist {
+                Some(p) => angle(p)?,
+                None => 0.0,
+            };
+            let guide = match w.guide {
+                Some(g) => Some(curve_of(&*inp.sketch(g)?, "a guide rail")?),
+                None => None,
+            };
+            // a twist or a guide rail needs the full sweep even along a straight path
+            let shaped = twist != 0.0 || guide.is_some();
+            let opts = SweepOptions {
+                twist,
+                guide,
+                ..SweepOptions::default()
+            };
             let mut sess = Session::new(id, None);
+            if w.surface {
+                surface_only_new(w.op, "a swept surface")?;
+                let chains = chains_of(&prof)?;
+                let curve = curve_of(&path, "a sweep path")?;
+                let r = sweep_sheet(&mut sess.rep, &chains, &curve, &opts)
+                    .map_err(|e| kernel("sweep", e))?;
+                sess.adopt(r);
+                return sess.finish(None, notes);
+            }
+            let profile = sketch_profile_labeled(&prof.sketch, &prof.entities, prof.plane)?.profile;
             let r = match path_curve(&path) {
-                Ok(curve) => sweep(&mut sess.rep, &profile, &curve, &SweepOptions::default())
-                    .map_err(|e| kernel("sweep", e))?,
+                Ok(curve) => {
+                    sweep(&mut sess.rep, &profile, &curve, &opts).map_err(|e| kernel("sweep", e))?
+                }
+                Err(e) if shaped => match curve_of(&path, "a sweep path") {
+                    Ok(curve) => sweep(&mut sess.rep, &profile, &curve, &opts)
+                        .map_err(|e| kernel("sweep", e))?,
+                    Err(_) => return Err(e),
+                },
                 // a straight path is an extrusion along it
                 Err(e) => match path_line(&path) {
                     Some((a, b)) => extrude(
@@ -1649,6 +1729,50 @@ fn finish_with_op(
     let mut s2 = Session::new(id, Some(prev));
     s2.apply(built, tool_names, op)?;
     s2.finish(None, notes)
+}
+
+/// A surface is always a body of its own: it cannot be joined to or cut from a solid.
+fn surface_only_new(op: BodyOp, what: &str) -> Result<(), EvalError> {
+    if op == BodyOp::New {
+        Ok(())
+    } else {
+        Err(EvalError::Kernel(format!(
+            "{what} is a body of its own: it cannot be joined, cut or intersected"
+        )))
+    }
+}
+
+/// The chains of curves of a sketch, open and closed, as the surface builders take them.
+fn chains_of(sk: &SketchProduct) -> Result<Vec<Chain>, EvalError> {
+    let wires = sketch_wires(&sk.sketch, &sk.entities, sk.plane);
+    if wires.is_empty() {
+        return Err(EvalError::Sketch(
+            "the sketch has no curves to make a surface from".into(),
+        ));
+    }
+    Ok(wires
+        .into_iter()
+        .map(|w| Chain::new(w.plane, w.edges, w.closed))
+        .collect())
+}
+
+/// The first arc, spline or straight line of a sketch as a curve with a finite domain.
+fn curve_of(sk: &SketchProduct, what: &str) -> Result<CurveGeom, EvalError> {
+    if let Ok(c) = path_curve(sk) {
+        return Ok(c);
+    }
+    match path_line(sk) {
+        Some((a, b)) => Ok(CurveGeom::Nurbs(
+            kw_nurbs::NurbsCurve::new_polynomial(
+                kw_nurbs::KnotVector::new(1, vec![0.0, 0.0, 1.0, 1.0]).expect("a line"),
+                vec![a, b],
+            )
+            .expect("a line"),
+        )),
+        None => Err(EvalError::Sketch(format!(
+            "{what} must contain a line, an arc or a spline"
+        ))),
+    }
 }
 
 /// The end points of the first straight line of a path sketch (the path of a straight sweep or pipe).

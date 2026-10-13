@@ -205,6 +205,7 @@ fn a_construction_axis_is_a_revolve_axis_a_pattern_axis_and_a_body_edge_is_an_ax
         .add(
             "Revolve",
             FeatureSpec::Revolve(RevolveSpec {
+                surface: false,
                 sketch: prof,
                 axis: AxisSpec::Datum(z),
                 angle: Param::angle_deg(360.0),

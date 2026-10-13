@@ -57,6 +57,7 @@ pub fn sample_document() -> Document {
     doc.add(
         "Hole",
         FeatureSpec::Extrude(ExtrudeSpec {
+            surface: false,
             sketch: hs,
             depth: Param::expr("w / 4 + 1 mm").unwrap(),
             symmetric: false,
@@ -152,6 +153,7 @@ pub fn parallel_document(chains: usize) -> Document {
         doc.add(
             &format!("Hole {k}"),
             FeatureSpec::Extrude(ExtrudeSpec {
+                surface: false,
                 sketch: cs,
                 depth: mm(7.0),
                 symmetric: false,

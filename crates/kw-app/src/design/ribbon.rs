@@ -89,6 +89,8 @@ struct Ctx {
     has_sketch: bool,
     sketches: usize,
     has_solid: bool,
+    /// Whether there is any body at all, a surface included.
+    has_body: bool,
     has_tool_feature: bool,
     /// How many bodies there are (Combine needs two).
     bodies: usize,
@@ -104,12 +106,13 @@ fn it(id: &'static str, icon: Icon, label: &'static str, tip: &str) -> Item {
 impl DesignWorkspace {
     pub fn ribbon(&mut self, ui: &mut egui::Ui, project: &mut Project) {
         let sketching = self.mode == Mode::Sketching;
-        // while sketching the one tab is SKETCH; otherwise the tabs that work: SOLID, SHEET METAL, FORM, TOOLS
+        // while sketching the one tab is SKETCH; otherwise the tabs that work: SOLID, SURFACE, SHEET METAL, FORM, TOOLS
         let labels: Vec<(&str, bool)> = if sketching {
             vec![("SKETCH", true)]
         } else {
             vec![
                 ("SOLID", true),
+                ("SURFACE", true),
                 ("SHEET METAL", true),
                 ("FORM", true),
                 ("TOOLS", true),
@@ -129,12 +132,128 @@ impl DesignWorkspace {
             .show(ui, |ui| {
                 ui.horizontal(|ui| match (sketching, self.ribbon_tab) {
                     (true, _) => self.sketch_tab(ui, project),
-                    (false, 1) => self.sheet_tab(ui, project),
-                    (false, 2) => self.form_tab(ui, project),
-                    (false, 3) => self.tools_tab(ui, project),
+                    (false, 1) => self.surface_tab(ui, project),
+                    (false, 2) => self.sheet_tab(ui, project),
+                    (false, 3) => self.form_tab(ui, project),
+                    (false, 4) => self.tools_tab(ui, project),
                     (false, _) => self.solid_tab(ui, project),
                 });
             });
+    }
+
+    /// SURFACE: bodies without volume, and how good they are.
+    fn surface_tab(&mut self, ui: &mut egui::Ui, project: &mut Project) {
+        let cx = Self::context(project);
+        let dlg = |t: &str| {
+            self.dialog
+                .as_ref()
+                .is_some_and(|d| d.tool.title().starts_with(t))
+        };
+        let need_sketch = "draw a sketch first";
+        let need_body = "there is nothing to analyse yet";
+        let mut picked: Vec<&'static str> = Vec::new();
+        let extrude = it(
+            "surf_extrude",
+            Icon::Extrude,
+            "Extrude",
+            "Pull the curves of a sketch into a surface",
+        )
+        .active(dlg("EXTRUDE"))
+        .enabled_if(cx.has_sketch, need_sketch);
+        let revolve = it(
+            "surf_revolve",
+            Icon::Revolve,
+            "Revolve",
+            "Spin the curves of a sketch around an axis into a surface",
+        )
+        .active(dlg("REVOLVE"))
+        .enabled_if(cx.has_sketch, need_sketch);
+        let sweep = it(
+            "surf_sweep",
+            Icon::Sweep,
+            "Sweep",
+            "Carry the curves of a sketch along a path, with a twist or a guide rail",
+        )
+        .active(dlg("SWEEP"))
+        .enabled_if(
+            cx.sketches >= 2,
+            "it needs a profile sketch and a path sketch",
+        );
+        let loft = it(
+            "surf_loft",
+            Icon::Loft,
+            "Loft",
+            "A surface through two or more sketches, smooth or ruled",
+        )
+        .active(dlg("LOFT"))
+        .enabled_if(cx.sketches >= 2, "it needs at least two profile sketches");
+        if let Some(id) = rb::menu_group(
+            ui,
+            "CREATE",
+            &[
+                extrude.clone().into(),
+                revolve.clone().into(),
+                sweep.clone().into(),
+                loft.clone().into(),
+            ],
+            &[Section::new(
+                "FROM CURVES",
+                vec![extrude, revolve, sweep, loft],
+            )],
+        ) {
+            picked.push(id);
+        }
+        let zebra = it(
+            "zebra",
+            Icon::Zebra,
+            "Zebra Analysis",
+            "Reflected stripes: they flow across tangent joins and break at creases",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind == super::analysis::AKind::Zebra),
+        )
+        .enabled_if(cx.has_body, need_body);
+        let curvature = it(
+            "curvature",
+            Icon::Curvature,
+            "Curvature Analysis",
+            "Colour the surfaces by Gaussian, mean or principal curvature",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind.is_curvature()),
+        )
+        .enabled_if(cx.has_body, need_body);
+        let draft = it(
+            "draft_analysis",
+            Icon::DraftAnalysis,
+            "Draft Analysis",
+            "Faces with too little draft for a pull direction",
+        )
+        .active(
+            self.analysis
+                .as_ref()
+                .is_some_and(|a| a.kind == super::analysis::AKind::Draft),
+        )
+        .enabled_if(cx.has_body, need_body);
+        if let Some(id) = rb::menu_group(
+            ui,
+            "INSPECT",
+            &[
+                zebra.clone().into(),
+                curvature.clone().into(),
+                draft.clone().into(),
+            ],
+            &[Section::new("ANALYSIS", vec![zebra, curvature, draft])],
+        ) {
+            picked.push(id);
+        }
+        for id in picked {
+            self.run_solid_command(id, &cx);
+        }
     }
 
     /// SHEET METAL: strips and their flat pattern.
@@ -414,6 +533,7 @@ impl DesignWorkspace {
             has_sketch: sketches > 0,
             sketches,
             has_solid: project.evaluation().final_solid().is_some(),
+            has_body: project.evaluation().final_body().is_some(),
             bodies: doc.heads().len(),
             components: project.assembly.as_ref().map_or(0, |a| a.instances.len()),
             editing: project.editing().is_some(),
@@ -986,6 +1106,36 @@ impl DesignWorkspace {
                 return;
             }
             "extrude" => Tool::extrude(None, join),
+            "surf_extrude" => {
+                let mut t = Tool::extrude(None, BodyOp::New);
+                if let Tool::Extrude { more, .. } = &mut t {
+                    more.surface = true;
+                }
+                t
+            }
+            "surf_revolve" => Tool::Revolve {
+                sketch: None,
+                angle: "360 deg".into(),
+                axis_y: false,
+                axis_edge: false,
+                axis_datum: None,
+                op: BodyOp::New,
+                surface: true,
+            },
+            "surf_sweep" => Tool::Sweep {
+                profile: None,
+                path: None,
+                op: BodyOp::New,
+                surface: true,
+                twist: String::new(),
+                guide: None,
+            },
+            "surf_loft" => Tool::Loft {
+                sketches: vec![None, None],
+                op: BodyOp::New,
+                surface: true,
+                ruled: false,
+            },
             "revolve" => Tool::Revolve {
                 sketch: None,
                 angle: "360 deg".into(),
@@ -993,6 +1143,7 @@ impl DesignWorkspace {
                 axis_edge: false,
                 axis_datum: None,
                 op: join,
+                surface: false,
             },
             "rib" => Tool::Rib {
                 sketch: None,
@@ -1012,10 +1163,15 @@ impl DesignWorkspace {
                 profile: None,
                 path: None,
                 op: join,
+                surface: false,
+                twist: String::new(),
+                guide: None,
             },
             "loft" => Tool::Loft {
                 sketches: vec![None, None],
                 op: join,
+                surface: false,
+                ruled: false,
             },
             "hole" => Tool::default_hole(),
             "hole_tapped" => match Tool::default_hole() {

@@ -178,6 +178,8 @@ pub struct ExtrudeMore {
     pub start: String,
     /// Chosen regions of the sketch (empty = everything).
     pub regions: Vec<kw_feature::RegionPick>,
+    /// Make a surface from the curves of the sketch instead of a solid.
+    pub surface: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +207,8 @@ pub enum Tool {
         /// Turn about this construction axis (takes precedence over the sketch axes).
         axis_datum: Option<FeatureId>,
         op: BodyOp,
+        /// Make a surface from the curves of the sketch instead of a solid.
+        surface: bool,
     },
     /// A wall standing on a sketch: lines and arcs thickened in the sketch plane, extruded.
     Rib {
@@ -285,12 +289,22 @@ pub enum Tool {
     Loft {
         sketches: Vec<Option<FeatureId>>,
         op: BodyOp,
+        /// Make a surface instead of a solid.
+        surface: bool,
+        /// A surface straight between neighbouring profiles.
+        ruled: bool,
     },
     /// A profile sketch swept along the first line, arc or spline of a path sketch.
     Sweep {
         profile: Option<FeatureId>,
         path: Option<FeatureId>,
         op: BodyOp,
+        /// Make a surface instead of a solid.
+        surface: bool,
+        /// Total turn of the profile along the path; empty = none.
+        twist: String,
+        /// A sketch whose first curve guides the profile's orientation and scale.
+        guide: Option<FeatureId>,
     },
     /// Tilt the picked faces about the neutral plane `axis = position`; `axis` is the pull direction.
     Draft {
@@ -553,6 +567,17 @@ fn op_combo(ui: &mut egui::Ui, id: &str, op: &mut BodyOp) {
     });
 }
 
+/// Solid or surface: a surface is always a new body, so the operation row is not needed.
+fn output_row(ui: &mut egui::Ui, surface: &mut bool, op: &mut BodyOp) {
+    row(ui, "Output", |ui| {
+        ui.selectable_value(surface, false, "Solid");
+        ui.selectable_value(surface, true, "Surface");
+    });
+    if *surface {
+        *op = BodyOp::New;
+    }
+}
+
 fn is_sketch(s: &FeatureSpec) -> bool {
     matches!(s, FeatureSpec::Sketch(_))
 }
@@ -652,9 +677,17 @@ impl Tool {
             | Tool::Rib { sketch, .. } => sketch.iter().copied().collect(),
             Tool::Pipe { path, .. } => path.iter().copied().collect(),
             Tool::Loft { sketches, .. } => sketches.iter().flatten().copied().collect(),
-            Tool::Sweep { profile, path, .. } => {
-                profile.iter().chain(path.iter()).copied().collect()
-            }
+            Tool::Sweep {
+                profile,
+                path,
+                guide,
+                ..
+            } => profile
+                .iter()
+                .chain(path.iter())
+                .chain(guide.iter())
+                .copied()
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -728,6 +761,7 @@ impl Tool {
                         .map(param_text)
                         .unwrap_or_default(),
                     regions: x.extent.regions.clone(),
+                    surface: x.surface,
                 },
             },
             FeatureSpec::Revolve(x) => Tool::Revolve {
@@ -740,6 +774,7 @@ impl Tool {
                     _ => None,
                 },
                 op: x.op,
+                surface: x.surface,
             },
             FeatureSpec::Rib(x) => Tool::Rib {
                 sketch: Some(x.sketch),
@@ -817,11 +852,16 @@ impl Tool {
             FeatureSpec::Loft(x) => Tool::Loft {
                 sketches: x.sketches.iter().map(|s| Some(*s)).collect(),
                 op: x.op,
+                surface: x.surface,
+                ruled: x.ruled,
             },
             FeatureSpec::Sweep(x) => Tool::Sweep {
                 profile: Some(x.profile),
                 path: Some(x.path),
                 op: x.op,
+                surface: x.surface,
+                twist: x.twist.as_ref().map(param_text).unwrap_or_default(),
+                guide: x.guide,
             },
             FeatureSpec::Draft(x) => {
                 let axis = (0..3)
@@ -1151,7 +1191,20 @@ impl Tool {
                         _ => kw_feature::ThinSide::Inside,
                     },
                 });
+                if more.surface {
+                    return Ok(FeatureSpec::Extrude(ExtrudeSpec {
+                        surface: true,
+                        sketch: need(sketch, "a sketch")?,
+                        depth: len(depth)?,
+                        symmetric: *symmetric,
+                        flip: *flip,
+                        op: BodyOp::New,
+                        base,
+                        extent: Default::default(),
+                    }));
+                }
                 FeatureSpec::Extrude(ExtrudeSpec {
+                    surface: false,
                     sketch: need(sketch, "a sketch")?,
                     depth: if *through_all || more.to_face {
                         // not used: the tool is as long as the body (or the face) needs
@@ -1209,7 +1262,9 @@ impl Tool {
                 axis_edge,
                 axis_datum,
                 op,
+                surface,
             } => FeatureSpec::Revolve(RevolveSpec {
+                surface: *surface,
                 sketch: need(sketch, "a sketch")?,
                 axis: if let Some(d) = axis_datum {
                     AxisSpec::Datum(*d)
@@ -1233,7 +1288,7 @@ impl Tool {
                     AxisSpec::SketchX
                 },
                 angle: ang(angle)?,
-                op: *op,
+                op: if *surface { BodyOp::New } else { *op },
                 base: match orig {
                     Some(FeatureSpec::Revolve(o)) => o.base,
                     _ => None,
@@ -1415,21 +1470,42 @@ impl Tool {
                 op: *op,
                 keep_tool: *keep_tool,
             }),
-            Tool::Loft { sketches, op } => {
+            Tool::Loft {
+                sketches,
+                op,
+                surface,
+                ruled,
+            } => {
                 let picked: Vec<FeatureId> = sketches.iter().flatten().copied().collect();
                 if picked.len() < 2 {
                     return Err("a loft needs at least two profile sketches".into());
                 }
                 FeatureSpec::Loft(LoftSpec {
+                    surface: *surface,
+                    ruled: *surface && *ruled,
                     sketches: picked,
-                    op: *op,
+                    op: if *surface { BodyOp::New } else { *op },
                     base: None,
                 })
             }
-            Tool::Sweep { profile, path, op } => FeatureSpec::Sweep(SweepSpec {
+            Tool::Sweep {
+                profile,
+                path,
+                op,
+                surface,
+                twist,
+                guide,
+            } => FeatureSpec::Sweep(SweepSpec {
+                surface: *surface,
+                twist: if twist.trim().is_empty() {
+                    None
+                } else {
+                    Some(ang(twist)?)
+                },
+                guide: *guide,
                 profile: need(profile, "a profile sketch")?,
                 path: need(path, "a path sketch")?,
-                op: *op,
+                op: if *surface { BodyOp::New } else { *op },
                 base: None,
             }),
             Tool::Draft {
@@ -1706,6 +1782,25 @@ impl Tool {
                 more,
             } => {
                 feature_combo(ui, "ex_sk", "Profile", doc, sketch, is_sketch);
+                output_row(ui, &mut more.surface, op);
+                if more.surface {
+                    row(ui, "Direction", |ui| {
+                        ui.selectable_value(symmetric, false, "One side");
+                        ui.selectable_value(symmetric, true, "Symmetric");
+                    });
+                    text_field(ui, "Distance", depth);
+                    row(ui, "", |ui| {
+                        ui.checkbox(flip, "Flip direction");
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Every curve of the sketch, open or closed, becomes part of the surface.",
+                        )
+                        .color(TEXT_WEAK)
+                        .size(10.5),
+                    );
+                    return before != *self;
+                }
                 if regions.len() > 1 {
                     // the pieces the sketch's curves cut the plane into: click them in the view or tick them here
                     ui.add_space(2.0);
@@ -1853,8 +1948,10 @@ impl Tool {
                 axis_edge,
                 axis_datum,
                 op,
+                surface,
             } => {
                 feature_combo(ui, "rv_sk", "Profile", doc, sketch, is_sketch);
+                output_row(ui, surface, op);
                 row(ui, "Axis", |ui| {
                     let mut a = if axis_datum.is_some() {
                         3
@@ -1898,7 +1995,9 @@ impl Tool {
                     });
                 }
                 text_field(ui, "Angle", angle);
-                op_combo(ui, "rv_op", op);
+                if !*surface {
+                    op_combo(ui, "rv_op", op);
+                }
             }
             Tool::Hole {
                 x,
@@ -2128,7 +2227,19 @@ impl Tool {
                     ui.checkbox(keep_tool, "Keep tool body");
                 });
             }
-            Tool::Loft { sketches, op } => {
+            Tool::Loft {
+                sketches,
+                op,
+                surface,
+                ruled,
+            } => {
+                output_row(ui, surface, op);
+                if *surface {
+                    row(ui, "Shape", |ui| {
+                        ui.selectable_value(ruled, false, "Smooth");
+                        ui.selectable_value(ruled, true, "Ruled");
+                    });
+                }
                 let mut remove = None;
                 for (i, s) in sketches.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
@@ -2158,17 +2269,47 @@ impl Tool {
                         sketches.push(None);
                     }
                 });
-                op_combo(ui, "lf_op", op);
+                if !*surface {
+                    op_combo(ui, "lf_op", op);
+                }
                 ui.label(
                     egui::RichText::new("Profiles are blended in the order listed.")
                         .color(TEXT_WEAK)
                         .size(10.5),
                 );
             }
-            Tool::Sweep { profile, path, op } => {
+            Tool::Sweep {
+                profile,
+                path,
+                op,
+                surface,
+                twist,
+                guide,
+            } => {
                 feature_combo(ui, "sw_p", "Profile", doc, profile, is_sketch);
                 feature_combo(ui, "sw_w", "Path", doc, path, is_sketch);
-                op_combo(ui, "sw_op", op);
+                output_row(ui, surface, op);
+                text_field(ui, "Twist", twist);
+                row(ui, "Guide rail", |ui| {
+                    let mut on = guide.is_some();
+                    if ui.checkbox(&mut on, "").changed() {
+                        *guide = if on {
+                            doc.features
+                                .iter()
+                                .rev()
+                                .find(|f| is_sketch(&f.spec))
+                                .map(|f| f.id)
+                        } else {
+                            None
+                        };
+                    }
+                });
+                if guide.is_some() {
+                    feature_combo(ui, "sw_g", "Guide sketch", doc, guide, is_sketch);
+                }
+                if !*surface {
+                    op_combo(ui, "sw_op", op);
+                }
                 ui.label(
                     egui::RichText::new("The path is the first line, arc or spline of its sketch.")
                         .color(TEXT_WEAK)

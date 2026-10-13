@@ -1479,6 +1479,7 @@ fn revolving_a_profile_gives_the_closed_form_volume() {
             axis_edge: false,
             axis_datum: None,
             op: kw_feature::BodyOp::New,
+            surface: false,
         }),
     );
     h.frame();
@@ -2185,6 +2186,8 @@ fn loft_sweep_draft_offset_and_construction_plane_dialogs_build_the_expected_sol
         Tool::Loft {
             sketches: vec![None, None],
             op: kw_feature::BodyOp::New,
+            surface: false,
+            ruled: false,
         },
     );
     let frustum = 10.0 / 3.0 * (400.0 + 100.0 + (400.0f64 * 100.0).sqrt());
@@ -2250,6 +2253,9 @@ fn loft_sweep_draft_offset_and_construction_plane_dialogs_build_the_expected_sol
             profile: None,
             path: None,
             op: kw_feature::BodyOp::New,
+            surface: false,
+            twist: String::new(),
+            guide: None,
         },
     );
     let want = std::f64::consts::PI * 9.0 * (std::f64::consts::FRAC_PI_2 * 20.0);
@@ -3305,6 +3311,7 @@ fn revolve_about_a_clicked_body_edge() {
             axis_edge: true,
             axis_datum: None,
             op: kw_feature::BodyOp::Cut,
+            surface: false,
         }),
     );
     // the vertical block edge at x = 0, y = 0
@@ -3541,6 +3548,7 @@ fn revolve_uses_a_construction_axis() {
             axis_edge: false,
             axis_datum: Some(axis),
             op: kw_feature::BodyOp::Cut,
+            surface: false,
         },
     );
     let want = 1000.0 - std::f64::consts::PI * (36.0 - 16.0) * 3.0 / 4.0;
@@ -5062,7 +5070,7 @@ fn run_command(h: &mut Harness, id: &str) {
 fn the_sheet_metal_tab_builds_strips_and_unfolds_them() {
     use std::f64::consts::FRAC_PI_2;
     let (mut h, _d) = design_harness("sheet_tab");
-    h.app.design.ribbon_tab = 1;
+    h.app.design.ribbon_tab = 2;
     h.frame();
     // U channel: 40 flat, bend, 30 flat, bend, 40 flat; t = 2, k = 0.44, r = 2, width 30
     run_command(&mut h, "sm_u");
@@ -5117,7 +5125,7 @@ fn the_sheet_metal_tab_builds_strips_and_unfolds_them() {
 #[test]
 fn the_form_tab_makes_bodies_from_cages() {
     let (mut h, _d) = design_harness("form_tab");
-    h.app.design.ribbon_tab = 2;
+    h.app.design.ribbon_tab = 3;
     h.frame();
     // a 20 mm box with sharp edges finishes to the box itself
     run_command(&mut h, "form_box");
@@ -5175,7 +5183,7 @@ fn every_ribbon_tab_draws_and_the_tools_tab_commands_work() {
     let (mut h, _d) = design_harness("tabs");
     sketch_block(&mut h, 30.0, 20.0, "5 mm");
     commit(&mut h);
-    for tab in 0..4 {
+    for tab in 0..5 {
         h.app.design.ribbon_tab = tab;
         h.frame();
         h.frame();
@@ -7503,4 +7511,164 @@ fn a_surface_reports_area_but_no_volume_and_shows_its_open_edges() {
     let mut only_box = BRep::new();
     make_box(&mut only_box, &Frame3::world(), 2.0, 2.0, 2.0);
     assert!(ModelScene::build(&only_box).free_edges.is_empty());
+}
+
+#[test]
+fn the_surface_tab_makes_surfaces_that_can_be_analysed() {
+    use kw_app::design::analysis::AKind;
+    let (mut h, _d) = design_harness("surface_tab");
+    h.app.design.ribbon_tab = 1;
+    h.frame();
+    // the analysis commands are off until there is a body
+    let mut line = kw_sketch::Sketch::new();
+    line.add_line_xy(0.0, 0.0, 30.0, 0.0);
+    sketch_only(&mut h, geom::origin_spec(0), geom::origin_frame(0), line);
+    let sk = proj(&mut h)
+        .document()
+        .features
+        .iter()
+        .rev()
+        .find(|f| matches!(f.spec, kw_feature::FeatureSpec::Sketch(_)))
+        .unwrap()
+        .id;
+    run_command(&mut h, "surf_extrude");
+    match h.app.design.dialog.as_mut().map(|d| &mut d.tool) {
+        Some(Tool::Extrude {
+            sketch,
+            depth,
+            op,
+            more,
+            ..
+        }) => {
+            assert!(
+                more.surface,
+                "the Surface tab opens the dialog for a surface"
+            );
+            assert_eq!(*op, kw_feature::BodyOp::New);
+            *sketch = Some(sk);
+            *depth = "12 mm".into();
+        }
+        t => panic!("{t:?}"),
+    }
+    commit(&mut h);
+    let ev = proj(&mut h).evaluation();
+    assert!(ev.final_solid().is_none(), "a surface is not a solid");
+    let (_, out) = ev.final_body().expect("the surface is the body");
+    assert!(out.is_sheet());
+    let rep = out.brep().unwrap();
+    let area = rep.area(out.body().unwrap()).unwrap();
+    assert!((area - 360.0).abs() < 1e-6, "{area}");
+    // the feature reads back into its dialog as a surface
+    let spec = proj(&mut h)
+        .document()
+        .features
+        .iter()
+        .find_map(|f| match &f.spec {
+            kw_feature::FeatureSpec::Extrude(x) if x.surface => Some(f.spec.clone()),
+            _ => None,
+        })
+        .expect("a surface extrude");
+    match Tool::for_feature(&spec) {
+        Some(Tool::Extrude { more, .. }) => assert!(more.surface),
+        t => panic!("{t:?}"),
+    }
+    // analysis works on a surface even though there is no solid
+    run_command(&mut h, "zebra");
+    assert_eq!(
+        h.app.design.analysis.as_ref().map(|a| a.kind),
+        Some(AKind::Zebra)
+    );
+    h.frame();
+    // its open edges are marked in the viewport
+    assert!(h
+        .app
+        .design
+        .viewport
+        .model()
+        .is_some_and(|m| m.free_edges.len() >= 4));
+}
+
+#[test]
+fn the_surface_dialogs_build_surface_specs_and_keep_the_operation_new() {
+    use kw_app::design::tools::BuildCtx;
+    use kw_expr::Param;
+    use kw_feature::{BodyOp, Document, FeatureSpec, PlaneSpec};
+    let mut doc = Document::new();
+    let mm = Param::length;
+    let a = doc
+        .add_circle_sketch("A", PlaneSpec::Xy(mm(0.0)), mm(0.0), mm(0.0), mm(10.0))
+        .unwrap();
+    let b = doc
+        .add_circle_sketch("B", PlaneSpec::Xy(mm(20.0)), mm(0.0), mm(0.0), mm(16.0))
+        .unwrap();
+    let ctx = BuildCtx {
+        doc: &doc,
+        base: None,
+        picks: &[],
+        hole_plane: None,
+    };
+    // the operation is forced to New whatever the dialog held
+    let loft = Tool::Loft {
+        sketches: vec![Some(a), Some(b)],
+        op: BodyOp::Join,
+        surface: true,
+        ruled: true,
+    };
+    match loft.spec(&ctx, None) {
+        Ok(FeatureSpec::Loft(l)) => assert!(l.surface && l.ruled && l.op == BodyOp::New),
+        t => panic!("{t:?}"),
+    }
+    let revolve = Tool::Revolve {
+        sketch: Some(a),
+        angle: "360 deg".into(),
+        axis_y: false,
+        axis_edge: false,
+        axis_datum: None,
+        op: BodyOp::Cut,
+        surface: true,
+    };
+    match revolve.spec(&ctx, None) {
+        Ok(FeatureSpec::Revolve(r)) => assert!(r.surface && r.op == BodyOp::New),
+        t => panic!("{t:?}"),
+    }
+    let sweep = Tool::Sweep {
+        profile: Some(a),
+        path: Some(b),
+        op: BodyOp::New,
+        surface: true,
+        twist: "45 deg".into(),
+        guide: Some(b),
+    };
+    match sweep.spec(&ctx, None) {
+        Ok(FeatureSpec::Sweep(w)) => {
+            assert!(w.surface && w.twist.is_some() && w.guide == Some(b));
+            // and back into the dialog
+            match Tool::for_feature(&FeatureSpec::Sweep(w)) {
+                Some(Tool::Sweep {
+                    twist,
+                    guide,
+                    surface,
+                    ..
+                }) => {
+                    assert!(
+                        surface && guide == Some(b) && twist.contains("45"),
+                        "{twist}"
+                    );
+                }
+                t => panic!("{t:?}"),
+            }
+        }
+        t => panic!("{t:?}"),
+    }
+    // a solid dialog is unchanged
+    let solid = Tool::Loft {
+        sketches: vec![Some(a), Some(b)],
+        op: BodyOp::New,
+        surface: false,
+        ruled: true,
+    };
+    match solid.spec(&ctx, None) {
+        Ok(FeatureSpec::Loft(l)) => assert!(!l.surface && !l.ruled),
+        t => panic!("{t:?}"),
+    }
 }

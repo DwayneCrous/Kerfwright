@@ -123,6 +123,9 @@ pub struct ExtrudeSpec {
     pub flip: bool,
     pub op: BodyOp,
     pub base: Option<FeatureId>,
+    /// Make a surface (a sheet body) from the curves of the sketch instead of a solid from its regions.
+    #[serde(default)]
+    pub surface: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,6 +147,9 @@ pub struct RevolveSpec {
     pub angle: Param,
     pub op: BodyOp,
     pub base: Option<FeatureId>,
+    /// Make a surface from the curves of the sketch instead of a solid from its regions.
+    #[serde(default)]
+    pub surface: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,6 +157,12 @@ pub struct LoftSpec {
     pub sketches: Vec<FeatureId>,
     pub op: BodyOp,
     pub base: Option<FeatureId>,
+    /// Make a surface from the curves of the sketches instead of a solid from their regions.
+    #[serde(default)]
+    pub surface: bool,
+    /// A surface straight between neighbouring sketches instead of a smooth one.
+    #[serde(default)]
+    pub ruled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,6 +172,15 @@ pub struct SweepSpec {
     pub path: FeatureId,
     pub op: BodyOp,
     pub base: Option<FeatureId>,
+    /// Make a surface from the curves of the profile sketch instead of a solid from its regions.
+    #[serde(default)]
+    pub surface: bool,
+    /// The total turn of the profile along the path.
+    #[serde(default)]
+    pub twist: Option<Param>,
+    /// A sketch whose first arc, spline or line guides the profile's orientation and scale.
+    #[serde(default)]
+    pub guide: Option<FeatureId>,
 }
 
 /// The edges shared by two faces.
@@ -653,7 +674,12 @@ impl FeatureSpec {
                 }
             }
             FeatureSpec::Revolve(r) => f(&mut r.angle),
-            FeatureSpec::Loft(_) | FeatureSpec::Sweep(_) | FeatureSpec::Combine(_) => {}
+            FeatureSpec::Sweep(w) => {
+                if let Some(p) = &mut w.twist {
+                    f(p);
+                }
+            }
+            FeatureSpec::Loft(_) | FeatureSpec::Combine(_) => {}
             FeatureSpec::Fillet(x) => f(&mut x.radius),
             FeatureSpec::Chamfer(x) => {
                 f(&mut x.d1);
@@ -976,6 +1002,7 @@ impl FeatureSpec {
             FeatureSpec::Sweep(x) => {
                 v.push(x.profile);
                 v.push(x.path);
+                v.extend(x.guide);
             }
             FeatureSpec::Fillet(x) => {
                 for e in &x.edges {

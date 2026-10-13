@@ -1,6 +1,6 @@
 //! Extrusion of a planar profile along a vector.
 
-use crate::profile::{ModelError, Profile, ProfileLoop};
+use crate::profile::{Chain, ModelError, Profile, ProfileLoop};
 use kw_brep::{
     add_face_auto, BRep, BodyKind, BuildResult, EdgeId, EntityRef, LoopKind, LoopSpec, Origin,
     Sense, ShapeHistory, VertexId,
@@ -275,4 +275,116 @@ fn side_surface(
             })
         }
     }
+}
+
+/// Extrude the chains by the vector `d` into a surface: one face per segment, no caps. A closed chain
+/// gives a tube whose normals point away from its inside; an open chain's normals follow
+/// `tangent × direction`.
+pub fn extrude_sheet(
+    rep: &mut BRep,
+    chains: &[Chain],
+    d: Vector3<f64>,
+    opts: &ExtrudeOptions,
+) -> Result<BuildResult, ModelError> {
+    let dn = d.norm();
+    if dn < 1e-12 {
+        return Err(ModelError::BadParameter("zero extrusion vector"));
+    }
+    if chains.is_empty() {
+        return Err(ModelError::BadProfile("nothing to extrude"));
+    }
+    let dh = d / dn;
+    let tol = 1e-9 * (1.0 + dn + chains[0].plane.origin.coords.amax());
+    let base = if opts.symmetric {
+        -d * 0.5
+    } else {
+        Vector3::zeros()
+    };
+    let mut history = ShapeHistory::default();
+    let body = rep.add_body(BodyKind::Sheet);
+    let lump = rep.add_lump(body);
+    let shell = rep.add_shell(lump);
+    for (ci, ch) in chains.iter().enumerate() {
+        ch.check(tol)?;
+        if ch.plane.z.dot(&dh).abs() < 1e-9 {
+            return Err(ModelError::BadParameter(
+                "extrusion direction lies in the profile plane",
+            ));
+        }
+        let n = ch.edges.len();
+        let junction: Vec<Point3<f64>> = ch.junctions().iter().map(|p| *p + base).collect();
+        let vb: Vec<VertexId> = junction.iter().map(|p| rep.add_vertex(*p)).collect();
+        let vt: Vec<VertexId> = junction.iter().map(|p| rep.add_vertex(*p + d)).collect();
+        let vert: Vec<EdgeId> = (0..junction.len())
+            .map(|j| {
+                let c = rep.add_curve(CurveGeom::Line(Line {
+                    origin: junction[j],
+                    dir: d,
+                }));
+                rep.add_edge(vb[j], vt[j], Some(c), (0.0, 1.0))
+            })
+            .collect();
+        // a closed chain: normals point out of it
+        let sign = if ch.closed && ch.signed_area(&ch.plane.z) * ch.plane.z.dot(&dh) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let mut eb = Vec::new();
+        let mut et = Vec::new();
+        for i in 0..n {
+            let e = &ch.edges[i];
+            let next = ch.next(i);
+            let (s, t) = if e.reversed { (next, i) } else { (i, next) };
+            let cb = transform_curve(&e.curve, &kw_math::Transform3::translation(base));
+            let ct = transform_curve(&e.curve, &kw_math::Transform3::translation(base + d));
+            let (cbi, cti) = (rep.add_curve(cb), rep.add_curve(ct));
+            eb.push(rep.add_edge(vb[s], vb[t], Some(cbi), e.range));
+            et.push(rep.add_edge(vt[s], vt[t], Some(cti), e.range));
+        }
+        for i in 0..n {
+            let e = &ch.edges[i];
+            let next = ch.next(i);
+            let mid = 0.5 * (e.range.0 + e.range.1);
+            let tangent = {
+                let t = e.curve.derivative(mid);
+                if e.reversed {
+                    -t
+                } else {
+                    t
+                }
+            };
+            let outward_dir = tangent.cross(&dh).normalize() * sign;
+            let surf = rep.add_surface(side_surface(&e.curve, e.range, base, d, dh)?);
+            let sense_i = if e.reversed {
+                Sense::Reversed
+            } else {
+                Sense::Forward
+            };
+            let chain = vec![
+                (eb[i], sense_i),
+                (vert[next], Sense::Forward),
+                (et[i], sense_i.flip()),
+                (vert[i], Sense::Reversed),
+            ];
+            let f = add_face_auto(
+                rep,
+                shell,
+                surf,
+                &move |_| outward_dir,
+                &[LoopSpec {
+                    kind: LoopKind::Outer,
+                    chain,
+                }],
+            )
+            .map_err(ModelError::Construction)?;
+            history.record(
+                EntityRef::Face(f),
+                Origin::New {
+                    role: format!("side-{ci}-{i}").into(),
+                },
+            );
+        }
+    }
+    Ok(BuildResult { body, history })
 }
