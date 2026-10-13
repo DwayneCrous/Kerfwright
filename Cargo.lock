@@ -2212,7 +2212,12 @@ version = "0.0.1"
 dependencies = [
  "ciborium",
  "dxf",
+ "kw-brep",
  "kw-dxf",
+ "kw-math",
+ "kw-model",
+ "kw-nurbs",
+ "kw-tess",
  "serde",
 ]
 

@@ -11,8 +11,13 @@ bench = false
 serde.workspace = true
 ciborium.workspace = true
 kw-dxf.workspace = true
+kw-math.workspace = true
+kw-brep.workspace = true
+kw-nurbs.workspace = true
+kw-tess.workspace = true
 
 [dev-dependencies]
 dxf = "0.6"
+kw-model.workspace = true
 ciborium.workspace = true
 

@@ -3,8 +3,10 @@
 //! The crate has no UI and no global state.
 
 pub mod dxf_out;
+pub mod hlr;
 pub mod model;
 pub mod pdf;
+pub mod projection;
 pub mod render;
 pub mod scene;
 pub mod sheet;
