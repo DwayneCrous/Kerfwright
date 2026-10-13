@@ -1,7 +1,8 @@
-use crate::assemble::{assemble_stiffness, Pattern};
+use crate::assemble::{assemble_mass_with, assemble_stiffness_with, Pattern, Structure};
 use crate::elem;
 use crate::solve::{pcg, solve_direct, PcgReport, Precond};
 use crate::sparse::Csr;
+use crate::tie::{apply_penalty, tie_groups, Tie};
 use kw_mesh3d::{Tet10Mesh, P3};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -55,7 +56,19 @@ pub struct Model {
     pub traction_fn: Vec<(u32, TractionFn)>,
     /// Gravity acceleration (body force `ρ g`).
     pub gravity: Option<P3>,
+    /// The materials of a model with several (one per body). Empty: `material` everywhere.
+    pub materials: Vec<Material>,
+    /// Index into `materials` for every element (empty: all elements are `material`).
+    pub elem_material: Vec<u16>,
+    /// Bonded contacts between bodies (see [`crate::tie`]).
+    pub ties: Vec<Tie>,
+    /// Penalty stiffness of the ties relative to the largest diagonal entry of the tied nodes.
+    pub tie_penalty: f64,
 }
+
+/// Default relative penalty of the ties: holds tied nodes together to about one part in 1e5 while keeping
+/// the matrix well enough conditioned for the direct solver.
+pub const DEFAULT_TIE_PENALTY: f64 = 1e5;
 
 #[derive(Debug, Clone)]
 pub struct Timings {
@@ -83,7 +96,61 @@ impl Model {
             traction: Vec::new(),
             traction_fn: Vec::new(),
             gravity: None,
+            materials: Vec::new(),
+            elem_material: Vec::new(),
+            ties: Vec::new(),
+            tie_penalty: DEFAULT_TIE_PENALTY,
         }
+    }
+
+    /// The material of element `ei`.
+    pub fn material_of(&self, ei: usize) -> &Material {
+        match self.elem_material.get(ei) {
+            Some(&k) if !self.materials.is_empty() => &self.materials[k as usize],
+            _ => &self.material,
+        }
+    }
+
+    /// The elasticity matrix of every distinct material (indexed like `materials`, or just `material`).
+    pub fn elasticity_table(&self) -> Vec<[[f64; 6]; 6]> {
+        if self.materials.is_empty() {
+            vec![elem::elasticity(self.material.e, self.material.nu)]
+        } else {
+            self.materials
+                .iter()
+                .map(|m| elem::elasticity(m.e, m.nu))
+                .collect()
+        }
+    }
+
+    /// The elasticity matrix of element `ei` from a table made by [`elasticity_table`](Self::elasticity_table).
+    pub fn elasticity_of(&self, table: &[[[f64; 6]; 6]], ei: usize) -> [[f64; 6]; 6] {
+        match self.elem_material.get(ei) {
+            Some(&k) if table.len() > 1 || !self.materials.is_empty() => table[k as usize],
+            _ => table[0],
+        }
+    }
+
+    /// The sparsity pattern and colouring, widened by the ties.
+    pub fn structure(&self) -> Structure {
+        if self.ties.is_empty() {
+            Structure::new(&self.mesh)
+        } else {
+            Structure::with_couplings(&self.mesh, &tie_groups(&self.ties))
+        }
+    }
+
+    /// Stiffness matrix of the whole model with the ties in (no boundary conditions applied).
+    pub fn stiffness(&self, st: &Structure) -> Csr {
+        let table = self.elasticity_table();
+        let mut k = assemble_stiffness_with(&self.mesh, st, &|ei| self.elasticity_of(&table, ei));
+        apply_penalty(&mut k, 3, &self.ties, self.tie_penalty);
+        k
+    }
+
+    /// Consistent mass matrix of the whole model.
+    pub fn mass_matrix(&self, st: &Structure) -> Csr {
+        assemble_mass_with(&self.mesh, st, &|ei| self.material_of(ei).rho)
     }
 
     /// Fix the listed components of every node for which `pred` holds.
@@ -197,7 +264,8 @@ impl Model {
         }
         if let Some(g) = self.gravity {
             let rule = elem::duffy(3);
-            for e in &mesh.elems {
+            for (ei, e) in mesh.elems.iter().enumerate() {
+                let rho = self.material_of(ei).rho;
                 let mut x = [[0.0; 3]; 10];
                 for i in 0..10 {
                     x[i] = mesh.nodes[e[i] as usize];
@@ -208,7 +276,7 @@ impl Model {
                     for i in 0..10 {
                         for a in 0..3 {
                             f[3 * e[i] as usize + a] +=
-                                w * det.abs() * self.material.rho * g[a] * n[i];
+                                w * det.abs() * rho * g[a] * n[i];
                         }
                     }
                 }
@@ -218,11 +286,22 @@ impl Model {
     }
 
     pub fn assemble(&self) -> (Csr, Pattern, Vec<f64>) {
-        let (k, p) = assemble_stiffness(&self.mesh, self.material.e, self.material.nu);
-        (k, p, self.load_vector())
+        let st = self.structure();
+        let k = self.stiffness(&st);
+        (k, st.pattern, self.load_vector())
     }
 
     pub fn solve(&self, kind: SolverKind) -> Result<Solution, String> {
+        self.solve_with(kind, None)
+    }
+
+    /// As [`solve`](Self::solve), stopping early with `Err("cancelled")` when the flag is raised (the
+    /// iterative solver checks it every iteration).
+    pub fn solve_with(
+        &self,
+        kind: SolverKind,
+        cancel: Option<&kw_job::CancelFlag>,
+    ) -> Result<Solution, String> {
         let t0 = Instant::now();
         let (mut k, _p, mut f) = self.assemble();
         let t1 = Instant::now();
@@ -238,7 +317,10 @@ impl Model {
             SolverKind::Pcg(pre) => {
                 // stop a little early: the recurrence residual drifts from the true one by rounding, and the
                 // contract is ‖b − A x‖/‖b‖ ≤ 1e-8
-                let (u, r) = pcg(&k, &f, pre, 9e-9, 200_000, None);
+                let (u, r) = pcg(&k, &f, pre, 9e-9, 200_000, cancel);
+                if cancel.is_some_and(|c| c.is_cancelled()) {
+                    return Err("cancelled".into());
+                }
                 (u, Some(r))
             }
         };

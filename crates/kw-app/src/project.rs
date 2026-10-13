@@ -19,6 +19,10 @@ pub struct Project {
     pub assembly: Option<kw_assembly::Assembly>,
     /// The 2-D drawing sheets stored with the project.
     pub drawings: kw_drawing::DrawingSet,
+    /// Parts of the file that could not be read (the project opened without them), to tell the user.
+    pub load_warnings: Vec<String>,
+    /// Entries that could not be read: they are kept as they were when the project is saved.
+    damaged_entries: Vec<&'static str>,
     /// The container as read, so unknown entries and fields survive a save.
     file: KwfFile,
     saved_hash: u128,
@@ -61,10 +65,46 @@ fn dir_of(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The value of an optional stored entry; one that cannot be read becomes a warning and `None`.
+fn tolerate<T>(
+    what: &str,
+    entry: &'static str,
+    r: Option<Result<T, String>>,
+    warnings: &mut Vec<String>,
+    damaged: &mut Vec<&'static str>,
+) -> Option<T> {
+    match r {
+        Some(Ok(v)) => Some(v),
+        Some(Err(e)) => {
+            warnings.push(format!(
+                "the {what} data could not be read ({e}) and was left out"
+            ));
+            damaged.push(entry);
+            None
+        }
+        None => None,
+    }
+}
+
 impl Project {
     fn from_file(path: Option<PathBuf>, file: KwfFile) -> Result<Project, String> {
-        let cam = kw_store::cam_from_file(&file).transpose()?;
-        let fea = kw_store::fea_from_file(&file).transpose()?;
+        let mut load_warnings = Vec::new();
+        let mut damaged_entries = Vec::new();
+        // a damaged CAM or FEA entry costs that data, not the whole project
+        let cam = tolerate(
+            "CAM",
+            kw_store::CAM_ENTRY,
+            kw_store::cam_from_file(&file),
+            &mut load_warnings,
+            &mut damaged_entries,
+        );
+        let fea = tolerate(
+            "FEA",
+            kw_store::FEA_ENTRY,
+            kw_store::fea_from_file(&file),
+            &mut load_warnings,
+            &mut damaged_entries,
+        );
         let board = kw_store::board_from_file(&file).transpose()?;
         let mut assembly = kw_assembly::Assembly::from_file(&file).transpose()?;
         // linked files are found again from where the project is now (it may have been moved)
@@ -85,6 +125,8 @@ impl Project {
             board,
             assembly,
             drawings,
+            load_warnings,
+            damaged_entries,
             file,
             saved_hash,
             extras_dirty: false,
@@ -370,7 +412,10 @@ impl Project {
             kw_store::BOARD_ENTRY,
             kw_store::DRAWING_ENTRY,
         ] {
-            self.file.extra_entries.remove(name);
+            // an entry that could not be read is kept as it was
+            if !self.damaged_entries.contains(&name) {
+                self.file.extra_entries.remove(name);
+            }
         }
         if let Some(c) = &self.cam {
             kw_store::attach_cam(&mut self.file, c);

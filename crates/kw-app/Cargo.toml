@@ -21,6 +21,8 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu", "defa
 rfd.workspace = true
 kw-expr.workspace = true
 kw-store.workspace = true
+kw-materials.workspace = true
+kw-job.workspace = true
 kw-drawing.workspace = true
 kw-analysis.workspace = true
 kw-cam.workspace = true

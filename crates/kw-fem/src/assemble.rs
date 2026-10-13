@@ -10,9 +10,59 @@ use kw_mesh3d::{Tet10Mesh, P3};
 use rayon::prelude::*;
 
 /// Block pattern: for node `i`, neighbouring nodes `nbr[nbr_ptr[i]..nbr_ptr[i+1]]` (sorted, with `i`).
+#[derive(Debug, Clone)]
 pub struct Pattern {
     pub nbr_ptr: Vec<usize>,
     pub nbr: Vec<u32>,
+}
+
+impl Pattern {
+    /// Make every pair of nodes in `group` neighbours (for the couplings a tie constraint adds).
+    pub fn add_couplings(&mut self, groups: &[Vec<u32>]) {
+        let n = self.nbr_ptr.len() - 1;
+        let mut extra: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for g in groups {
+            for &a in g {
+                extra[a as usize].extend_from_slice(g);
+            }
+        }
+        let mut nbr_ptr = Vec::with_capacity(n + 1);
+        nbr_ptr.push(0);
+        let mut nbr = Vec::with_capacity(self.nbr.len());
+        for i in 0..n {
+            let mut row: Vec<u32> = self.nbr[self.nbr_ptr[i]..self.nbr_ptr[i + 1]].to_vec();
+            row.extend_from_slice(&extra[i]);
+            row.sort_unstable();
+            row.dedup();
+            nbr.extend_from_slice(&row);
+            nbr_ptr.push(nbr.len());
+        }
+        self.nbr_ptr = nbr_ptr;
+        self.nbr = nbr;
+    }
+}
+
+/// The sparsity pattern and element colouring of a mesh, built once and reused by every assembly (stiffness,
+/// mass, a Newton iteration's tangent).
+pub struct Structure {
+    pub pattern: Pattern,
+    pub colours: Vec<Vec<u32>>,
+}
+
+impl Structure {
+    pub fn new(mesh: &Tet10Mesh) -> Structure {
+        Structure {
+            pattern: build_pattern(mesh.nodes.len(), &mesh.elems),
+            colours: colour_elements(mesh.nodes.len(), &mesh.elems),
+        }
+    }
+
+    /// As [`new`](Self::new), also coupling the nodes of each group (tie constraints).
+    pub fn with_couplings(mesh: &Tet10Mesh, groups: &[Vec<u32>]) -> Structure {
+        let mut s = Structure::new(mesh);
+        s.pattern.add_couplings(groups);
+        s
+    }
 }
 
 pub fn build_pattern(nnodes: usize, elems: &[[u32; 10]]) -> Pattern {
@@ -82,17 +132,18 @@ struct SyncPtr(*mut f64);
 unsafe impl Send for SyncPtr {}
 unsafe impl Sync for SyncPtr {}
 
-fn empty_csr(nnodes: usize, p: &Pattern) -> Csr {
-    let n = 3 * nnodes;
+/// An all-zero matrix with the pattern of `p` and `nd` unknowns per node.
+pub fn empty_csr(nnodes: usize, p: &Pattern, nd: usize) -> Csr {
+    let n = nd * nnodes;
     let mut row_ptr = Vec::with_capacity(n + 1);
     row_ptr.push(0usize);
-    let mut col: Vec<u32> = Vec::with_capacity(9 * p.nbr.len());
+    let mut col: Vec<u32> = Vec::with_capacity(nd * nd * p.nbr.len());
     for i in 0..nnodes {
         let nb = &p.nbr[p.nbr_ptr[i]..p.nbr_ptr[i + 1]];
-        for _c in 0..3 {
+        for _c in 0..nd {
             for &j in nb {
-                for cb in 0..3 {
-                    col.push(3 * j + cb);
+                for cb in 0..nd {
+                    col.push(nd as u32 * j + cb as u32);
                 }
             }
             row_ptr.push(col.len());
@@ -107,16 +158,19 @@ fn empty_csr(nnodes: usize, p: &Pattern) -> Csr {
     }
 }
 
-fn scatter(
+/// Add the element matrices (`10 nd` square, row-major) into `a`, element groups of one colour in parallel.
+pub fn scatter(
     a: &mut Csr,
     p: &Pattern,
     colours: &[Vec<u32>],
     elems: &[[u32; 10]],
+    nd: usize,
     element_matrix: &(dyn Fn(usize) -> Vec<f64> + Sync),
 ) {
     let ptr = SyncPtr(a.val.as_mut_ptr());
     let ptr = &ptr;
     let row_ptr = &a.row_ptr;
+    let width = 10 * nd;
     for group in colours {
         group.par_iter().for_each(|&ei| {
             let e = &elems[ei as usize];
@@ -125,18 +179,16 @@ fn scatter(
             for la in 0..10 {
                 let ni = e[la] as usize;
                 let nb = &p.nbr[p.nbr_ptr[ni]..p.nbr_ptr[ni + 1]];
-                let deg = nb.len();
                 for lb in 0..10 {
                     let nj = e[lb];
                     let rank = nb.binary_search(&nj).expect("pattern contains the edge");
-                    for ca in 0..3 {
-                        let row = 3 * ni + ca;
-                        let base = row_ptr[row] + 3 * rank;
-                        let _ = deg;
-                        for cb in 0..3 {
+                    for ca in 0..nd {
+                        let row = nd * ni + ca;
+                        let base = row_ptr[row] + nd * rank;
+                        for cb in 0..nd {
                             // SAFETY: elements of one colour share no node, hence write disjoint rows.
                             unsafe {
-                                *ptr.0.add(base + cb) += ke[(3 * la + ca) * 30 + 3 * lb + cb];
+                                *ptr.0.add(base + cb) += ke[(nd * la + ca) * width + nd * lb + cb];
                             }
                         }
                     }
@@ -146,7 +198,7 @@ fn scatter(
     }
 }
 
-fn element_coords(mesh: &Tet10Mesh, e: &[u32; 10]) -> [P3; 10] {
+pub fn element_coords(mesh: &Tet10Mesh, e: &[u32; 10]) -> [P3; 10] {
     let mut x = [[0.0; 3]; 10];
     for i in 0..10 {
         x[i] = mesh.nodes[e[i] as usize];
@@ -156,26 +208,60 @@ fn element_coords(mesh: &Tet10Mesh, e: &[u32; 10]) -> [P3; 10] {
 
 /// Stiffness matrix of the whole mesh (no boundary conditions applied).
 pub fn assemble_stiffness(mesh: &Tet10Mesh, e: f64, nu: f64) -> (Csr, Pattern) {
-    let p = build_pattern(mesh.nodes.len(), &mesh.elems);
-    let colours = colour_elements(mesh.nodes.len(), &mesh.elems);
-    let mut a = empty_csr(mesh.nodes.len(), &p);
+    let st = Structure::new(mesh);
     let d = elem::elasticity(e, nu);
+    let a = assemble_stiffness_with(mesh, &st, &|_| d);
+    (a, st.pattern)
+}
+
+/// Stiffness matrix with the elasticity matrix `d_of(element)` (a different material per element).
+pub fn assemble_stiffness_with(
+    mesh: &Tet10Mesh,
+    st: &Structure,
+    d_of: &(dyn Fn(usize) -> [[f64; 6]; 6] + Sync),
+) -> Csr {
+    let mut a = empty_csr(mesh.nodes.len(), &st.pattern, 3);
     let rule: Rule = elem::rule4();
-    scatter(&mut a, &p, &colours, &mesh.elems, &|ei| {
+    scatter(&mut a, &st.pattern, &st.colours, &mesh.elems, 3, &|ei| {
         let x = element_coords(mesh, &mesh.elems[ei]);
-        elem::stiffness(&x, &d, &rule)
+        elem::stiffness(&x, &d_of(ei), &rule)
     });
-    (a, p)
+    a
 }
 
 /// Consistent mass matrix with the pattern of `p`.
 pub fn assemble_mass(mesh: &Tet10Mesh, rho: f64, p: &Pattern) -> Csr {
     let colours = colour_elements(mesh.nodes.len(), &mesh.elems);
-    let mut a = empty_csr(mesh.nodes.len(), p);
+    let st = Structure {
+        pattern: p.clone(),
+        colours,
+    };
+    assemble_mass_with(mesh, &st, &|_| rho)
+}
+
+/// Consistent mass matrix with the density `rho_of(element)`.
+pub fn assemble_mass_with(
+    mesh: &Tet10Mesh,
+    st: &Structure,
+    rho_of: &(dyn Fn(usize) -> f64 + Sync),
+) -> Csr {
+    let mut a = empty_csr(mesh.nodes.len(), &st.pattern, 3);
     let rule = elem::duffy(4);
-    scatter(&mut a, p, &colours, &mesh.elems, &|ei| {
+    scatter(&mut a, &st.pattern, &st.colours, &mesh.elems, 3, &|ei| {
         let x = element_coords(mesh, &mesh.elems[ei]);
-        elem::mass(&x, rho, &rule)
+        elem::mass(&x, rho_of(ei), &rule)
     });
+    a
+}
+
+/// A matrix with one unknown per node from the `10 x 10` element matrices of `element_matrix` (thermal
+/// conduction, a scalar mass).
+pub fn assemble_scalar(
+    mesh: &Tet10Mesh,
+    st: &Structure,
+    element_matrix: &(dyn Fn(usize) -> Vec<f64> + Sync),
+) -> Csr {
+    let mut a = empty_csr(mesh.nodes.len(), &st.pattern, 1);
+    scatter(&mut a, &st.pattern, &st.colours, &mesh.elems, 1, element_matrix);
     a
 }

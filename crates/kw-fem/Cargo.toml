@@ -11,6 +11,7 @@ bench = false
 rayon.workspace = true
 faer = { workspace = true, features = ["rayon"] }
 serde.workspace = true
+rstar.workspace = true
 kw-mesh3d.workspace = true
 kw-job.workspace = true
 

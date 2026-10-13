@@ -21,8 +21,8 @@ pub mod tri3;
 
 pub use box_tets::{box_tets, split_hexes_red};
 pub use mesh::{
-    extract_surface, jacobian_det, tet10_dn_dl, SurfaceTri, SurfaceTri6, Tet10Mesh, TetMesh,
-    TET10_EDGES,
+    extract_surface, jacobian_det, tet10_dn_dl, MergedMesh, SurfaceTri, SurfaceTri6, Tet10Mesh,
+    TetMesh, TET10_EDGES,
 };
 pub use quality::{circumradius, radius_edge_ratio, shortest_edge, signed_volume, QualityReport};
 pub use refine::{

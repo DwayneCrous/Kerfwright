@@ -1750,3 +1750,52 @@ fn files_that_link_to_each_other_in_a_circle_are_refused() {
     assert!(err.contains("circle"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_part_with_several_solid_bodies_places_all_of_them() {
+    // two separate blocks in one part, the second with its own material
+    let mut doc = Document::new();
+    for (k, x0) in [0.0, 30.0].into_iter().enumerate() {
+        let s = doc
+            .add_rect_sketch(
+                &format!("S{k}"),
+                kw_feature::PlaneSpec::Xy(mm(0.0)),
+                mm(x0),
+                mm(0.0),
+                mm(10.0),
+                mm(10.0),
+            )
+            .unwrap();
+        doc.add_extrude(&format!("Block{k}"), s, mm(5.0), BodyOp::New)
+            .unwrap();
+    }
+    let heads = doc.heads();
+    assert_eq!(heads.len(), 2);
+    let root = doc.body_root(heads[1]);
+    doc.set_appearance(
+        root,
+        kw_feature::Appearance {
+            name: Some("Lug".into()),
+            colour: None,
+            material: Some("Aluminium".into()),
+        },
+    );
+    let mut a = Assembly::new("Two-body part");
+    let p = a.add_part(Part::new("Bracket", doc, frame0()));
+    a.ground = a.add_instance("bracket", p);
+    a.instances[0].at.t = [0.0, 0.0, 100.0];
+    let pose = a.pose(&mut Engine::with_threads(2)).unwrap();
+    assert_eq!(pose.bodies.len(), 2);
+    assert_eq!(pose.names, vec!["bracket/Body1", "bracket/Lug"]);
+    assert_eq!(pose.materials, vec![None, Some("Aluminium".to_string())]);
+    for v in &pose.volumes {
+        assert!((v - 500.0).abs() < 1e-6, "{:?}", pose.volumes);
+    }
+    // both are moved with the component
+    let (vol, com) = pose.mass().unwrap();
+    assert!((vol - 1000.0).abs() < 1e-6);
+    assert!(
+        (com.z - 102.5).abs() < 1e-6 && (com.x - 20.0).abs() < 1e-6,
+        "{com}"
+    );
+}

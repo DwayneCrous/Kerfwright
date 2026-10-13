@@ -36,45 +36,47 @@ pub struct FeaResult {
     pub radius_edge_ok: f64,
 }
 
-/// Material presets (E in MPa with lengths in mm and forces in N; density in t/mm³).
-pub const MATERIALS: [(&str, Material); 4] = [
-    (
-        "Steel",
-        Material {
-            e: 210e3,
-            nu: 0.30,
-            rho: 7.85e-9,
-        },
-    ),
-    (
-        "Aluminium",
-        Material {
-            e: 70e3,
-            nu: 0.33,
-            rho: 2.70e-9,
-        },
-    ),
-    (
-        "Titanium",
-        Material {
-            e: 110e3,
-            nu: 0.34,
-            rho: 4.43e-9,
-        },
-    ),
-    (
-        "ABS plastic",
-        Material {
-            e: 2.3e3,
-            nu: 0.35,
-            rho: 1.05e-9,
-        },
-    ),
-];
+/// The FEA constants of a library material (E in MPa with lengths in mm and forces in N; density in t/mm³).
+pub fn fem_material(m: &kw_materials::MaterialDef) -> Material {
+    Material {
+        e: m.e,
+        nu: m.nu,
+        rho: m.rho_fem(),
+    }
+}
+
+/// The material a new study starts with.
+fn default_material() -> Material {
+    let lib = kw_materials::global();
+    fem_material(lib.find("Steel").unwrap_or(&lib.all()[0]))
+}
 
 /// Mesh, apply the study's boundary conditions and solve (blocking; run it on a job).
 pub fn solve_study(brep: &kw_brep::BRep, study: &FeaStudy) -> Result<FeaResult, String> {
+    solve_study_with(
+        brep,
+        study,
+        &kw_job::CancelFlag::new(),
+        &kw_job::Progress::new(),
+    )
+}
+
+/// As [`solve_study`], stopping with `Err("cancelled")` when `cancel` is raised and reporting how far it is.
+pub fn solve_study_with(
+    brep: &kw_brep::BRep,
+    study: &FeaStudy,
+    cancel: &kw_job::CancelFlag,
+    progress: &kw_job::Progress,
+) -> Result<FeaResult, String> {
     let t0 = std::time::Instant::now();
+    let check = || -> Result<(), String> {
+        if cancel.is_cancelled() {
+            Err("cancelled".into())
+        } else {
+            Ok(())
+        }
+    };
+    progress.set(0.02);
     let body = brep.bodies.keys().next().ok_or("the model has no solid")?;
     if study.fixed_tags.is_empty() {
         return Err("fix at least one face first (pick a face, then \"Fix selected face\")".into());
@@ -89,12 +91,17 @@ pub fn solve_study(brep: &kw_brep::BRep, study: &FeaStudy) -> Result<FeaResult, 
     )
     .map_err(|e| format!("{e:?}"))?;
     let surf = SurfaceMesh::from_tess(&tess.mesh);
+    check()?;
+    progress.set(0.08);
     let params = MeshParams {
         max_size: study.max_size,
         radius_edge: study.radius_edge,
+        cancel: Some(cancel.clone()),
         ..MeshParams::default()
     };
     let (mesh, rep) = mesh_surface(&surf, &params).map_err(|e| format!("meshing failed: {e}"))?;
+    check()?;
+    progress.set(0.45);
     let q = mesh.to_tet10(None);
     let quality = {
         let good = mesh
@@ -175,7 +182,10 @@ pub fn solve_study(brep: &kw_brep::BRep, study: &FeaStudy) -> Result<FeaResult, 
     } else {
         SolverKind::Pcg(kw_fem::Precond::BlockJacobi)
     };
-    let sol = model.solve(kind)?;
+    progress.set(0.55);
+    let sol = model.solve_with(kind, Some(cancel))?;
+    progress.set(0.85);
+    check()?;
     let nodal = kw_fem::stress::nodal_stress(&model, &sol.u);
     let vm = kw_fem::stress::von_mises_nodal(&nodal);
     let n = model.mesh.nodes.len();
@@ -316,7 +326,7 @@ impl Default for FeaWorkspace {
             study: FeaStudy {
                 name: "Static study".into(),
                 body: String::new(),
-                material: MATERIALS[0].1,
+                material: default_material(),
                 max_size: 5.0,
                 radius_edge: 2.0,
                 fixed_tags: Vec::new(),
@@ -411,7 +421,9 @@ impl FeaWorkspace {
 
     pub fn start(&mut self, brep: &Arc<kw_brep::BRep>) {
         let (b, study) = (brep.clone(), self.study.clone());
-        self.job = Some(Job::spawn("static solve", move || solve_study(&b, &study)));
+        self.job = Some(Job::spawn_with("static solve", move |cancel, progress| {
+            solve_study_with(&b, &study, cancel, progress)
+        }));
         self.message = "meshing and solving…".into();
     }
 
@@ -561,21 +573,23 @@ impl FeaWorkspace {
         let busy = self.job.is_some();
         let mut changed = false;
         ui.heading("Study");
+        let lib = kw_materials::global();
         egui::ComboBox::from_id_salt("fea_material")
             .selected_text(
-                MATERIALS
+                lib.all()
                     .iter()
-                    .find(|(_, m)| *m == self.study.material)
-                    .map(|(n, _)| *n)
+                    .find(|m| fem_material(m) == self.study.material)
+                    .map(|m| m.name.as_str())
                     .unwrap_or("Custom"),
             )
             .show_ui(ui, |ui| {
-                for (name, m) in MATERIALS {
+                for m in lib.all() {
+                    let fm = fem_material(m);
                     if ui
-                        .selectable_label(self.study.material == m, name)
+                        .selectable_label(self.study.material == fm, &m.name)
                         .clicked()
                     {
-                        self.study.material = m;
+                        self.study.material = fm;
                         changed = true;
                     }
                 }
@@ -723,8 +737,8 @@ impl FeaWorkspace {
                     self.start(b);
                 }
             }
-            if busy {
-                ui.spinner();
+            if let Some(job) = &self.job {
+                job.ui(ui);
             }
         });
         if self.result.is_some() {

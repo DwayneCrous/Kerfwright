@@ -2129,6 +2129,8 @@ dependencies = [
  "kw-gsim",
  "kw-iges",
  "kw-io",
+ "kw-job",
+ "kw-materials",
  "kw-math",
  "kw-mesh3d",
  "kw-nurbs",
@@ -2322,6 +2324,7 @@ dependencies = [
  "kw-tess",
  "proptest",
  "rayon",
+ "rstar",
  "serde",
 ]
 
@@ -2360,6 +2363,14 @@ name = "kw-job"
 version = "0.0.1"
 dependencies = [
  "rayon",
+]
+
+[[package]]
+name = "kw-materials"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

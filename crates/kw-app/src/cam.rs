@@ -658,8 +658,11 @@ impl CamWorkspace {
             {
                 self.start(brep);
             }
-            if busy {
-                ui.spinner();
+            if let Some(job) = &self.job {
+                job.ui(ui);
+            }
+            if let Some(job) = &self.sim_job {
+                job.ui(ui);
             }
         });
         ui.separator();

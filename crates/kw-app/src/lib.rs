@@ -14,6 +14,7 @@ pub mod fea;
 pub mod job;
 pub mod messages;
 pub mod model;
+pub mod model_source;
 pub mod project;
 pub mod recent;
 pub mod render;

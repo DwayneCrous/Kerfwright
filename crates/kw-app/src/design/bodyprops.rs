@@ -1,6 +1,6 @@
 //! The body properties window: name, colour and material of a body, stored in the document.
 
-use super::measure::MATERIALS;
+use super::measure::materials;
 use super::DesignWorkspace;
 use crate::bodies::{summaries, DEFAULT_COLOUR};
 use crate::project::Project;
@@ -45,10 +45,10 @@ impl DesignWorkspace {
                             .selected_text(material.clone().unwrap_or_else(|| "(none)".into()))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut material, None, "(none)");
-                                for m in MATERIALS {
+                                for m in materials() {
                                     ui.selectable_value(
                                         &mut material,
-                                        Some(m.name.to_string()),
+                                        Some(m.name.clone()),
                                         format!("{} ({} kg/m³)", m.name, m.density),
                                     );
                                 }

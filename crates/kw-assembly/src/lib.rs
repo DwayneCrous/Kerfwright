@@ -1480,11 +1480,21 @@ impl Assembly {
     }
 
     /// Evaluate every part and place the bodies. `engine` caches the parts between calls, so moving a
-    /// joint re-evaluates nothing. Hidden components are left out.
+    /// joint re-evaluates nothing. Hidden components are left out. A part with several solid bodies places
+    /// all of them (named `Component/Body`); the material of a body is the part's, else the body's own.
     pub fn pose(&self, engine: &mut Engine) -> Result<Pose, AssemblyError> {
+        /// One solid body of an evaluated part.
+        struct Solid {
+            brep: std::sync::Arc<BRep>,
+            body: BodyId,
+            /// The body's own name, when the part has more than one.
+            name: Option<String>,
+            material: Option<String>,
+            size: [f64; 3],
+            volume: f64,
+        }
         let leaves = self.leaves()?;
-        let mut solids: HashMap<String, (std::sync::Arc<BRep>, BodyId, [f64; 3], f64)> =
-            HashMap::new();
+        let mut solids: HashMap<String, Vec<Solid>> = HashMap::new();
         let mut rep = BRep::new();
         let mut bodies = Vec::new();
         let mut maps = Vec::new();
@@ -1508,39 +1518,75 @@ impl Assembly {
                         message: format!("'{}' fails: {e}", leaf.part.document.name_of(*id)),
                     });
                 }
-                let (_, out) = ev.final_solid().ok_or_else(|| AssemblyError::Part {
-                    part: leaf.part.name.clone(),
-                    message: "it has no solid".into(),
-                })?;
-                let (brep, body) = (out.brep().unwrap().clone(), out.body().unwrap());
-                let bb = brep.body_bbox(body);
-                let size = [
-                    bb.max.x - bb.min.x,
-                    bb.max.y - bb.min.y,
-                    bb.max.z - bb.min.z,
-                ];
-                let volume = brep.volume(body).unwrap_or(0.0);
-                slot.insert((brep, body, size, volume));
+                let doc = &leaf.part.document;
+                let heads = doc.heads();
+                let mut found: Vec<Solid> = Vec::new();
+                for (rank, head) in heads.iter().enumerate() {
+                    let Some(out) = ev.output(*head).filter(|o| !o.is_sheet()) else {
+                        continue;
+                    };
+                    let (Some(brep), Some(body)) = (out.brep().cloned(), out.body()) else {
+                        continue;
+                    };
+                    let root = doc.body_root(*head);
+                    let ap = doc.appearance_of(root);
+                    let bb = brep.body_bbox(body);
+                    found.push(Solid {
+                        name: Some(
+                            ap.and_then(|a| a.name.clone())
+                                .unwrap_or_else(|| format!("Body{}", rank + 1)),
+                        ),
+                        material: ap.and_then(|a| a.material.clone()),
+                        size: [
+                            bb.max.x - bb.min.x,
+                            bb.max.y - bb.min.y,
+                            bb.max.z - bb.min.z,
+                        ],
+                        volume: brep.volume(body).unwrap_or(0.0),
+                        brep,
+                        body,
+                    });
+                }
+                if found.is_empty() {
+                    return Err(AssemblyError::Part {
+                        part: leaf.part.name.clone(),
+                        message: "it has no solid".into(),
+                    });
+                }
+                // a part of one body keeps the name of its component
+                if found.len() == 1 {
+                    found[0].name = None;
+                }
+                slot.insert(found);
             }
-            let (brep, body, size, volume) = &solids[&key];
-            let (b, map) = rep.copy_body_from(
-                brep,
-                *body,
-                &CopyOptions {
-                    transform: Some(leaf.transform),
-                    flip: false,
-                    ..Default::default()
-                },
-            );
-            bodies.push(b);
-            maps.push(map);
-            names.push(leaf.name.clone());
-            placements.push(leaf.transform);
-            tops.push(leaf.top);
-            parts.push(leaf.part.name.clone());
-            materials.push(leaf.part.effective_material());
-            sizes.push(*size);
-            volumes.push(*volume);
+            for solid in &solids[&key] {
+                let (b, map) = rep.copy_body_from(
+                    &solid.brep,
+                    solid.body,
+                    &CopyOptions {
+                        transform: Some(leaf.transform),
+                        flip: false,
+                        ..Default::default()
+                    },
+                );
+                bodies.push(b);
+                maps.push(map);
+                names.push(match &solid.name {
+                    Some(n) => format!("{}/{n}", leaf.name),
+                    None => leaf.name.clone(),
+                });
+                placements.push(leaf.transform);
+                tops.push(leaf.top);
+                parts.push(leaf.part.name.clone());
+                materials.push(
+                    leaf.part
+                        .material
+                        .clone()
+                        .or_else(|| solid.material.clone()),
+                );
+                sizes.push(solid.size);
+                volumes.push(solid.volume);
+            }
         }
         Ok(Pose {
             rep,

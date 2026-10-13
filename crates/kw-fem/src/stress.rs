@@ -11,11 +11,12 @@ use kw_mesh3d::P3;
 pub fn nodal_stress(model: &Model, u: &[f64]) -> Vec<[f64; 6]> {
     let mesh = &model.mesh;
     let n = mesh.nodes.len();
-    let d = elem::elasticity(model.material.e, model.material.nu);
+    let table = model.elasticity_table();
     let rule = elem::duffy(3);
     // right-hand sides: b[node][component] = ∫ N_i σ_c dV
     let mut b = vec![[0.0f64; 6]; n];
-    for e in &mesh.elems {
+    for (ei, e) in mesh.elems.iter().enumerate() {
+        let d = model.elasticity_of(&table, ei);
         let mut x = [[0.0; 3]; 10];
         let mut ue = [0.0; 30];
         for i in 0..10 {

@@ -7,55 +7,10 @@ use crate::viewport::Pick;
 use kw_brep::{BRep, BodyId, EdgeId, FaceId};
 use kw_nurbs::{Curve3, CurveGeom, SurfaceGeom};
 
-/// A material with a density in kg/m³ (the model is in millimetres).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Material {
-    pub name: &'static str,
-    pub density: f64,
+/// The materials of the library (name, density in kg/m³, and the rest): built in, plus the user's.
+pub fn materials() -> &'static [kw_materials::MaterialDef] {
+    kw_materials::global().all()
 }
-
-pub const MATERIALS: &[Material] = &[
-    Material {
-        name: "Steel",
-        density: 7850.0,
-    },
-    Material {
-        name: "Stainless steel",
-        density: 8000.0,
-    },
-    Material {
-        name: "Aluminium",
-        density: 2700.0,
-    },
-    Material {
-        name: "Brass",
-        density: 8500.0,
-    },
-    Material {
-        name: "Copper",
-        density: 8960.0,
-    },
-    Material {
-        name: "Titanium",
-        density: 4500.0,
-    },
-    Material {
-        name: "ABS plastic",
-        density: 1050.0,
-    },
-    Material {
-        name: "PLA",
-        density: 1240.0,
-    },
-    Material {
-        name: "Nylon",
-        density: 1150.0,
-    },
-    Material {
-        name: "Oak wood",
-        density: 750.0,
-    },
-];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyProps {
@@ -464,7 +419,7 @@ impl DesignWorkspace {
                     let own = body
                         .material
                         .as_deref()
-                        .and_then(|n| MATERIALS.iter().position(|m| m.name == n));
+                        .and_then(|n| materials().iter().position(|m| m.name == n));
                     if let Some(i) = own {
                         self.material = i;
                         ui.label(
@@ -474,9 +429,13 @@ impl DesignWorkspace {
                         );
                     }
                     egui::ComboBox::from_id_salt("material")
-                        .selected_text(MATERIALS[self.material.min(MATERIALS.len() - 1)].name)
+                        .selected_text(
+                            materials()[self.material.min(materials().len() - 1)]
+                                .name
+                                .clone(),
+                        )
                         .show_ui(ui, |ui| {
-                            for (i, m) in MATERIALS.iter().enumerate() {
+                            for (i, m) in materials().iter().enumerate() {
                                 ui.selectable_value(
                                     &mut self.material,
                                     i,
@@ -484,7 +443,7 @@ impl DesignWorkspace {
                                 );
                             }
                         });
-                    let density = MATERIALS[self.material.min(MATERIALS.len() - 1)].density;
+                    let density = materials()[self.material.min(materials().len() - 1)].density;
                     egui::Grid::new("body_props")
                         .num_columns(2)
                         .spacing([14.0, 3.0])

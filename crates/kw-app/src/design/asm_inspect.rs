@@ -1,7 +1,6 @@
 //! Inspecting an assembly: the bill of materials (and its CSV), and interference with the overlaps drawn.
 
 use super::assembly::AsmAction;
-use super::measure::MATERIALS;
 use super::{Action, DesignWorkspace};
 use crate::chrome::theme::{BAD, TEXT_WEAK};
 use crate::project::Project;
@@ -12,9 +11,7 @@ use kw_nurbs::Curve3;
 
 /// Density (kg/m³) of a material by name; 0 when the part has none (its mass is then not known).
 pub fn density_of(material: Option<&str>) -> f64 {
-    material
-        .and_then(|m| MATERIALS.iter().find(|x| x.name == m))
-        .map_or(0.0, |m| m.density)
+    kw_materials::global().density_of(material)
 }
 
 /// The bill of materials of a posed assembly.
@@ -261,16 +258,18 @@ impl DesignWorkspace {
                                             cur = None;
                                             set_material = Some((r.part.clone(), None));
                                         }
-                                        for m in MATERIALS {
+                                        for m in kw_materials::global().all() {
                                             if ui
                                                 .selectable_label(
-                                                    cur.as_deref() == Some(m.name),
-                                                    m.name,
+                                                    cur.as_deref() == Some(m.name.as_str()),
+                                                    &m.name,
                                                 )
                                                 .clicked()
                                             {
-                                                set_material =
-                                                    Some((r.part.clone(), Some(m.name.into())));
+                                                set_material = Some((
+                                                    r.part.clone(),
+                                                    Some(m.name.clone()),
+                                                ));
                                             }
                                         }
                                     });

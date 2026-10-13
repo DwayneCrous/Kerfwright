@@ -105,3 +105,31 @@ fn clamped_beam_tip_deflection_is_close_to_beam_theory() {
         "tip {tip} vs Euler {euler}"
     );
 }
+
+#[test]
+fn a_raised_cancel_flag_stops_the_iterative_solver() {
+    let mesh = box_tets(4.0, 1.0, 1.0, 4, 2, 2);
+    let mut model = Model::new(
+        mesh.to_tet10(None),
+        Material {
+            e: 1000.0,
+            nu: 0.3,
+            rho: 1e-9,
+        },
+    );
+    model.fix_where([true; 3], &|p| p[0] < 1e-9);
+    model
+        .forces
+        .push((model.mesh.nodes.len() as u32 - 1, [0.0, -1.0, 0.0]));
+    let cancel = kw_job::CancelFlag::new();
+    cancel.cancel();
+    let kind = SolverKind::Pcg(Precond::Jacobi);
+    assert_eq!(
+        model.solve_with(kind, Some(&cancel)).unwrap_err(),
+        "cancelled"
+    );
+    // not raised: it solves
+    assert!(model
+        .solve_with(kind, Some(&kw_job::CancelFlag::new()))
+        .is_ok());
+}

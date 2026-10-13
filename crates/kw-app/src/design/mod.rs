@@ -176,7 +176,7 @@ pub struct DesignWorkspace {
     /// The edge continuity display, and the edges it last worked out.
     pub continuity: Option<continuity::ContinuityState>,
     pub continuity_cache: Option<continuity::ContinuityCache>,
-    /// Index into `measure::MATERIALS`.
+    /// Index into `measure::materials()`.
     pub material: usize,
     /// The bodies drawn in the view (refreshed every frame), and the roots of the bodies hidden from it.
     pub bodies: Option<Arc<Bodies>>,

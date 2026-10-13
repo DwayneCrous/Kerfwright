@@ -30,6 +30,7 @@ members = [
     "crates/kw-ecad",
     "crates/kw-fabcheck",
     "crates/kw-render",
+    "crates/kw-materials",
     "crates/kw-store",
     "crates/kw-drawing",
     "crates/kw-analysis",
@@ -90,6 +91,7 @@ kw-cam = { path = "crates/kw-cam" }
 kw-ecad = { path = "crates/kw-ecad" }
 kw-fabcheck = { path = "crates/kw-fabcheck" }
 kw-render = { path = "crates/kw-render" }
+kw-materials = { path = "crates/kw-materials" }
 kw-store = { path = "crates/kw-store" }
 kw-drawing = { path = "crates/kw-drawing" }
 kw-analysis = { path = "crates/kw-analysis" }

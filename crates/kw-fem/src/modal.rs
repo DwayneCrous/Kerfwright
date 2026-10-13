@@ -1,7 +1,6 @@
 //! Modal analysis: the lowest eigenpairs of `K φ = ω² M φ` by shift-and-invert subspace iteration with
 //! Rayleigh–Ritz projection. The factorisation of `K + σM` is computed once and reused.
 
-use crate::assemble::{assemble_mass, assemble_stiffness};
 use crate::model::Model;
 use crate::solve::Factor;
 use crate::sparse::{dot, Csr};
@@ -20,8 +19,9 @@ pub struct Modes {
 /// Lowest `count` modes of the model's free vibration with its fixed supports (prescribed values are
 /// ignored). `shift` ≥ 0 allows free bodies (rigid-body modes then appear at `ω² = 0`).
 pub fn modal(model: &Model, count: usize, shift: f64) -> Result<Modes, String> {
-    let (mut k, pattern) = assemble_stiffness(&model.mesh, model.material.e, model.material.nu);
-    let mut m = assemble_mass(&model.mesh, model.material.rho, &pattern);
+    let st = model.structure();
+    let mut k = model.stiffness(&st);
+    let mut m = model.mass_matrix(&st);
     let n = k.n;
     let mut fixed = vec![false; n];
     for c in &model.fixed {

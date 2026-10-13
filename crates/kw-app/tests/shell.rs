@@ -2308,7 +2308,7 @@ fn loft_sweep_draft_offset_and_construction_plane_dialogs_build_the_expected_sol
 #[test]
 fn measure_reports_body_properties_and_picked_geometry_against_closed_forms() {
     use kw_app::design::measure::{
-        body_props, describe, edge_kind, face_kind, EdgeKind, FaceKind, MATERIALS,
+        body_props, describe, edge_kind, face_kind, materials, EdgeKind, FaceKind,
     };
     let (mut h, _d) = design_harness("measure");
     sketch_block(&mut h, 30.0, 20.0, "5 mm");
@@ -2323,7 +2323,7 @@ fn measure_reports_body_properties_and_picked_geometry_against_closed_forms() {
         assert!((got - want).abs() < 1e-6, "{:?}", p.centroid);
     }
     assert!((p.size()[0] - 30.0).abs() < 1e-6 && (p.size()[2] - 5.0).abs() < 1e-6);
-    let al = MATERIALS
+    let al = materials()
         .iter()
         .find(|m| m.name == "Aluminium")
         .unwrap()
@@ -8519,4 +8519,162 @@ fn a_file_that_holds_an_assembly_is_inserted_as_a_linked_sub_assembly() {
         assert!(a.solve().is_ok());
     }
     assert_eq!(h.app.design.asm.links.of(0), Some(&LinkStatus::Current));
+}
+
+#[test]
+fn a_project_with_a_damaged_cam_entry_still_opens_and_keeps_the_entry() {
+    let dir = scratch("damaged_cam");
+    let path = dir.join("damaged.kwf");
+    let mut f = kw_feature::kwf::KwfFile::new(kw_feature::Document::new());
+    f.extra_entries
+        .insert(kw_store::CAM_ENTRY.into(), b"garbage".to_vec());
+    f.save(&path).unwrap();
+    let mut p = kw_app::project::Project::open(&path).unwrap();
+    assert!(p.cam.is_none());
+    assert!(
+        p.load_warnings.iter().any(|w| w.contains("CAM")),
+        "{:?}",
+        p.load_warnings
+    );
+    // saving does not throw the unreadable data away
+    let again = dir.join("again.kwf");
+    p.save_as(&again).unwrap();
+    let back = kw_feature::kwf::KwfFile::load(&again).unwrap();
+    assert_eq!(
+        back.extra_entries
+            .get(kw_store::CAM_ENTRY)
+            .map(|b| b.as_slice()),
+        Some(&b"garbage"[..])
+    );
+}
+
+// ------------------------------------------------------------------------------------ model source
+
+/// A project whose design has two separate blocks (the second one named and made of aluminium).
+fn two_block_project() -> kw_app::project::Project {
+    let m = kw_expr::Param::length;
+    let mut p = kw_app::project::Project::empty();
+    p.history
+        .edit(|d| {
+            for (k, x0) in [0.0, 30.0].into_iter().enumerate() {
+                let s = d.add_rect_sketch(
+                    &format!("S{k}"),
+                    kw_feature::PlaneSpec::Xy(m(0.0)),
+                    m(x0),
+                    m(0.0),
+                    m(10.0),
+                    m(10.0),
+                )?;
+                d.add_extrude(&format!("Block{k}"), s, m(5.0), kw_feature::BodyOp::New)?;
+            }
+            let root = d.body_root(d.heads()[1]);
+            d.set_appearance(
+                root,
+                kw_feature::Appearance {
+                    name: Some("Lug".into()),
+                    colour: None,
+                    material: Some("Aluminium".into()),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    p
+}
+
+#[test]
+fn the_model_source_lists_every_design_body_and_not_just_the_last_solid() {
+    use kw_app::model_source::ModelSource;
+    use kw_store::{BodyKey, SourceKind};
+    let mut p = two_block_project();
+    let src = ModelSource::of(&mut p, SourceKind::Design, &Default::default()).unwrap();
+    assert_eq!(src.bodies.len(), 2);
+    assert_eq!(src.bodies[0].name, "Body1");
+    assert_eq!(src.bodies[1].name, "Lug");
+    assert_eq!(src.bodies[1].material.as_deref(), Some("Aluminium"));
+    for b in &src.bodies {
+        assert!((b.volume - 500.0).abs() < 1e-6);
+        assert!(matches!(b.key, BodyKey::Design(_)));
+    }
+    // the key finds the body again, and the faces belong to the body they were asked for
+    let k = src.bodies[1].key.clone();
+    assert_eq!(src.index_of(&k), Some(1));
+    for (i, b) in src.bodies.iter().enumerate() {
+        let faces = src.faces_of(i);
+        assert_eq!(faces.len(), 6);
+        assert!(faces
+            .iter()
+            .all(|f| src.body_of_face(&b.brep, *f) == Some(i)));
+    }
+    // bodies hidden by the user are left out
+    let root = match &src.bodies[0].key {
+        BodyKey::Design(id) => *id,
+        _ => unreachable!(),
+    };
+    let only = ModelSource::of(&mut p, SourceKind::Design, &[root].into_iter().collect()).unwrap();
+    assert_eq!(only.bodies.len(), 1);
+    // a change of the geometry changes the key
+    let before = src.key;
+    p.history
+        .edit(|d| {
+            let (id, mut spec) = {
+                let f = d
+                    .features
+                    .iter()
+                    .find(|f| matches!(f.spec, FeatureSpec::Extrude(_)))
+                    .unwrap();
+                (f.id, f.spec.clone())
+            };
+            if let FeatureSpec::Extrude(e) = &mut spec {
+                e.depth = kw_expr::Param::length(8.0);
+            }
+            d.replace_spec(id, spec)
+        })
+        .unwrap();
+    let after = ModelSource::of(&mut p, SourceKind::Design, &Default::default()).unwrap();
+    assert_ne!(before, after.key);
+    // a project without a solid says so
+    let mut empty = kw_app::project::Project::empty();
+    assert!(ModelSource::of(&mut empty, SourceKind::Design, &Default::default()).is_err());
+    assert!(ModelSource::of(&mut empty, SourceKind::Assembly, &Default::default()).is_err());
+}
+
+#[test]
+fn the_model_source_of_an_assembly_places_every_body_of_every_component() {
+    use kw_app::model_source::ModelSource;
+    use kw_store::{BodyKey, SourceKind};
+    let mut p = two_block_project();
+    let doc = (*p.document()).clone();
+    let mut a = kw_assembly::Assembly::new("Two instances");
+    let part = a.add_part(kw_assembly::Part::new(
+        "Bracket",
+        doc,
+        vec![kw_assembly::Frame::new(
+            "f",
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        )],
+    ));
+    let (i0, i1) = (a.add_instance("left", part), a.add_instance("right", part));
+    a.ground = i0;
+    a.instances[i1].at.t = [0.0, 50.0, 0.0];
+    p.assembly = Some(a);
+    let src = ModelSource::of(&mut p, SourceKind::Assembly, &Default::default()).unwrap();
+    assert_eq!(src.bodies.len(), 4);
+    let names: Vec<&str> = src.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["left/Body1", "left/Lug", "right/Body1", "right/Lug"]
+    );
+    assert!(matches!(&src.bodies[3].key, BodyKey::Assembly(n) if n == "right/Lug"));
+    // the right-hand bodies were moved 50 mm: their B-rep is already in the world frame
+    let bb = |i: usize| src.bodies[i].brep.body_bbox(src.bodies[i].body);
+    assert!((bb(2).min.y - bb(0).min.y - 50.0).abs() < 1e-6);
+    assert_eq!(src.bodies[3].material.as_deref(), Some("Aluminium"));
+    assert!(src.find(&BodyKey::Assembly("left/Lug".into())).is_some());
+    // all bodies share one B-rep and own their faces
+    for i in 0..4 {
+        assert!(src.faces_of(i).len() >= 6);
+    }
 }

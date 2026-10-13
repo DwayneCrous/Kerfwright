@@ -36,6 +36,61 @@ pub struct Tet10Mesh {
     pub n_corner: usize,
 }
 
+/// Several quadratic meshes joined into one (bodies of an assembly), with the bookkeeping to find the
+/// parts again. The meshes stay unconnected: no node is shared between bodies.
+#[derive(Debug, Clone, Default)]
+pub struct MergedMesh {
+    pub mesh: Tet10Mesh,
+    /// The body (index into the input list) of every element.
+    pub elem_body: Vec<u16>,
+    /// The first node of every body, and one past the last node of the last body.
+    pub node_start: Vec<u32>,
+    /// Added to the face tags of every body, so tags of different bodies never collide.
+    pub tag_offset: Vec<u32>,
+}
+
+impl MergedMesh {
+    /// The body that owns node `n`.
+    pub fn body_of_node(&self, n: u32) -> usize {
+        self.node_start.partition_point(|s| *s <= n).saturating_sub(1)
+    }
+
+    /// The body a (global) face tag belongs to, and the tag within that body.
+    pub fn split_tag(&self, tag: u32) -> (usize, u32) {
+        let b = self.tag_offset.partition_point(|s| *s <= tag).saturating_sub(1);
+        (b, tag - self.tag_offset[b])
+    }
+}
+
+impl Tet10Mesh {
+    /// Join `meshes` into one. Node and element indices of body *i* are shifted by the sizes of the bodies
+    /// before it; the face tags are shifted by `tag_offset[i]` (the number of tags used by earlier bodies,
+    /// so the global tag is `tag_offset[i] + local tag`). `n_corner` of the result counts the corner nodes
+    /// of all bodies, which are no longer stored first.
+    pub fn concat(meshes: &[Tet10Mesh]) -> MergedMesh {
+        let mut out = MergedMesh::default();
+        let mut tag_base = 0u32;
+        for (b, m) in meshes.iter().enumerate() {
+            let shift = out.mesh.nodes.len() as u32;
+            out.node_start.push(shift);
+            out.tag_offset.push(tag_base);
+            out.mesh.nodes.extend_from_slice(&m.nodes);
+            out.mesh
+                .elems
+                .extend(m.elems.iter().map(|e| e.map(|n| n + shift)));
+            out.elem_body.extend(std::iter::repeat_n(b as u16, m.elems.len()));
+            out.mesh.surface.extend(m.surface.iter().map(|s| SurfaceTri6 {
+                v: s.v.map(|n| n + shift),
+                tag: s.tag + tag_base,
+            }));
+            out.mesh.n_corner += m.n_corner;
+            tag_base += m.surface.iter().map(|s| s.tag + 1).max().unwrap_or(0);
+        }
+        out.node_start.push(out.mesh.nodes.len() as u32);
+        out
+    }
+}
+
 impl TetMesh {
     /// Promote to quadratic elements. Mid-nodes sit on the edge midpoints; `project` may move a mid-node
     /// of a boundary edge onto the true curved surface (given the tag of the face the edge lies on, the

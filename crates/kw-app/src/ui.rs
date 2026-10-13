@@ -1038,9 +1038,14 @@ impl KerfwrightApp {
     pub fn open_path(&mut self, path: &Path) -> Result<(), String> {
         match Project::open(path) {
             Ok(p) => {
+                let warning = p.load_warnings.join("; ");
                 self.remember(path);
                 self.enter(p);
-                self.message.clear();
+                self.message = if warning.is_empty() {
+                    String::new()
+                } else {
+                    format!("opened {} with a problem: {warning}", path.display())
+                };
                 Ok(())
             }
             Err(e) => {

@@ -40,6 +40,15 @@ impl Csr {
             .collect()
     }
 
+    /// Add `v` to the stored entry (i, j). The entry must be in the pattern.
+    pub fn add(&mut self, i: usize, j: usize, v: f64) {
+        let (s, e) = (self.row_ptr[i], self.row_ptr[i + 1]);
+        let k = self.col[s..e]
+            .binary_search(&(j as u32))
+            .expect("entry is in the pattern");
+        self.val[s + k] += v;
+    }
+
     /// Entry (i, j), 0 if not stored.
     pub fn get(&self, i: usize, j: usize) -> f64 {
         let (s, e) = (self.row_ptr[i], self.row_ptr[i + 1]);
