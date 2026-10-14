@@ -25,45 +25,49 @@
     return () => { dead = true; viewer?.destroy(); };
   });
 
-  // reactive parameter rebuild — the "parametric" part of the demo
+  // Changing a parameter rebuilds the model, the same idea as editing a dimension in the app.
   $effect(() => { viewer?.setParams({ teeth, bolts }); });
   $effect(() => { viewer?.setExploded(exploded); });
   $effect(() => { viewer?.setWireframe(wire); });
 </script>
 
-<div class="neu relative aspect-[4/3] w-full overflow-hidden p-2 md:aspect-[16/11]">
-  <div class="neu-inset absolute inset-2 overflow-hidden">
-    <!-- blueprint grid under the transparent canvas -->
-    <div class="absolute inset-0 opacity-60 [background-image:linear-gradient(var(--kw-line)_1px,transparent_1px),linear-gradient(90deg,var(--kw-line)_1px,transparent_1px)] [background-size:32px_32px] [mask-image:radial-gradient(70%_70%_at_50%_50%,#000,transparent)]"></div>
+<figure class="sheet m-0">
+  <div class="relative aspect-[4/3] w-full overflow-hidden border-b border-rule-strong md:aspect-[16/11]" style="border-color: var(--kw-rule-strong)">
+    <!-- 8 mm drafting grid under the transparent canvas -->
+    <div class="absolute inset-0 opacity-70 [background-image:linear-gradient(var(--kw-rule)_1px,transparent_1px),linear-gradient(90deg,var(--kw-rule)_1px,transparent_1px)] [background-size:32px_32px]" aria-hidden="true"></div>
     <div bind:this={host} class="absolute inset-0 cursor-grab active:cursor-grabbing" role="img"
-         aria-label="Interactive 3D preview of a flanged gearbox assembly. Drag to orbit."></div>
+         aria-label="Interactive 3D preview of a flanged gearbox assembly. Drag to orbit. The controls below change the tooth count and bolt count, explode the assembly, and switch to wireframe."></div>
     {#if !ready && !failed}
-      <div class="absolute inset-0 grid place-items-center font-mono text-xs tracking-widest text-soft">LOADING KERNEL PREVIEW…</div>
+      <div class="absolute inset-0 grid place-items-center font-mono text-[.8125rem] text-soft" aria-live="polite">Loading preview…</div>
     {/if}
     {#if failed}
-      <div class="absolute inset-0 grid place-items-center p-6 text-center text-sm text-soft">WebGL isn't available in this browser, so the live preview is disabled.</div>
+      <div class="absolute inset-0 grid place-items-center p-6 text-center text-[.9375rem] text-soft">WebGL isn't available in this browser, so the live preview is off.</div>
     {/if}
   </div>
 
-  <div class="glass absolute left-5 top-5 rounded-full px-3 py-1.5 font-mono text-[11px] tracking-wider text-soft">
-    gearbox.kwf <span class="text-brass">· procedural preview</span>
-  </div>
-
-  <div class="glass absolute inset-x-4 bottom-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl px-4 py-3 text-xs">
-    <label class="flex items-center gap-2">
-      <span class="w-10 font-mono text-soft">teeth</span>
-      <input type="range" min="8" max="40" bind:value={teeth} class="h-1 w-20 accent-[var(--kw-brass)]" aria-label="Gear tooth count" />
-      <output class="w-5 font-mono tabular-nums">{teeth}</output>
+  <!-- Controls: a plain toolbar under the drawing, not floating over it. -->
+  <div class="flex flex-wrap items-center gap-x-6 gap-y-3 border-b px-4 py-3 text-[.9375rem]" style="border-color: var(--kw-rule-strong)">
+    <label class="flex items-center gap-3">
+      <span class="w-14 text-soft">Teeth</span>
+      <input type="range" min="8" max="40" bind:value={teeth} class="h-6 w-28 accent-[var(--kw-dykem)]" />
+      <output class="w-6 font-mono tabular-nums">{teeth}</output>
     </label>
-    <label class="flex items-center gap-2">
-      <span class="w-10 font-mono text-soft">bolts</span>
-      <input type="range" min="3" max="12" bind:value={bolts} class="h-1 w-20 accent-[var(--kw-brass)]" aria-label="Flange bolt count" />
-      <output class="w-5 font-mono tabular-nums">{bolts}</output>
+    <label class="flex items-center gap-3">
+      <span class="w-14 text-soft">Bolts</span>
+      <input type="range" min="3" max="12" bind:value={bolts} class="h-6 w-28 accent-[var(--kw-dykem)]" />
+      <output class="w-6 font-mono tabular-nums">{bolts}</output>
     </label>
     <div class="ml-auto flex gap-2">
-      <button class="rounded-full px-3 py-1.5 transition {exploded ? 'neu-inset text-brass' : 'neu'}" aria-pressed={exploded} onclick={() => (exploded = !exploded)}>Explode</button>
-      <button class="rounded-full px-3 py-1.5 transition {wire ? 'neu-inset text-brass' : 'neu'}" aria-pressed={wire} onclick={() => (wire = !wire)}>Wireframe</button>
-      <button class="neu rounded-full px-3 py-1.5" onclick={() => viewer?.resetView()}>Reset</button>
+      <button type="button" class="btn btn-quiet !min-h-9 !px-3 {exploded ? '!bg-panel' : ''}" aria-pressed={exploded} onclick={() => (exploded = !exploded)}>Explode</button>
+      <button type="button" class="btn btn-quiet !min-h-9 !px-3 {wire ? '!bg-panel' : ''}" aria-pressed={wire} onclick={() => (wire = !wire)}>Wireframe</button>
+      <button type="button" class="btn btn-quiet !min-h-9 !px-3" onclick={() => viewer?.resetView()}>Reset view</button>
     </div>
   </div>
-</div>
+
+  <!-- Title block, as on a drawing. It reports the live parameters. -->
+  <figcaption class="grid grid-cols-2 font-mono text-[.8125rem] sm:grid-cols-4">
+    <div class="border-r border-rule p-3"><div class="text-soft">Part</div><div>gearbox.kwf</div></div>
+    <div class="p-3 sm:border-r sm:border-rule"><div class="text-soft">Parameters</div><div class="tabular-nums">z = {teeth} · n = {bolts}</div></div>
+    <div class="col-span-2 border-t border-rule p-3 sm:col-span-2 sm:border-t-0"><div class="text-soft">Source</div><div>Procedural preview, not read from a .kwf file</div></div>
+  </figcaption>
+</figure>

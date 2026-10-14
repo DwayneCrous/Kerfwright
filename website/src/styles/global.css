@@ -1,60 +1,71 @@
 @import 'tailwindcss';
 
-/* ── Design tokens ─────────────────────────────────────────────
-   Soft neumorphism = one base colour + a light and a dark shadow.
-   Liquid glass     = translucent fill + blur + 1px inner highlight. */
+/* Fonts are self-hosted (no request to Google). Plex Condensed is the lettering of
+   the headings, Plex Sans carries the text, Plex Mono carries identifiers and data. */
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-sans-condensed/500.css';
+@import '@fontsource/ibm-plex-sans-condensed/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+/* ── Tokens ────────────────────────────────────────────────────
+   Drafting-room palette. Paper and graphite carry the page; one
+   colour, layout-fluid blue ("dykem"), marks what you can act on;
+   one red, the scribe, marks what is not finished or not true yet.
+   Contrast (text on paper / on panel):
+     light  ink 16.3 / 14.9   soft 7.0 / 6.4   dykem 7.3 / 6.6   scribe 6.2 / 5.6
+     dark   ink 15.3 / 14.2   soft 7.7 / 7.1   dykem 7.3 / 6.7   scribe 7.5 / 7.0 */
 :root {
   color-scheme: light;
-  --kw-bg: #e6e9ee;
-  --kw-surface: #eceff3;
-  --kw-ink: #1b2129;
-  --kw-ink-soft: #566070;
-  --kw-line: rgb(27 33 41 / 0.1);
-  --kw-brass: #9a7440;
-  --kw-steel: #4f6f99;
-  --kw-shadow-hi: rgb(255 255 255 / 0.9);
-  --kw-shadow-lo: rgb(120 132 150 / 0.38);
-  --kw-glass: rgb(255 255 255 / 0.5);
-  --kw-glass-edge: rgb(255 255 255 / 0.7);
-  --kw-glow: rgb(154 116 64 / 0.16);
+  --kw-paper: #f6f6f3;
+  --kw-panel: #ecece7;
+  --kw-ink: #16191d;
+  --kw-soft: #4d555e;
+  --kw-rule: #c9cbc6;        /* hairlines: decorative, never the only carrier of meaning */
+  --kw-rule-strong: #565d66;   /* frames and key rules: 6.6:1 on paper */
+  --kw-dykem: #1b4fa0;
+  --kw-dykem-ink: #ffffff;   /* text on a dykem fill: 8.1:1 */
+  --kw-scribe: #a8321f;
+  --kw-nav: rgb(246 246 243 / 0.78);
 }
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --kw-bg: #0d1116;
-  --kw-surface: #141a21;
-  --kw-ink: #e7ebf1;
-  --kw-ink-soft: #94a0b1;
-  --kw-line: rgb(231 235 241 / 0.09);
-  --kw-brass: #d2ae78;
-  --kw-steel: #8fa9c9;
-  --kw-shadow-hi: rgb(255 255 255 / 0.04);
-  --kw-shadow-lo: rgb(0 0 0 / 0.6);
-  --kw-glass: rgb(26 33 42 / 0.5);
-  --kw-glass-edge: rgb(255 255 255 / 0.09);
-  --kw-glow: rgb(210 174 120 / 0.12);
+  --kw-paper: #121416;
+  --kw-panel: #191c1f;
+  --kw-ink: #e9eaec;
+  --kw-soft: #a2a8b0;
+  --kw-rule: #2c3136;
+  --kw-rule-strong: #848b94;   /* 5.2:1 on paper */
+  --kw-dykem: #7ba2ee;
+  --kw-dykem-ink: #0a1020;   /* text on a dykem fill: 7.7:1 */
+  --kw-scribe: #ef8a74;
+  --kw-nav: rgb(18 20 22 / 0.78);
 }
 
 @theme inline {
-  --color-bg: var(--kw-bg);
-  --color-surface: var(--kw-surface);
+  --color-paper: var(--kw-paper);
+  --color-panel: var(--kw-panel);
   --color-ink: var(--kw-ink);
-  --color-soft: var(--kw-ink-soft);
-  --color-line: var(--kw-line);
-  --color-brass: var(--kw-brass);
-  --color-steel: var(--kw-steel);
-  --font-sans: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --color-soft: var(--kw-soft);
+  --color-rule: var(--kw-rule);
+  --color-dykem: var(--kw-dykem);
+  --color-scribe: var(--kw-scribe);
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'IBM Plex Sans Condensed', 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
-html { background: var(--kw-bg); }
+html { background: var(--kw-paper); scroll-padding-top: 5rem; }
 body {
-  background:
-    radial-gradient(60rem 36rem at 80% -10%, var(--kw-glow), transparent 70%),
-    radial-gradient(50rem 30rem at -10% 30%, color-mix(in srgb, var(--kw-steel) 10%, transparent), transparent 70%),
-    var(--kw-bg);
+  background: var(--kw-paper);
   color: var(--kw-ink);
   font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* Lenis */
@@ -62,75 +73,83 @@ html.lenis, html.lenis body { height: auto; }
 .lenis.lenis-smooth { scroll-behavior: auto !important; }
 .lenis.lenis-stopped { overflow: clip; }
 
+::selection { background: color-mix(in srgb, var(--kw-dykem) 28%, transparent); }
+
+/* Keyboard focus is always visible and never colour-only (2 px offset ring). */
+:where(a, button, input, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--kw-dykem);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
 @layer components {
-  /* Raised neumorphic surface */
-  .neu {
-    background: var(--kw-surface);
-    box-shadow:
-      12px 12px 28px var(--kw-shadow-lo),
-      -10px -10px 24px var(--kw-shadow-hi);
-    border-radius: 1.5rem;
-  }
-  /* Pressed / inset surface */
-  .neu-inset {
-    background: var(--kw-bg);
-    box-shadow:
-      inset 6px 6px 14px var(--kw-shadow-lo),
-      inset -6px -6px 14px var(--kw-shadow-hi);
-    border-radius: 1rem;
-  }
-  /* Frosted glass layer */
-  .glass {
-    background: var(--kw-glass);
-    -webkit-backdrop-filter: blur(18px) saturate(1.3);
-    backdrop-filter: blur(18px) saturate(1.3);
-    border: 1px solid var(--kw-glass-edge);
-    box-shadow:
-      0 1px 0 var(--kw-glass-edge) inset,
-      0 18px 40px -18px var(--kw-shadow-lo);
-  }
+  /* Headings are the one place the brand typeface speaks. */
+  .display { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.01em; line-height: 1.04; }
+  .h2 { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.005em; line-height: 1.1;
+        font-size: clamp(1.75rem, 3.2vw, 2.4rem); }
+
+  /* Section label: says which part of the document you are in, in plain words. */
+  .label { font-family: var(--font-mono); font-size: .8125rem; font-weight: 500; letter-spacing: .04em; color: var(--kw-soft); }
+
+  .lead { font-size: 1.125rem; line-height: 1.6; color: var(--kw-soft); max-width: 40rem; }
+
+  /* Buttons: filled = the one primary action in a view, outlined = everything else. */
   .btn {
-    display: inline-flex; align-items: center; gap: .6rem;
-    padding: .8rem 1.2rem; border-radius: 999px;
-    font-weight: 600; font-size: .95rem; letter-spacing: .01em;
-    transition: transform .25s cubic-bezier(.2,.8,.2,1), box-shadow .25s;
+    display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+    min-height: 2.75rem; padding: 0 1.25rem; border-radius: 4px;
+    font-weight: 500; font-size: .9375rem; line-height: 1;
+    border: 1px solid var(--kw-rule-strong);
+    transition: background-color .15s, color .15s, border-color .15s;
   }
-  .btn:hover { transform: translateY(-1px); }
-  .btn:active { transform: translateY(1px); }
-  .btn-primary {
-    color: #1b1408;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--kw-brass) 92%, white), var(--kw-brass));
-    box-shadow: 0 10px 24px -10px var(--kw-brass), inset 0 1px 0 rgb(255 255 255 / .45);
+  .btn-primary { background: var(--kw-dykem); border-color: var(--kw-dykem); color: var(--kw-dykem-ink); }
+  .btn-primary:hover { background: color-mix(in srgb, var(--kw-dykem) 88%, var(--kw-ink)); border-color: color-mix(in srgb, var(--kw-dykem) 88%, var(--kw-ink)); }
+  .btn-quiet { background: transparent; color: var(--kw-ink); }
+  .btn-quiet:hover { background: var(--kw-panel); }
+
+  .link { color: var(--kw-dykem); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .link:hover { text-decoration-thickness: 2px; }
+
+  /* The sheet: a ruled frame with corner ticks, like the border of a drawing. */
+  .sheet { position: relative; border: 1px solid var(--kw-rule-strong); background: var(--kw-paper); }
+  .sheet::before, .sheet::after {
+    content: ''; position: absolute; width: 10px; height: 10px; pointer-events: none;
+    border: 0 solid var(--kw-rule-strong);
   }
-  .btn-ghost {
-    background: var(--kw-surface); color: var(--kw-ink);
-    box-shadow: 8px 8px 20px var(--kw-shadow-lo), -6px -6px 16px var(--kw-shadow-hi);
+  .sheet::before { top: -6px; left: -6px; border-width: 0 1px 1px 0; }
+  .sheet::after  { bottom: -6px; right: -6px; border-width: 1px 0 0 1px; }
+
+  .code {
+    font-family: var(--font-mono); font-size: .875rem; line-height: 1.5;
+    background: var(--kw-panel); border: 1px solid var(--kw-rule); border-radius: 4px; padding: .75rem 1rem;
   }
-  .eyebrow {
-    font-family: var(--font-mono); font-size: .72rem; letter-spacing: .18em;
-    text-transform: uppercase; color: var(--kw-brass);
-  }
+
+  /* Data tables on the landing page. */
+  .data { width: 100%; border-collapse: collapse; font-size: .9375rem; }
+  .data caption { text-align: left; }
+  .data th { text-align: left; font-weight: 500; font-family: var(--font-mono); font-size: .8125rem; color: var(--kw-soft);
+             padding: .625rem 1rem .625rem 0; border-bottom: 1px solid var(--kw-rule-strong); }
+  .data td { vertical-align: top; padding: 1rem 1rem 1rem 0; border-bottom: 1px solid var(--kw-rule); }
+  .data td:last-child, .data th:last-child { padding-right: 0; }
 }
 
-/* Spotlight that follows the pointer (set via --mx / --my from the island) */
-.spot::before {
-  content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-  background: radial-gradient(18rem 18rem at var(--mx, 50%) var(--my, 0%),
-    color-mix(in srgb, var(--kw-brass) 18%, transparent), transparent 70%);
-  opacity: 0; transition: opacity .3s;
+/* The nav is the only floating layer, so it is the only glass (liquid-glass.md: functional layer only).
+   It falls back to an opaque bar when transparency or motion is reduced, or contrast is raised. */
+.bar {
+  background: var(--kw-nav);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
+  border-bottom: 1px solid var(--kw-rule);
 }
-.spot:hover::before { opacity: 1; }
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .bar { background: var(--kw-paper); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :root { --kw-rule: color-mix(in srgb, var(--kw-ink) 45%, var(--kw-paper)); }
+}
 
-/* Scroll-reveal for static Astro sections (no JS needed in modern browsers) */
+/* Scroll reveal: opacity only, once, and only where the browser can do it without JS. */
 @supports (animation-timeline: view()) {
-  .reveal {
-    animation: reveal linear both;
-    animation-timeline: view();
-    animation-range: entry 0% entry 40%;
-  }
-  @keyframes reveal { from { opacity: 0; transform: translateY(24px); } }
+  .reveal { animation: reveal linear both; animation-timeline: view(); animation-range: entry 0% entry 35%; }
+  @keyframes reveal { from { opacity: 0; } }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }

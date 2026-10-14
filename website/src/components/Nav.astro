@@ -1,31 +1,59 @@
 ---
 const links = [
-  ['Features', '#features'],
-  ['Workspaces', '#workspaces'],
-  ['Performance', '#performance'],
-  ['Docs', '/docs/getting-started/introduction/'],
+  ['Overview', '/#overview'],
+  ['Workspaces', '/#workspaces'],
+  ['Evidence', '/#evidence'],
+  ['Status', '/#status'],
+  ['Documentation', '/docs/getting-started/introduction/'],
 ];
 ---
-<header class="fixed inset-x-0 top-0 z-50 px-4 pt-4">
-  <nav class="glass mx-auto flex max-w-6xl items-center justify-between rounded-full py-2.5 pl-5 pr-3" aria-label="Primary">
-    <a href="/" class="flex items-center gap-2.5 font-semibold tracking-tight">
-      <img src="/favicon.svg" alt="" class="size-6" /> Kerfwright
+<header class="bar fixed inset-x-0 top-0 z-50">
+  <nav class="mx-auto flex h-14 max-w-6xl items-center justify-between gap-6 px-5" aria-label="Primary">
+    <a href="/" class="flex items-center gap-2.5 font-display text-lg font-semibold tracking-tight">
+      <img src="/favicon.svg" alt="" width="24" height="24" class="size-6" /> Kerfwright
     </a>
-    <ul class="hidden items-center gap-7 text-sm text-soft md:flex">
-      {links.map(([l, h]) => <li><a href={h} class="transition-colors hover:text-ink">{l}</a></li>)}
+    <ul class="hidden items-center gap-7 text-[.9375rem] md:flex">
+      {links.map(([l, h]) => <li><a href={h} class="text-soft transition-colors hover:text-ink">{l}</a></li>)}
     </ul>
-    <div class="flex items-center gap-2">
-      <button id="theme-toggle" class="neu grid size-9 place-items-center !rounded-full" aria-label="Toggle colour theme">
-        <svg viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" /></svg>
+    <div class="flex items-center gap-1">
+      <a href="https://github.com/DwayneCrous/Kerfwright" class="hidden min-h-10 items-center px-3 text-[.9375rem] text-soft hover:text-ink sm:inline-flex">GitHub</a>
+      <button id="theme-toggle" type="button" class="grid size-10 place-items-center rounded text-soft hover:bg-panel hover:text-ink" aria-label="Switch to light theme">
+        <svg viewBox="0 0 24 24" class="size-[18px]" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <g id="icon-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g>
+          <path id="icon-moon" d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />
+        </svg>
       </button>
-      <a href="https://github.com/DwayneCrous/Kerfwright" class="btn btn-ghost !py-2 text-sm">GitHub</a>
+      <details class="relative md:hidden">
+        <summary class="grid size-10 cursor-pointer list-none place-items-center rounded text-soft hover:bg-panel hover:text-ink [&::-webkit-details-marker]:hidden" aria-label="Menu">
+          <svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+        </summary>
+        <ul class="absolute right-0 top-12 w-56 border border-rule bg-paper p-2 shadow-none">
+          {links.map(([l, h]) => <li><a href={h} class="flex min-h-11 items-center px-3 hover:bg-panel">{l}</a></li>)}
+          <li><a href="https://github.com/DwayneCrous/Kerfwright" class="flex min-h-11 items-center px-3 hover:bg-panel">GitHub</a></li>
+        </ul>
+      </details>
     </div>
   </nav>
 </header>
 <script>
-  document.getElementById('theme-toggle')?.addEventListener('click', () => {
+  const btn = document.getElementById('theme-toggle');
+  const sun = document.getElementById('icon-sun');
+  const moon = document.getElementById('icon-moon');
+  function paint() {
+    const light = document.documentElement.dataset.theme === 'light';
+    // Show the icon of the theme you would switch to.
+    if (sun) sun.style.display = light ? 'none' : '';
+    if (moon) moon.style.display = light ? '' : 'none';
+    btn?.setAttribute('aria-label', light ? 'Switch to dark theme' : 'Switch to light theme');
+  }
+  paint();
+  btn?.addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem('starlight-theme', next); } catch {}
+    paint();
   });
+  // Close the mobile menu after choosing a link.
+  document.querySelectorAll('header details a').forEach((a) =>
+    a.addEventListener('click', () => a.closest('details')?.removeAttribute('open')));
 </script>

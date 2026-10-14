@@ -1,28 +1,123 @@
-/* Maps the Kerfwright palette onto Starlight's tokens. Plain CSS (no Tailwind). */
+/* Maps the Kerfwright drafting palette onto Starlight's tokens. Plain CSS (no Tailwind).
+   The values match global.css; contrast figures are given there. */
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-sans-condensed/500.css';
+@import '@fontsource/ibm-plex-sans-condensed/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
 :root {
-  --sl-font: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, sans-serif;
-  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  --sl-color-accent-low: #3a2f1d;
-  --sl-color-accent: #9a7440;
-  --sl-color-accent-high: #e3c590;
-  --sl-color-bg: #0d1116;
-  --sl-color-bg-nav: rgb(20 26 33 / 0.6);
-  --sl-color-bg-sidebar: #10151b;
-  --sl-color-hairline: rgb(231 235 241 / 0.09);
+  --sl-font: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --kw-display: 'IBM Plex Sans Condensed', 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --sl-content-width: 46rem;
+  --sl-text-body: 1rem;
+  --sl-line-height: 1.7;
+  --sl-nav-height: 3.5rem;
+
+  /* Dark (default) */
+  --sl-color-white: #e9eaec;
+  --sl-color-gray-1: #d3d6da;
+  --sl-color-gray-2: #b7bcc2;
+  --sl-color-gray-3: #a2a8b0;
+  --sl-color-gray-4: #8a9199;
+  --sl-color-gray-5: #34393e;
+  --sl-color-gray-6: #22262a;
+  --sl-color-gray-7: #191c1f;
+  --sl-color-black: #121416;
+  --sl-color-accent-low: #162744;
+  --sl-color-accent: #7ba2ee;
+  --sl-color-accent-high: #b4cbf5;
+  --sl-color-bg-nav: rgb(18 20 22 / 0.78);
+  --sl-color-bg-sidebar: #121416;
+  --sl-color-hairline: #2c3136;
+  --sl-color-hairline-light: #2c3136;
+  --sl-color-hairline-shade: #2c3136;
+  --sl-color-text-accent: #9dbcf2;
+  --sl-color-bg-inline-code: #1c2024;
+  --ec-brdRad: 4px;
 }
 :root[data-theme='light'] {
-  --sl-color-accent-low: #f1e4cd;
-  --sl-color-accent: #8a6532;
-  --sl-color-accent-high: #5b4119;
-  --sl-color-bg: #e6e9ee;
-  --sl-color-bg-nav: rgb(255 255 255 / 0.6);
-  --sl-color-bg-sidebar: #eceff3;
-  --sl-color-hairline: rgb(27 33 41 / 0.1);
+  --sl-color-white: #16191d;
+  --sl-color-gray-1: #2a2f35;
+  --sl-color-gray-2: #3b4148;
+  --sl-color-gray-3: #4d555e;
+  --sl-color-gray-4: #5d656e;
+  --sl-color-gray-5: #c9cbc6;
+  --sl-color-gray-6: #e0e0db;
+  --sl-color-gray-7: #ecece7;
+  --sl-color-black: #f6f6f3;
+  --sl-color-accent-low: #dbe5f5;
+  --sl-color-accent: #1b4fa0;
+  --sl-color-accent-high: #123670;
+  --sl-color-bg-nav: rgb(246 246 243 / 0.78);
+  --sl-color-bg-sidebar: #f6f6f3;
+  --sl-color-hairline: #d3d4cf;
+  --sl-color-hairline-light: #d3d4cf;
+  --sl-color-hairline-shade: #d3d4cf;
+  --sl-color-text-accent: #1b4fa0;
+  --sl-color-bg-inline-code: #ecece7;
 }
+
+/* Header: the same hairline bar as the landing page; the one place docs use blur. */
 .header {
-  -webkit-backdrop-filter: blur(18px) saturate(1.3);
-  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
 }
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .header { background: var(--sl-color-black); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+.site-title { font-family: var(--kw-display); font-weight: 600; font-size: 1.25rem; letter-spacing: -0.005em; }
+
+/* Headings carry the brand face; body stays Plex Sans. */
+#_top, .sl-markdown-content :is(h1, h2, h3, h4) {
+  font-family: var(--kw-display);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.15;
+}
+.sl-markdown-content h2 { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--sl-color-hairline); }
+.sl-markdown-content h2:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+.sl-markdown-content h3 { margin-top: 1.75rem; }
+
+/* Vertical rhythm between blocks (Starlight's default is tighter than long reference text wants). */
 .sl-markdown-content :not(a, strong, em, del, span, input, code, br) + :not(a, strong, em, del, span, input, code, br, :where(.not-content *)) {
   margin-top: 1.1rem;
+}
+.sl-markdown-content :is(h2, h3, h4) + * { margin-top: .75rem; }
+
+/* Sidebar: group labels read as labels, the current page as a filled row. */
+.sidebar-content details > summary .large { font-family: var(--sl-font-mono); font-size: .8125rem; font-weight: 500; letter-spacing: .02em; text-transform: none; }
+.sidebar-content a { border-radius: 4px; }
+.sidebar-content a[aria-current='page'] { background: var(--sl-color-accent); color: var(--sl-color-black); font-weight: 500; }
+:root[data-theme='light'] .sidebar-content a[aria-current='page'] { color: #fff; }
+
+/* Tables: ruled, no zebra, left-aligned header in the mono face. */
+.sl-markdown-content table { display: table; width: 100%; font-size: .9375rem; border-collapse: collapse; }
+.sl-markdown-content :is(th, td) { padding: .625rem .875rem .625rem 0; vertical-align: top; }
+.sl-markdown-content th { font-family: var(--sl-font-mono); font-size: .8125rem; font-weight: 500; color: var(--sl-color-gray-3); border-bottom: 1px solid var(--sl-color-white); }
+.sl-markdown-content tr:nth-child(2n) { background: transparent; }
+.sl-markdown-content td { border-bottom: 1px solid var(--sl-color-hairline); }
+
+/* Inline code and links. */
+.sl-markdown-content :not(pre) > code { border-radius: 3px; font-size: .875em; padding: .1em .35em; }
+.sl-markdown-content a:not(.not-content *) { text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.sl-markdown-content a:not(.not-content *):hover { text-decoration-thickness: 2px; }
+
+/* Asides: square, ruled, tinted only by a left rule. */
+.starlight-aside { border-radius: 0 4px 4px 0; border-width: 0 0 0 3px; background: var(--sl-color-gray-7); }
+
+/* Keyboard focus is visible everywhere. */
+:where(a, button, summary, input, [tabindex]):focus-visible { outline: 2px solid var(--sl-color-accent); outline-offset: 3px; }
+
+/* Definition-style lists used in reference pages: <dl> with term over description. */
+.sl-markdown-content dl { display: grid; grid-template-columns: minmax(8rem, 12rem) 1fr; gap: .5rem 1.5rem; }
+.sl-markdown-content dt { font-family: var(--sl-font-mono); font-size: .875rem; color: var(--sl-color-white); }
+.sl-markdown-content dd { margin: 0; color: var(--sl-color-gray-2); }
+@media (max-width: 40rem) { .sl-markdown-content dl { grid-template-columns: 1fr; gap: 0; } .sl-markdown-content dd { margin-bottom: 1rem; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
