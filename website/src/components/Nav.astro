@@ -1,0 +1,31 @@
+---
+const links = [
+  ['Features', '#features'],
+  ['Workspaces', '#workspaces'],
+  ['Performance', '#performance'],
+  ['Docs', '/docs/getting-started/introduction/'],
+];
+---
+<header class="fixed inset-x-0 top-0 z-50 px-4 pt-4">
+  <nav class="glass mx-auto flex max-w-6xl items-center justify-between rounded-full py-2.5 pl-5 pr-3" aria-label="Primary">
+    <a href="/" class="flex items-center gap-2.5 font-semibold tracking-tight">
+      <img src="/favicon.svg" alt="" class="size-6" /> Kerfwright
+    </a>
+    <ul class="hidden items-center gap-7 text-sm text-soft md:flex">
+      {links.map(([l, h]) => <li><a href={h} class="transition-colors hover:text-ink">{l}</a></li>)}
+    </ul>
+    <div class="flex items-center gap-2">
+      <button id="theme-toggle" class="neu grid size-9 place-items-center !rounded-full" aria-label="Toggle colour theme">
+        <svg viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" /></svg>
+      </button>
+      <a href="https://github.com/DwayneCrous/Kerfwright" class="btn btn-ghost !py-2 text-sm">GitHub</a>
+    </div>
+  </nav>
+</header>
+<script>
+  document.getElementById('theme-toggle')?.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('starlight-theme', next); } catch {}
+  });
+</script>

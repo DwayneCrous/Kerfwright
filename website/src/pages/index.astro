@@ -1,0 +1,41 @@
+---
+import Landing from '../layouts/Landing.astro';
+import Nav from '../components/Nav.astro';
+import Hero from '../components/Hero.astro';
+import FeatureGrid from '../components/FeatureGrid.svelte';
+import WorkspaceTabs from '../components/WorkspaceTabs.svelte';
+import StatsBar from '../components/StatsBar.astro';
+import Footer from '../components/Footer.astro';
+---
+<Landing
+  title="Kerfwright — Pure-Rust CAD/CAM/CAE/ECAD"
+  description="From sketch to G-code. An open-source, pure-Rust CAD, CAM, CAE and ECAD suite on a clean-room B-rep kernel."
+>
+  <Nav />
+  <main>
+    <Hero />
+
+    <section id="features" class="mx-auto max-w-6xl px-5 py-20">
+      <p class="eyebrow">Pillars</p>
+      <h2 class="mt-3 max-w-2xl text-3xl font-semibold tracking-tight md:text-4xl">One kernel under every discipline.</h2>
+      <div class="mt-12"><FeatureGrid client:visible /></div>
+    </section>
+
+    <section id="workspaces" class="mx-auto max-w-6xl px-5 py-20">
+      <p class="eyebrow">Workspaces</p>
+      <h2 class="mt-3 max-w-2xl text-3xl font-semibold tracking-tight md:text-4xl">Five workspaces, one frame.</h2>
+      <div class="mt-12"><WorkspaceTabs client:visible /></div>
+    </section>
+
+    <StatsBar />
+
+    <section class="mx-auto max-w-6xl px-5 pb-24">
+      <div class="neu relative overflow-hidden p-10 text-center md:p-16">
+        <h2 class="text-3xl font-semibold tracking-tight md:text-4xl">Read the blueprint.</h2>
+        <p class="mx-auto mt-4 max-w-xl text-soft">PRD, architecture, roadmap and per-phase reports: every claim on this page is traceable to them.</p>
+        <a href="/docs/getting-started/introduction/" class="btn btn-primary mt-8">Open the documentation</a>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</Landing>

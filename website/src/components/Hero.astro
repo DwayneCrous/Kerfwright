@@ -1,0 +1,27 @@
+---
+import HeroViewer from './HeroViewer.svelte';
+---
+<section class="relative mx-auto grid max-w-6xl items-center gap-12 px-5 pb-24 pt-36 lg:grid-cols-[1fr_1.15fr] lg:pt-44">
+  <div>
+    <p class="eyebrow">weopensourcesoftware · pure Rust</p>
+    <h1 class="mt-5 text-[clamp(2.3rem,4.6vw,3.7rem)] font-semibold leading-[1.04] tracking-tight">
+      From Sketch to <span class="whitespace-nowrap">G-Code.</span><br />
+      <span class="bg-gradient-to-r from-brass to-steel bg-clip-text text-transparent">Open-Source, Pure-Rust CAD.</span>
+    </h1>
+    <p class="mt-6 max-w-xl text-lg leading-relaxed text-soft">
+      Kerfwright is an all-in-one CAD, CAM, CAE and ECAD suite on a clean-room B-rep kernel: one file format, one
+      parametric history, from the first constraint to the post-processed program.
+    </p>
+    <div class="mt-9 flex flex-wrap gap-3">
+      <a href="https://github.com/DwayneCrous/Kerfwright#workspace-layout" class="btn btn-primary">
+        <svg viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 20h16" /></svg>
+        Download Desktop App
+      </a>
+      <a href="/docs/getting-started/introduction/" class="btn btn-ghost">Explore Documentation →</a>
+    </div>
+    <p class="mt-5 font-mono text-xs text-soft">Pre-release · build from source with <code class="text-brass">cargo run -p kw-app --release</code></p>
+  </div>
+  <div class="relative">
+    <HeroViewer client:idle />
+  </div>
+</section>

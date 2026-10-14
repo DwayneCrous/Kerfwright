@@ -1,0 +1,8 @@
+---
+import Default from '@astrojs/starlight/components/Head.astro';
+---
+<Default {...Astro.props}><slot /></Default>
+<script>
+  import { initSmoothScroll } from '../../lib/smooth';
+  initSmoothScroll();
+</script>

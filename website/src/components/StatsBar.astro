@@ -1,0 +1,29 @@
+---
+// Source: docs/02-PRD.md §3 (targets) and docs/phase1-report.md, phase2-report.md, phase3-report.md (measurements).
+const stats = [
+  { value: '≥ 60', unit: 'FPS', label: 'Viewport with 1M+ triangles', tag: 'Measured',
+    note: '1,003,424 tris · ≈197 FPS windowed on an integrated GPU (Phase 1, before SSAO/OIT)' },
+  { value: '< 1', unit: 'ms', label: 'Sub-millisecond sketch solve', tag: 'Measured',
+    note: 'p99 0.22 ms drag on a 493-entity decomposable sketch; coupled chains are slower' },
+  { value: '0', unit: 'panics', label: 'Zero-panic B-rep safety', tag: 'Measured',
+    note: '100,000 fuzzed operand pairs × 3 Boolean operations; kernel returns Result' },
+];
+---
+<section id="performance" class="mx-auto max-w-6xl px-5 py-24">
+  <div class="neu grid divide-y divide-line md:grid-cols-3 md:divide-x md:divide-y-0">
+    {stats.map((s) => (
+      <div class="reveal p-8">
+        <div class="flex items-baseline gap-2">
+          <span class="text-5xl font-semibold tracking-tight tabular-nums">{s.value}</span>
+          <span class="text-xl text-brass">{s.unit}</span>
+        </div>
+        <p class="mt-3 font-medium">{s.label}</p>
+        <p class="mt-2 text-sm leading-relaxed text-soft">{s.note}</p>
+        <span class="glass mt-4 inline-block rounded-full px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-widest text-soft">{s.tag}</span>
+      </div>
+    ))}
+  </div>
+  <p class="mt-5 text-center text-sm text-soft">
+    Full methodology and caveats in the <a class="text-brass underline-offset-4 hover:underline" href="/docs/benchmarks/results/">benchmark report</a>.
+  </p>
+</section>
