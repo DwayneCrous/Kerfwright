@@ -328,14 +328,17 @@ impl ModelScene {
         ModelScene::build(&BRep::new())
     }
 
-    /// The dense face index of `face` in the first body's tessellation (what mesh tags are).
+    /// The tag of `face`: its index among the faces of its body's tessellation, plus the number of faces of
+    /// the bodies before it (what mesh tags are when several bodies are meshed in order).
     pub fn face_tag(&self, face: FaceId) -> Option<u32> {
-        self.tess
-            .first()?
-            .face_keys
-            .iter()
-            .position(|f| *f == face)
-            .map(|i| i as u32)
+        let mut before = 0u32;
+        for t in &self.tess {
+            if let Some(i) = t.face_keys.iter().position(|f| *f == face) {
+                return Some(before + i as u32);
+            }
+            before += t.face_keys.len() as u32;
+        }
+        None
     }
 
     pub fn resolve(&self, id: u32) -> Option<Pick> {

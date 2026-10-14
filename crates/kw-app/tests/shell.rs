@@ -8678,3 +8678,72 @@ fn the_model_source_of_an_assembly_places_every_body_of_every_component() {
         assert!(src.faces_of(i).len() >= 6);
     }
 }
+
+#[test]
+fn the_fea_workspace_lists_the_bodies_and_runs_a_modal_study_with_animated_modes() {
+    use kw_store::StudyKind;
+    let dir = scratch("fea_multi_ui");
+    let mut h = demo_app(&dir);
+    *h.app.project_mut().unwrap() = two_block_project();
+    h.app.set_workspace(Workspace::Fea);
+    h.frame();
+    h.frame();
+    // both bodies are in the study, each with a material of its own
+    {
+        let st = &h.app.fea.study;
+        assert_eq!(st.bodies.len(), 2);
+        assert!(st.bodies.iter().all(|b| b.included));
+        assert_eq!(st.bodies[0].material.name, "Steel");
+        assert_eq!(st.bodies[1].material.name, "Aluminium");
+    }
+    // a modal study: fix a face, pick the type like the ribbon does, solve like the button does
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        // one face of each body (the second body's tags follow the six faces of the first)
+        h.app.fea.fix_face(project, 0);
+        h.app.fea.fix_face(project, 6);
+    }
+    h.app.fea.study.kind = StudyKind::Modal;
+    h.app.fea.study.modes = 3;
+    h.app.fea.study.max_size = 4.0;
+    h.app.fea.requests.push("kind");
+    h.frame();
+    h.app.fea.requests.push("solve");
+    let t = std::time::Instant::now();
+    while h.app.fea.result.is_none() {
+        h.frame();
+        let m = &h.app.fea.message;
+        assert!(
+            h.app.fea.result.is_some()
+                || (t.elapsed().as_secs() < 240 && (m.is_empty() || m.starts_with("meshing"))),
+            "{m}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let r = h.app.fea.result.clone().unwrap();
+    assert_eq!(r.kind, StudyKind::Modal);
+    assert_eq!(r.modes.len(), 3);
+    assert!(r.modes[0].frequency > 0.0 && r.modes[0].frequency <= r.modes[1].frequency);
+    assert!(
+        h.app.fea.message.contains("lowest frequency"),
+        "{}",
+        h.app.fea.message
+    );
+    // every field draws, the mode shape swings
+    for i in 0..r.fields.len() {
+        h.app.fea.field = kw_app::fea::Field::Named(i);
+        h.frame();
+        h.frame();
+    }
+    // the study (with its bodies and materials) is saved with the project
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    project.save_as(&dir.join("modal.kwf")).unwrap();
+    let back = kw_app::project::Project::open(&dir.join("modal.kwf")).unwrap();
+    let st = back.fea.unwrap();
+    assert_eq!(st.kind, StudyKind::Modal);
+    assert_eq!(st.modes, 3);
+}

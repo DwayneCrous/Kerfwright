@@ -82,17 +82,164 @@ pub enum FeaLoad {
     },
 }
 
+/// What a study computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StudyKind {
+    /// Linear static stress.
+    #[default]
+    Static,
+    /// Natural frequencies and mode shapes.
+    Modal,
+    /// Steady-state temperature.
+    Thermal,
+    /// Steady-state temperature, then the stress its thermal expansion causes.
+    ThermalStress,
+    /// Large displacements and plasticity.
+    Nonlinear,
+}
+
+impl StudyKind {
+    pub const ALL: [StudyKind; 5] = [
+        StudyKind::Static,
+        StudyKind::Modal,
+        StudyKind::Thermal,
+        StudyKind::ThermalStress,
+        StudyKind::Nonlinear,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StudyKind::Static => "Static stress",
+            StudyKind::Modal => "Modal frequencies",
+            StudyKind::Thermal => "Thermal",
+            StudyKind::ThermalStress => "Thermal stress",
+            StudyKind::Nonlinear => "Nonlinear static",
+        }
+    }
+}
+
+/// The constants of a material as a study uses them, kept in the study so that it solves the same
+/// everywhere. Catalogue units (MPa, kg/m³, W/(m·K), 1/K, °C).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudyMaterial {
+    pub name: String,
+    pub e: f64,
+    pub nu: f64,
+    /// kg/m³
+    pub density: f64,
+    #[serde(default)]
+    pub yield_strength: f64,
+    /// Tangent modulus after yield, MPa.
+    #[serde(default)]
+    pub hardening_modulus: f64,
+    #[serde(default)]
+    pub conductivity: f64,
+    #[serde(default)]
+    pub expansion: f64,
+    #[serde(default)]
+    pub ref_temperature: f64,
+}
+
+/// One body of the model in a study.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudyBody {
+    pub key: BodyKey,
+    pub included: bool,
+    pub material: StudyMaterial,
+}
+
+/// A thermal condition (catalogue units: °C, W/m², W/(m²·K), W/m³).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ThermalBc {
+    /// Held at a temperature on the faces with this tag.
+    Temperature { tag: u32, t: f64 },
+    /// Heat flowing into the body through the faces.
+    Flux { tag: u32, q: f64 },
+    /// Convection to the ambient temperature `t_inf`.
+    Convection { tag: u32, h: f64, t_inf: f64 },
+    /// Heat generated in all the bodies of the study.
+    Generation { q: f64 },
+}
+
+/// A support on the faces with this tag: the ticked components are held at `value` (0: fixed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Support {
+    pub tag: u32,
+    pub axes: [bool; 3],
+    #[serde(default)]
+    pub value: [f64; 3],
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeaStudy {
     pub name: String,
-    /// Name of the body in the model this study is run on.
+    /// Name of the body in the model this study is run on (first versions; see `bodies`).
     pub body: String,
     pub material: kw_fem::Material,
     pub max_size: f64,
     pub radius_edge: f64,
-    /// Faces held fixed (all components).
+    /// Faces held fixed (all components). Tags count the faces of the included bodies in order: the faces
+    /// of the first body, then those of the second, and so on.
     pub fixed_tags: Vec<u32>,
     pub loads: Vec<FeaLoad>,
+    #[serde(default)]
+    pub kind: StudyKind,
+    #[serde(default)]
+    pub source: SourceKind,
+    /// The bodies of the study, with a material each. Empty: every body, all of `material`.
+    #[serde(default)]
+    pub bodies: Vec<StudyBody>,
+    /// Largest gap that still counts as touching (mm); 0 takes a small default.
+    #[serde(default)]
+    pub bond_tolerance: f64,
+    /// Pairs of bodies that touch but are not bonded.
+    #[serde(default)]
+    pub unbonded: Vec<(BodyKey, BodyKey)>,
+    /// How many modes a modal study finds (0: six).
+    #[serde(default)]
+    pub modes: usize,
+    #[serde(default)]
+    pub thermal: Vec<ThermalBc>,
+    /// Supports with chosen components or prescribed displacements (besides `fixed_tags`).
+    #[serde(default)]
+    pub supports: Vec<Support>,
+    /// Nonlinear: load steps to start with, and large displacements on or off.
+    #[serde(default)]
+    pub nl_steps: usize,
+    #[serde(default = "yes")]
+    pub nl_geometric: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for FeaStudy {
+    fn default() -> Self {
+        FeaStudy {
+            name: "Static study".into(),
+            body: String::new(),
+            material: kw_fem::Material {
+                e: 210e3,
+                nu: 0.30,
+                rho: 7.85e-9,
+            },
+            max_size: 5.0,
+            radius_edge: 2.0,
+            fixed_tags: Vec::new(),
+            loads: Vec::new(),
+            kind: StudyKind::Static,
+            source: SourceKind::Design,
+            bodies: Vec::new(),
+            bond_tolerance: 0.0,
+            unbonded: Vec::new(),
+            modes: 0,
+            thermal: Vec::new(),
+            supports: Vec::new(),
+            nl_steps: 0,
+            nl_geometric: true,
+        }
+    }
 }
 
 /// `cam.cbor` as written now: the setups of the project.

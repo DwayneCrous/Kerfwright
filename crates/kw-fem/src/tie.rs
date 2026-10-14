@@ -315,24 +315,64 @@ pub fn tie_groups(ties: &[Tie]) -> Vec<Vec<u32>> {
         .collect()
 }
 
-/// Add the penalty terms of `ties` to `k` (`nd` unknowns per node). `scale` times the largest diagonal entry
-/// among the tied nodes is the penalty stiffness: large enough to hold the nodes together to about 1/scale,
-/// small enough not to ruin the conditioning.
-pub fn apply_penalty(k: &mut Csr, nd: usize, ties: &[Tie], scale: f64) {
-    // the strength comes from the matrix without any penalty, so ties that share nodes do not compound
+/// The penalty stiffness of every tie and component (`nd` per tie), from the matrix without any penalty:
+/// `scale` times the largest diagonal entry among the tied nodes, large enough to hold them together to about
+/// 1/scale, small enough not to ruin the conditioning.
+pub fn tie_alphas(k: &Csr, nd: usize, ties: &[Tie], scale: f64) -> Vec<f64> {
     let diag = k.diagonal();
+    let mut out = Vec::with_capacity(ties.len() * nd);
     for t in ties {
         for a in 0..nd {
-            let mut dofs: Vec<(usize, f64)> = vec![(nd * t.slave as usize + a, 1.0)];
-            for (m, w) in t.master.iter().zip(&t.weights) {
-                dofs.push((nd * *m as usize + a, -*w));
+            let mut big = diag[nd * t.slave as usize + a];
+            for m in &t.master {
+                big = big.max(diag[nd * *m as usize + a]);
             }
-            let big = dofs.iter().map(|(d, _)| diag[*d]).fold(0.0f64, f64::max);
-            let alpha = scale * big;
+            out.push(scale * big);
+        }
+    }
+    out
+}
+
+/// The degrees of freedom of a tie component and their coefficients (slave 1, masters minus the weights).
+fn tie_dofs(t: &Tie, nd: usize, a: usize) -> Vec<(usize, f64)> {
+    let mut dofs: Vec<(usize, f64)> = vec![(nd * t.slave as usize + a, 1.0)];
+    for (m, w) in t.master.iter().zip(&t.weights) {
+        dofs.push((nd * *m as usize + a, -*w));
+    }
+    dofs
+}
+
+/// Add the penalty terms with the given strengths (see [`tie_alphas`]) to `k`.
+pub fn apply_penalty_with(k: &mut Csr, nd: usize, ties: &[Tie], alphas: &[f64]) {
+    for (ti, t) in ties.iter().enumerate() {
+        for a in 0..nd {
+            let dofs = tie_dofs(t, nd, a);
+            let alpha = alphas[ti * nd + a];
             for &(p, cp) in &dofs {
                 for &(q, cq) in &dofs {
                     k.add(p, q, alpha * cp * cq);
                 }
+            }
+        }
+    }
+}
+
+/// Add the penalty terms of `ties` to `k` (`nd` unknowns per node).
+pub fn apply_penalty(k: &mut Csr, nd: usize, ties: &[Tie], scale: f64) {
+    let alphas = tie_alphas(k, nd, ties, scale);
+    apply_penalty_with(k, nd, ties, &alphas);
+}
+
+/// Add the force the penalty exerts at displacements `u` to `f` (what `K_penalty u` is, for a nonlinear
+/// residual).
+pub fn penalty_force(nd: usize, ties: &[Tie], alphas: &[f64], u: &[f64], f: &mut [f64]) {
+    for (ti, t) in ties.iter().enumerate() {
+        for a in 0..nd {
+            let dofs = tie_dofs(t, nd, a);
+            let gap: f64 = dofs.iter().map(|(d, c)| c * u[*d]).sum();
+            let alpha = alphas[ti * nd + a];
+            for &(d, c) in &dofs {
+                f[d] += alpha * c * gap;
             }
         }
     }

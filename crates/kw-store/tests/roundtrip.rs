@@ -53,6 +53,9 @@ fn cam_fea_and_board_entries_round_trip_through_a_kwf_file() {
                 g: [0.0, 0.0, -9810.0],
             },
         ],
+        kind: StudyKind::Thermal,
+        thermal: vec![ThermalBc::Temperature { tag: 1, t: 80.0 }],
+        ..Default::default()
     };
     let (board, _) = generate(&benchmark_specs()[0]);
     attach_cam(&mut file, &cam);

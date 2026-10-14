@@ -73,26 +73,34 @@ impl Tet10Mesh {
     /// so the global tag is `tag_offset[i] + local tag`). `n_corner` of the result counts the corner nodes
     /// of all bodies, which are no longer stored first.
     pub fn concat(meshes: &[Tet10Mesh]) -> MergedMesh {
+        let mut base = 0u32;
+        let mut offsets = Vec::with_capacity(meshes.len());
+        for m in meshes {
+            offsets.push(base);
+            base += m.surface.iter().map(|s| s.tag + 1).max().unwrap_or(0);
+        }
+        Tet10Mesh::concat_with_tags(meshes, &offsets)
+    }
+
+    /// As [`concat`](Self::concat), with the tag offset of every body given (so that a tag can be made from
+    /// the number of faces of the bodies before it, whether or not every face has a boundary triangle).
+    pub fn concat_with_tags(meshes: &[Tet10Mesh], tag_offsets: &[u32]) -> MergedMesh {
         let mut out = MergedMesh::default();
-        let mut tag_base = 0u32;
         for (b, m) in meshes.iter().enumerate() {
             let shift = out.mesh.nodes.len() as u32;
+            let tag_base = tag_offsets[b];
             out.node_start.push(shift);
             out.tag_offset.push(tag_base);
             out.mesh.nodes.extend_from_slice(&m.nodes);
             out.mesh
                 .elems
                 .extend(m.elems.iter().map(|e| e.map(|n| n + shift)));
-            out.elem_body
-                .extend(std::iter::repeat_n(b as u16, m.elems.len()));
-            out.mesh
-                .surface
-                .extend(m.surface.iter().map(|s| SurfaceTri6 {
-                    v: s.v.map(|n| n + shift),
-                    tag: s.tag + tag_base,
-                }));
+            out.elem_body.extend(std::iter::repeat_n(b as u16, m.elems.len()));
+            out.mesh.surface.extend(m.surface.iter().map(|s| SurfaceTri6 {
+                v: s.v.map(|n| n + shift),
+                tag: s.tag + tag_base,
+            }));
             out.mesh.n_corner += m.n_corner;
-            tag_base += m.surface.iter().map(|s| s.tag + 1).max().unwrap_or(0);
         }
         out.node_start.push(out.mesh.nodes.len() as u32);
         out

@@ -450,7 +450,6 @@ pub fn solve_nonlinear(
             scatter(&mut k, &st.pattern, &st.colours, &mesh.elems, 3, &|ei| {
                 outs[ei].ke.clone()
             });
-            crate::tie::apply_penalty(&mut k, 3, &model.ties, model.tie_penalty);
             k
         });
         (fint, k, outs)
@@ -470,7 +469,15 @@ pub fn solve_nonlinear(
         let mut step_states = committed.clone();
         let mut step_vm: Vec<f64> = Vec::new();
         for it in 0..=nl.max_iter {
-            let (fint, k, outs) = assemble(&trial, &committed, true, &st);
+            let (mut fint, k, outs) = assemble(&trial, &committed, true, &st);
+            // bonded contact: the penalty is part of the tangent, so its force is part of the residual
+            let mut k = k;
+            if !model.ties.is_empty() {
+                let kk = k.as_mut().expect("tangent assembled");
+                let alphas = crate::tie::tie_alphas(kk, 3, &model.ties, model.tie_penalty);
+                crate::tie::apply_penalty_with(kk, 3, &model.ties, &alphas);
+                crate::tie::penalty_force(3, &model.ties, &alphas, &trial, &mut fint);
+            }
             for (ei, o) in outs.iter().enumerate() {
                 step_states[ei * rule_n..(ei + 1) * rule_n].copy_from_slice(&o.states);
             }

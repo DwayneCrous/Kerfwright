@@ -7,7 +7,7 @@
 
 use crate::bodies::Bodies;
 use crate::project::Project;
-use kw_brep::{BRep, BodyId, FaceId};
+use kw_brep::{BRep, BodyId, CopyOptions, FaceId};
 use kw_feature::FeatureId;
 use kw_math::Transform3;
 use kw_store::{BodyKey, SourceKind};
@@ -40,6 +40,14 @@ pub struct ModelSource {
 }
 
 const DEFAULT_COLOUR: [u8; 3] = [196, 200, 208];
+
+/// The chosen bodies copied into one B-rep, in the order of the source (the order that face tags follow).
+pub struct Combined {
+    pub brep: Arc<BRep>,
+    pub bodies: Vec<(BodyKey, BodyId)>,
+    /// Index into the source of every body.
+    pub source_index: Vec<usize>,
+}
 
 impl ModelSource {
     /// The model of `project` from the chosen source. `hidden` lists design bodies (by root feature) that
@@ -150,5 +158,35 @@ impl ModelSource {
     pub fn faces_of(&self, index: usize) -> Vec<FaceId> {
         let b = &self.bodies[index];
         b.brep.body_faces(b.body)
+    }
+
+    /// The bodies for which `include` holds, copied into one B-rep. A single body is used as it is.
+    pub fn combined(&self, include: &dyn Fn(&BodyKey) -> bool) -> Combined {
+        let chosen: Vec<usize> = (0..self.bodies.len())
+            .filter(|i| include(&self.bodies[*i].key))
+            .collect();
+        if let [only] = chosen[..] {
+            let b = &self.bodies[only];
+            // a body that shares its B-rep with others (an assembly pose) is copied out of it
+            if b.brep.bodies.len() == 1 {
+                return Combined {
+                    brep: b.brep.clone(),
+                    bodies: vec![(b.key.clone(), b.body)],
+                    source_index: vec![only],
+                };
+            }
+        }
+        let mut rep = BRep::new();
+        let mut bodies = Vec::new();
+        for &i in &chosen {
+            let b = &self.bodies[i];
+            let (id, _) = rep.copy_body_from(&b.brep, b.body, &CopyOptions::default());
+            bodies.push((b.key.clone(), id));
+        }
+        Combined {
+            brep: Arc::new(rep),
+            bodies,
+            source_index: chosen,
+        }
     }
 }
