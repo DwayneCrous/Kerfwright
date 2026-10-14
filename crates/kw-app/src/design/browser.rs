@@ -209,7 +209,9 @@ impl DesignWorkspace {
                             .as_ref()
                             .and_then(|b| b.list.iter().find(|x| x.root == info.root))
                             .is_some_and(|x| x.output.is_sheet());
-                        let label = if surface {
+                        let label = if info.mesh {
+                            format!("{} (mesh)", info.name)
+                        } else if surface {
                             format!("{} (surface)", info.name)
                         } else {
                             info.name.clone()
@@ -264,7 +266,19 @@ impl DesignWorkspace {
                                 self.hidden_bodies.clear();
                                 ui.close();
                             }
-                            if project.editing().is_none()
+                            if info.mesh
+                                && ui
+                                    .button("Convert to solid")
+                                    .on_hover_text(
+                                        "Make a faceted solid of planar faces from this closed mesh",
+                                    )
+                                    .clicked()
+                            {
+                                self.actions.push(Action::ConvertMesh(head));
+                                ui.close();
+                            }
+                            if !info.mesh
+                                && project.editing().is_none()
                                 && ui.button("New component from body").clicked()
                             {
                                 self.actions.push(Action::ComponentFromBody(head));

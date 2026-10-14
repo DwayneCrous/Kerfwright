@@ -56,6 +56,9 @@ impl<'a> Inputs<'a> {
                 "{id} is a surface, not a solid: stitch it closed or thicken it first"
             ))),
             Product::Solid(_) => Ok(o),
+            Product::Mesh(_) => Err(EvalError::Dependency(format!(
+                "{id} is a mesh, not a solid: convert it to a solid first"
+            ))),
             _ => Err(EvalError::Dependency(format!(
                 "{id} does not produce a solid"
             ))),
@@ -1344,7 +1347,20 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                     d
                 )));
             }
-            copy_with(id, b, &CopyOptions::default(), notes)
+            if !t.modelled {
+                return copy_with(id, b, &CopyOptions::default(), notes);
+            }
+            let tool = modelled_thread_tool(b, f, size, len, t.internal, t.right_hand)?;
+            from_gens(
+                id,
+                inp,
+                vec![ToolGen {
+                    tag: "thread-".into(),
+                    shape: ToolShape::Thread { tool },
+                }],
+                BodyOp::Cut,
+                notes,
+            )
         }
         FeatureSpec::Offset(o) => {
             let b = body_of(inp, "offset")?;
@@ -1450,6 +1466,8 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                     HoleKind::Tapped {
                         designation,
                         thread_length,
+                        modelled,
+                        right_hand,
                     } => {
                         let size = crate::threads::lookup(designation).ok_or_else(|| {
                             EvalError::Kernel(format!("unknown thread size \"{designation}\""))
@@ -1461,7 +1479,44 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                                     .into(),
                             ));
                         }
-                        gens.push(cyl(format!("p{k}-"), size.tap_drill, depth));
+                        if !*modelled {
+                            gens.push(cyl(format!("p{k}-"), size.tap_drill, depth));
+                        } else {
+                            // the cavity of the thread from the surface down to the thread length, then a plain
+                            // hole of the thread's minor diameter below it
+                            let (big, small) = internal_radii(size);
+                            let section =
+                                crate::thread_geom::ThreadSection::new(big, small, size.pitch)
+                                    .map_err(EvalError::Kernel)?;
+                            gens.push(ToolGen {
+                                tag: format!("p{k}-thread-"),
+                                shape: ToolShape::Thread {
+                                    tool: crate::thread_geom::ThreadTool {
+                                        frame: up(&frame, lead),
+                                        section,
+                                        length: tl + lead,
+                                        right_hand: *right_hand,
+                                        outer_radius: None,
+                                    },
+                                },
+                            });
+                            if tl < depth - 1e-9 || h.through_all {
+                                // starts inside the cavity, where its wall is in the void, and leaves through
+                                // the cavity's end
+                                let overlap = (0.5f64).min(0.5 * tl);
+                                gens.push(ToolGen {
+                                    tag: format!("p{k}-bore-"),
+                                    shape: ToolShape::Cylinder {
+                                        frame: Frame3 {
+                                            origin: frame.origin + frame.z * (tl - overlap),
+                                            ..frame
+                                        },
+                                        radius: small - 0.01,
+                                        height: depth - (tl - overlap),
+                                    },
+                                });
+                            }
+                        }
                     }
                     HoleKind::Countersink {
                         diameter,
@@ -1574,6 +1629,59 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             sess.names = names;
             sess.finish(None, notes)
         }
+        FeatureSpec::ImportMesh(im) => {
+            let mut mesh = im.data.mesh().map_err(EvalError::Kernel)?;
+            if mesh.tris.is_empty() {
+                return Err(EvalError::Kernel(format!(
+                    "{} holds no triangles",
+                    im.source
+                )));
+            }
+            crate::mesh_body::to_model(&mut mesh, im.units, im.y_up);
+            Ok(EvalOutput::mesh_body(mesh, notes))
+        }
+        FeatureSpec::MeshToSolid(ms) => {
+            let mesh = inp
+                .body_out()
+                .and_then(|b| b.mesh())
+                .ok_or_else(|| {
+                    EvalError::Dependency("convert to solid needs a mesh body before it".into())
+                })?
+                .clone();
+            let mut sess = Session::new(id, None);
+            let (bodies, _) =
+                crate::mesh_solid::mesh_to_bodies(&mut sess.rep, &mesh, ms.merge_coplanar)
+                    .map_err(EvalError::Kernel)?;
+            let Some((&first, rest)) = bodies.split_first() else {
+                return Err(EvalError::Kernel("the mesh made no solid".into()));
+            };
+            let mut body = first;
+            for b in rest {
+                let r = boolean(&mut sess.rep, body, *b, Op::Union, &BoolOptions::default())
+                    .map_err(|e| kernel("joining the pieces of the mesh", e))?;
+                body = r.body;
+            }
+            sess.body = Some(body);
+            sess.names = sess
+                .rep
+                .body_faces(body)
+                .into_iter()
+                .enumerate()
+                .map(|(k, f)| {
+                    (
+                        EntityRef::Face(f),
+                        TopoName {
+                            feature: id,
+                            origin: NameOrigin::Primitive {
+                                role: format!("region-{k}"),
+                            },
+                            ordinal: 0,
+                        },
+                    )
+                })
+                .collect();
+            sess.finish(None, notes)
+        }
         FeatureSpec::Import(im) => {
             let mut sess = Session::new(id, None);
             let bodies: Vec<BodyId> = match im.format {
@@ -1622,7 +1730,6 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             sess.finish(None, notes)
         }
         FeatureSpec::MoveBody(m) => {
-            let b = body_of(inp, "move")?;
             let delta = vec3(&m.delta)?;
             let ang = angle(&m.angle)?;
             let axis = match m.axis {
@@ -1631,6 +1738,15 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 _ => Vector3::z(),
             };
             let t = Transform3::rotation(axis, ang).then(&Transform3::translation(delta));
+            if let Some(mesh) = inp.body_out().and_then(|b| b.mesh()) {
+                let mut moved = (**mesh).clone();
+                for p in &mut moved.nodes {
+                    let q = t.apply_point(&Point3::new(p[0], p[1], p[2]));
+                    *p = [q.x, q.y, q.z];
+                }
+                return Ok(EvalOutput::mesh_body(moved, notes));
+            }
+            let b = body_of(inp, "move")?;
             copy_with(
                 id,
                 b,
@@ -1642,7 +1758,6 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
             )
         }
         FeatureSpec::ScaleBody(m) => {
-            let b = body_of(inp, "scale")?;
             let k = number(&m.factor)?;
             if !(k > 1e-6 && k.is_finite()) {
                 return Err(EvalError::Kernel(
@@ -1650,6 +1765,18 @@ pub fn execute(id: FeatureId, spec: &FeatureSpec, inp: &Inputs) -> Result<EvalOu
                 ));
             }
             let c = Point3::from(vec3(&m.centre)?);
+            if let Some(mesh) = inp.body_out().and_then(|b| b.mesh()) {
+                let mut scaled = (**mesh).clone();
+                for p in &mut scaled.nodes {
+                    *p = [
+                        c.x + k * (p[0] - c.x),
+                        c.y + k * (p[1] - c.y),
+                        c.z + k * (p[2] - c.z),
+                    ];
+                }
+                return Ok(EvalOutput::mesh_body(scaled, notes));
+            }
+            let b = body_of(inp, "scale")?;
             copy_with(
                 id,
                 b,
@@ -1803,6 +1930,11 @@ fn any_body_of<'a>(
     let b = inp
         .body_out()
         .ok_or_else(|| EvalError::Dependency(format!("{what} needs a body before it")))?;
+    if b.mesh().is_some() {
+        return Err(EvalError::Dependency(format!(
+            "{what} needs a surface or solid, but the body before it is a mesh: convert it to a solid first"
+        )));
+    }
     if b.brep().is_none() {
         return Err(EvalError::Dependency(format!(
             "{what}: the input has no body"
@@ -1820,6 +1952,11 @@ fn body_of<'a>(inp: &Inputs<'a>, what: &str) -> Result<&'a Arc<EvalOutput>, Eval
     let b = inp
         .body_out()
         .ok_or_else(|| EvalError::Dependency(format!("{what} needs a body before it")))?;
+    if b.mesh().is_some() {
+        return Err(EvalError::Dependency(format!(
+            "{what} needs a solid, but the body before it is a mesh: convert it to a solid first"
+        )));
+    }
     if b.brep().is_none() {
         return Err(EvalError::Dependency(format!(
             "{what}: the input is not a solid"
@@ -1863,6 +2000,108 @@ fn copy_with(
 }
 
 /// Build every tool, apply them in turn, and remember them if they were added to a body.
+/// Large and small radius of the cavity of an internal thread: the groove root at the major diameter and the
+/// tooth tips just inside the thread's minor diameter, so that the tips never touch the drilled wall.
+fn internal_radii(size: &crate::threads::ThreadSize) -> (f64, f64) {
+    (size.major / 2.0, size.minor_internal() / 2.0 - 0.02)
+}
+
+/// The tool that cuts a modelled thread into the cylindrical face `f` of `b`: where it starts (at the free
+/// end of the face, else half a pitch inside it), which way it goes, and its section.
+fn modelled_thread_tool(
+    b: &Arc<EvalOutput>,
+    f: FaceId,
+    size: &crate::threads::ThreadSize,
+    len: f64,
+    internal: bool,
+    right_hand: bool,
+) -> Result<crate::thread_geom::ThreadTool, EvalError> {
+    use kw_brep::PointClass;
+    let rep = b.brep().unwrap();
+    let body = b.body().unwrap();
+    let SurfaceGeom::Cylinder(cyl) = &rep.surfaces[rep.faces[f].surface] else {
+        return Err(EvalError::Kernel(
+            "a thread goes on a cylindrical face".into(),
+        ));
+    };
+    let axis = cyl.frame.z.normalize();
+    let origin = cyl.frame.origin;
+    // the extent of the face along its axis, from the ends of its edges
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for lp in &rep.faces[f].loops {
+        for co in rep.loop_coedges(*lp) {
+            let e = &rep.edges[rep.coedges[co].edge];
+            for v in [e.start, e.end] {
+                let a = (rep.vertices[v].point - origin).dot(&axis);
+                lo = lo.min(a);
+                hi = hi.max(a);
+            }
+        }
+    }
+    let face_len = hi - lo;
+    if !(face_len.is_finite() && face_len > 0.0) {
+        return Err(EvalError::Kernel(
+            "the cylindrical face has no length".into(),
+        ));
+    }
+    // an end is free when the axis leaves the body there: the pin ends or the hole opens
+    let probe = 0.05 * face_len + 0.1;
+    let free_at = |a: f64| {
+        matches!(
+            kw_brep::classify_point(rep, body, &(origin + axis * a), 1e-6),
+            Ok(PointClass::Out)
+        )
+    };
+    let (free_lo, free_hi) = (free_at(lo - probe), free_at(hi + probe));
+    let from_hi = free_hi && !free_lo;
+    let free_start = if from_hi { free_hi } else { free_lo };
+    let lead = if free_start { 1.0 } else { 0.0 };
+    // at a closed end the thread starts half a pitch in, so that its end cap lies inside the face
+    let inset = if free_start { 0.0 } else { 0.5 * size.pitch };
+    if len + inset > face_len + 1e-6 {
+        return Err(EvalError::Kernel(format!(
+            "the thread ({:.2} mm{}) is longer than the face ({:.2} mm)",
+            len,
+            if inset > 0.0 { " and a run-in" } else { "" },
+            face_len
+        )));
+    }
+    let dir = if from_hi { -axis } else { axis };
+    let start_a = if from_hi { hi } else { lo };
+    let start = origin + axis * start_a + dir * (inset - lead);
+    let frame = crate::thread_geom::axis_frame(start, dir, cyl.frame.x);
+    let (section, outer_radius) = if internal {
+        let (big, small) = internal_radii(size);
+        // the tooth tips must not touch the existing wall
+        let small = if (small - cyl.radius).abs() < 0.01 {
+            cyl.radius - 0.02
+        } else {
+            small
+        };
+        (
+            crate::thread_geom::ThreadSection::new(big, small, size.pitch),
+            None,
+        )
+    } else {
+        // the crest of the groove sits just outside the pin: the pin's own surface stays as the crest
+        (
+            crate::thread_geom::ThreadSection::new(
+                cyl.radius + 0.02,
+                size.minor_external() / 2.0,
+                size.pitch,
+            ),
+            Some(cyl.radius + 1.0),
+        )
+    };
+    Ok(crate::thread_geom::ThreadTool {
+        frame,
+        section: section.map_err(EvalError::Kernel)?,
+        length: len + lead,
+        right_hand,
+        outer_radius,
+    })
+}
+
 fn from_gens(
     id: FeatureId,
     inp: &Inputs,

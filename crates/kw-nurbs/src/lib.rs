@@ -31,4 +31,4 @@ pub use geom::{
 };
 pub use knots::{KnotError, KnotVector};
 pub use shape::normal_curvature;
-pub use surface::{ExtendDir, NurbsSurface, SurfaceProjection};
+pub use surface::{ExtendDir, NurbsSurface, SurfaceGrid, SurfaceProjection};

@@ -21,6 +21,29 @@ pub struct BodyInfo {
     pub name: String,
     pub colour: [u8; 3],
     pub material: Option<String>,
+    /// A triangle mesh (an imported STL that was not converted), not a B-rep.
+    pub mesh: bool,
+}
+
+/// Is the body ending at `head` a triangle mesh? It is when the chain of features that built it starts at
+/// an `ImportMesh` and no `MeshToSolid` came after.
+pub fn is_mesh_body(doc: &Document, head: FeatureId) -> bool {
+    use kw_feature::FeatureSpec;
+    let mut cur = head;
+    for _ in 0..=doc.features.len() {
+        let Some(i) = doc.index_of(cur) else {
+            return false;
+        };
+        match &doc.features[i].spec {
+            FeatureSpec::ImportMesh(_) => return true,
+            FeatureSpec::MoveBody(_) | FeatureSpec::ScaleBody(_) => match doc.body_input(i) {
+                Some(prev) if prev != cur => cur = prev,
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The bodies of `doc` (all of them, hidden or not), in the order they were started.
@@ -42,11 +65,64 @@ pub fn summaries(doc: &Document) -> Vec<BodyInfo> {
                     .unwrap_or_else(|| format!("Body{rank}")),
                 colour: ap.and_then(|a| a.colour).unwrap_or(DEFAULT_COLOUR),
                 material: ap.and_then(|a| a.material.clone()),
+                mesh: is_mesh_body(doc, head),
             }
         })
         .collect();
     out.sort_by_key(|b| doc.index_of(b.root));
     out
+}
+
+/// A body that is a triangle mesh.
+pub struct MeshBody {
+    pub head: FeatureId,
+    pub root: FeatureId,
+    pub name: String,
+    pub colour: [u8; 3],
+    pub material: Option<String>,
+    pub mesh: Arc<kw_mesh3d::SurfaceMesh>,
+    pub geom_hash: u128,
+}
+
+/// The mesh bodies of `doc` that evaluated, except those whose root is in `hidden`.
+pub fn mesh_bodies(doc: &Document, ev: &Evaluation, hidden: &HashSet<FeatureId>) -> Vec<MeshBody> {
+    let heads = doc.heads();
+    let mut roots: Vec<FeatureId> = heads.iter().map(|h| doc.body_root(*h)).collect();
+    roots.sort_by_key(|r| doc.index_of(*r));
+    let mut out = Vec::new();
+    for head in heads {
+        let Some(o) = ev.output(head) else { continue };
+        let Some(mesh) = o.mesh() else { continue };
+        let root = doc.body_root(head);
+        if hidden.contains(&root) {
+            continue;
+        }
+        let ap = doc.appearance_of(root);
+        let rank = roots.iter().position(|r| *r == root).unwrap_or(0) + 1;
+        out.push(MeshBody {
+            head,
+            root,
+            name: ap
+                .and_then(|a| a.name.clone())
+                .unwrap_or_else(|| format!("Body{rank}")),
+            colour: ap.and_then(|a| a.colour).unwrap_or(DEFAULT_COLOUR),
+            material: ap.and_then(|a| a.material.clone()),
+            mesh: mesh.clone(),
+            geom_hash: o.geom_hash,
+        });
+    }
+    out
+}
+
+/// A key that changes when any mesh body's geometry, name or colour does.
+pub fn mesh_key(meshes: &[MeshBody]) -> u128 {
+    let mut h = kw_feature::Hasher128::new();
+    for m in meshes {
+        h.u128(m.geom_hash)
+            .bytes(&m.colour)
+            .bytes(m.name.as_bytes());
+    }
+    h.finish()
 }
 
 pub struct Body {

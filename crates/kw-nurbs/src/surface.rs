@@ -31,7 +31,85 @@ pub struct NurbsSurface {
     weights: Vec<f64>,
 }
 
+/// Points of a surface on a regular grid of its parameters, for finding the nearest point of the surface
+/// to a given point by Newton's method from the nearest sample (see [`NurbsSurface::project_in_grid`]).
+#[derive(Debug, Clone)]
+pub struct SurfaceGrid {
+    u0: f64,
+    u1: f64,
+    v0: f64,
+    v1: f64,
+    n: usize,
+    pts: Vec<Point3<f64>>,
+    /// The largest distance between neighbouring samples.
+    pub spacing: f64,
+}
+
+impl SurfaceGrid {
+    /// The sample nearest to `p`: its distance and parameters.
+    pub fn nearest(&self, p: &Point3<f64>) -> (f64, f64, f64) {
+        let (mut best, mut at) = (f64::INFINITY, 0usize);
+        for (k, q) in self.pts.iter().enumerate() {
+            let d = (q - p).norm_squared();
+            if d < best {
+                best = d;
+                at = k;
+            }
+        }
+        let (i, j) = (at / (self.n + 1), at % (self.n + 1));
+        (
+            best.sqrt(),
+            self.u0 + (self.u1 - self.u0) * i as f64 / self.n as f64,
+            self.v0 + (self.v1 - self.v0) * j as f64 / self.n as f64,
+        )
+    }
+}
+
 impl NurbsSurface {
+    /// Samples on an `n × n` grid of cells over the parameter box `u`, `v` (clamped to the domain).
+    pub fn sample_grid(&self, u: (f64, f64), v: (f64, f64), n: usize) -> SurfaceGrid {
+        let ((da, db), (dc, dd)) = self.domain();
+        let (u0, u1) = (u.0.max(da), u.1.min(db));
+        let (v0, v1) = (v.0.max(dc), v.1.min(dd));
+        let mut pts = Vec::with_capacity((n + 1) * (n + 1));
+        for i in 0..=n {
+            let uu = u0 + (u1 - u0) * i as f64 / n as f64;
+            for j in 0..=n {
+                let vv = v0 + (v1 - v0) * j as f64 / n as f64;
+                pts.push(self.point_at(uu, vv));
+            }
+        }
+        let mut spacing = 0.0f64;
+        for i in 0..=n {
+            for j in 0..=n {
+                let p = pts[i * (n + 1) + j];
+                if i < n {
+                    spacing = spacing.max((pts[(i + 1) * (n + 1) + j] - p).norm());
+                }
+                if j < n {
+                    spacing = spacing.max((pts[i * (n + 1) + j + 1] - p).norm());
+                }
+            }
+        }
+        SurfaceGrid {
+            u0,
+            u1,
+            v0,
+            v1,
+            n,
+            pts,
+            spacing,
+        }
+    }
+
+    /// The point of the surface nearest to `target`, searched from the nearest sample of `grid` only (the
+    /// answer is the local minimum there, which is the global one for a point near the surface and a
+    /// surface that does not fold back on itself within a few sample spacings).
+    pub fn project_in_grid(&self, grid: &SurfaceGrid, target: &Point3<f64>) -> SurfaceProjection {
+        let (_, u, v) = grid.nearest(target);
+        self.closest_point_seeded(target, u, v)
+    }
+
     pub fn new(
         knots_u: KnotVector,
         knots_v: KnotVector,
@@ -595,6 +673,121 @@ impl NurbsSurface {
         NurbsCurve::from_homogeneous(self.knots_v.clone(), &hom).expect("valid isocurve")
     }
 
+    /// Damped 2-D Newton on `(S−P)·S_u = (S−P)·S_v = 0` from the parameters `(u0, v0)`.
+    fn newton_closest(&self, target: &Point3<f64>, u0: f64, v0: f64) -> (SurfaceProjection, bool) {
+        let ((ua, ub), (va, vb)) = self.domain();
+        let (mut u, mut v) = (u0.clamp(ua, ub), v0.clamp(va, vb));
+        for _ in 0..60 {
+            let d = self.derivatives(u, v, 2);
+            let r = d[0][0] - target.coords;
+            let (su, sv) = (d[1][0], d[0][1]);
+            let f = [r.dot(&su), r.dot(&sv)];
+            let j00 = su.dot(&su) + r.dot(&d[2][0]);
+            let j01 = su.dot(&sv) + r.dot(&d[1][1]);
+            let j11 = sv.dot(&sv) + r.dot(&d[0][2]);
+            let det = j00 * j11 - j01 * j01;
+            let (du, dv) = if det.abs() > 1e-300 {
+                (
+                    -(j11 * f[0] - j01 * f[1]) / det,
+                    -(-j01 * f[0] + j00 * f[1]) / det,
+                )
+            } else {
+                (-f[0] / j00.max(1e-300), -f[1] / j11.max(1e-300))
+            };
+            if !du.is_finite() || !dv.is_finite() {
+                break;
+            }
+            // a step that leaves the domain in one direction is redone in the other alone (the minimum of
+            // the distance on the boundary line)
+            let out_u = u + du < ua || u + du > ub;
+            let out_v = v + dv < va || v + dv > vb;
+            let (du, dv) = match (out_u, out_v) {
+                (true, false) => (0.0, -f[1] / j11.abs().max(1e-300) * j11.signum()),
+                (false, true) => (-f[0] / j00.abs().max(1e-300) * j00.signum(), 0.0),
+                _ => (du, dv),
+            };
+            let un = (u + du).clamp(ua, ub);
+            let vn = (v + dv).clamp(va, vb);
+            let moved = (un - u).abs() + (vn - v).abs();
+            u = un;
+            v = vn;
+            if moved < 1e-15 {
+                break;
+            }
+        }
+        // converged when the offset to the target is (nearly) perpendicular to the surface at (u, v) or
+        // the parameters sit on the boundary of the domain with the offset pointing outwards
+        let d = self.derivatives(u, v, 1);
+        let r = d[0][0] - target.coords;
+        let (su, sv) = (d[1][0], d[0][1]);
+        let rn = r.norm();
+        let small = |g: f64, s: &Vector3<f64>| g.abs() <= 1e-7 * rn * s.norm().max(1e-300);
+        let at_edge_u = u <= ua + 1e-12 || u >= ub - 1e-12;
+        let at_edge_v = v <= va + 1e-12 || v >= vb - 1e-12;
+        let converged = rn < 1e-7
+            || ((small(r.dot(&su), &su) || at_edge_u) && (small(r.dot(&sv), &sv) || at_edge_v));
+        let point = self.point_at(u, v);
+        (
+            SurfaceProjection {
+                u,
+                v,
+                point,
+                distance: (point - target).norm(),
+            },
+            converged,
+        )
+    }
+
+    /// The nearest point found by Newton from `(u0, v0)` without ever searching the whole surface: the
+    /// local minimum near the seed (or the seed's own point if that is nearer). For seeds known to be close
+    /// to the answer, e.g. the nearest sample of a grid.
+    pub fn closest_point_seeded(
+        &self,
+        target: &Point3<f64>,
+        u0: f64,
+        v0: f64,
+    ) -> SurfaceProjection {
+        let ((ua, ub), (va, vb)) = self.domain();
+        let (u0, v0) = (u0.clamp(ua, ub), v0.clamp(va, vb));
+        let (local, _) = self.newton_closest(target, u0, v0);
+        let seed = self.point_at(u0, v0);
+        let d0 = (seed - target).norm();
+        if local.distance <= d0 {
+            local
+        } else {
+            SurfaceProjection {
+                u: u0,
+                v: v0,
+                point: seed,
+                distance: d0,
+            }
+        }
+    }
+
+    /// The nearest point found by Newton from the parameters `(u0, v0)`: a local answer, never farther than
+    /// the surface point at the seed, and much cheaper than [`closest_point`](Self::closest_point) when the
+    /// seed is close (an upper bound on the distance to the surface).
+    pub fn closest_point_near(&self, target: &Point3<f64>, u0: f64, v0: f64) -> SurfaceProjection {
+        let ((ua, ub), (va, vb)) = self.domain();
+        let (u0, v0) = (u0.clamp(ua, ub), v0.clamp(va, vb));
+        let (local, converged) = self.newton_closest(target, u0, v0);
+        let seed = self.point_at(u0, v0);
+        let d0 = (seed - target).norm();
+        if converged && local.distance <= d0 {
+            local
+        } else if !converged {
+            // the seed was no good: search the whole surface
+            self.closest_point(target)
+        } else {
+            SurfaceProjection {
+                u: u0,
+                v: v0,
+                point: seed,
+                distance: d0,
+            }
+        }
+    }
+
     /// Closest point on the surface to `target`: grid sampling for seeds,
     /// then damped 2-D Newton on `(S−P)·S_u = (S−P)·S_v = 0`.
     pub fn closest_point(&self, target: &Point3<f64>) -> SurfaceProjection {
@@ -644,45 +837,9 @@ impl NurbsSurface {
             distance: f64::INFINITY,
         };
         for (u0, v0, _) in seeds {
-            let (mut u, mut v) = (u0, v0);
-            for _ in 0..60 {
-                let d = self.derivatives(u, v, 2);
-                let r = d[0][0] - target.coords;
-                let (su, sv) = (d[1][0], d[0][1]);
-                let f = [r.dot(&su), r.dot(&sv)];
-                let j00 = su.dot(&su) + r.dot(&d[2][0]);
-                let j01 = su.dot(&sv) + r.dot(&d[1][1]);
-                let j11 = sv.dot(&sv) + r.dot(&d[0][2]);
-                let det = j00 * j11 - j01 * j01;
-                let (du, dv) = if det.abs() > 1e-300 {
-                    (
-                        -(j11 * f[0] - j01 * f[1]) / det,
-                        -(-j01 * f[0] + j00 * f[1]) / det,
-                    )
-                } else {
-                    (-f[0] / j00.max(1e-300), -f[1] / j11.max(1e-300))
-                };
-                if !du.is_finite() || !dv.is_finite() {
-                    break;
-                }
-                let un = (u + du).clamp(ua, ub);
-                let vn = (v + dv).clamp(va, vb);
-                let moved = (un - u).abs() + (vn - v).abs();
-                u = un;
-                v = vn;
-                if moved < 1e-15 {
-                    break;
-                }
-            }
-            let pt = self.point_at(u, v);
-            let dist = (pt - target).norm();
-            if dist < best.distance {
-                best = SurfaceProjection {
-                    u,
-                    v,
-                    point: pt,
-                    distance: dist,
-                };
+            let (cand, _) = self.newton_closest(target, u0, v0);
+            if cand.distance < best.distance {
+                best = cand;
             }
         }
         best
@@ -753,6 +910,47 @@ mod tests {
             assert!((c.point_at(t) - s.point_at(t, 0.37)).norm() < 1e-12);
             assert!((c2.point_at(t) - s.point_at(0.61, t)).norm() < 1e-12);
         }
+    }
+
+    #[test]
+    fn a_seeded_search_finds_the_same_point_as_the_whole_surface() {
+        let s = patch();
+        let grid = s.sample_grid((0.0, 1.0), (0.0, 1.0), 24);
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..200 {
+            // a point a little off the surface
+            let p = s.point_at(rnd(), rnd());
+            let q = Point3::new(
+                p.x + 0.2 * (rnd() - 0.5),
+                p.y + 0.2 * (rnd() - 0.5),
+                p.z + 0.2 * (rnd() - 0.5),
+            );
+            let global = s.closest_point(&q);
+            let local = s.project_in_grid(&grid, &q);
+            assert!(
+                local.distance <= global.distance + 1e-9,
+                "{} vs {}",
+                local.distance,
+                global.distance
+            );
+            // never worse than the nearest sample
+            let (d, u, v) = grid.nearest(&q);
+            assert!(local.distance <= d + 1e-12 && (s.point_at(u, v) - q).norm() <= d + 1e-12);
+            // and with a good seed the nearby search agrees
+            let near = s.closest_point_near(&q, global.u + 0.01, global.v - 0.01);
+            assert!((near.distance - global.distance).abs() < 1e-9);
+        }
+        // a far seed gives a point of the surface no nearer than the true nearest one
+        let q = Point3::new(1.3, 1.7, 2.0);
+        let far = s.closest_point_near(&q, 0.0, 0.0);
+        assert!(far.distance >= s.closest_point(&q).distance - 1e-9);
+        assert!(grid.spacing > 0.0);
     }
 
     #[test]

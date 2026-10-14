@@ -88,6 +88,62 @@ pub fn body_props(brep: &BRep, body: BodyId) -> Option<BodyProps> {
     })
 }
 
+/// The properties of a triangle mesh body. A closed mesh is a solid (volume, centre of mass and inertia
+/// from the triangles); an open one only has an area (`surface` is set and the volume is 0).
+pub fn mesh_props(mesh: &kw_mesh3d::SurfaceMesh) -> BodyProps {
+    let (lo, hi) = mesh.bounds();
+    let closed = mesh.stats().watertight;
+    let mut p = BodyProps {
+        surface: !closed,
+        volume: 0.0,
+        area: mesh.area(),
+        centroid: [
+            (lo[0] + hi[0]) / 2.0,
+            (lo[1] + hi[1]) / 2.0,
+            (lo[2] + hi[2]) / 2.0,
+        ],
+        bbox_min: lo,
+        bbox_max: hi,
+        inertia: [[0.0; 3]; 3],
+    };
+    if !closed {
+        return p;
+    }
+    // tetrahedra from the origin to each triangle; the origin is moved to the middle of the box first so
+    // that a part far from the origin does not lose its precision
+    let o = p.centroid;
+    let v = |i: u32| {
+        let n = mesh.nodes[i as usize];
+        nalgebra::Vector3::new(n[0] - o[0], n[1] - o[1], n[2] - o[2])
+    };
+    let mut vol = 0.0;
+    let mut first = nalgebra::Vector3::zeros();
+    let mut second = nalgebra::Matrix3::zeros();
+    for t in &mesh.tris {
+        let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+        let dv = a.dot(&b.cross(&c)) / 6.0;
+        let s = a + b + c;
+        vol += dv;
+        first += dv * s / 4.0;
+        second += dv / 20.0
+            * (a * a.transpose() + b * b.transpose() + c * c.transpose() + s * s.transpose());
+    }
+    if vol.abs() < 1e-300 {
+        return p;
+    }
+    let g = first / vol;
+    let cc = second - vol * g * g.transpose();
+    let inertia = nalgebra::Matrix3::identity() * cc.trace() - cc;
+    p.volume = vol;
+    p.centroid = [o[0] + g.x, o[1] + g.y, o[2] + g.z];
+    for r in 0..3 {
+        for c in 0..3 {
+            p.inertia[r][c] = inertia[(r, c)];
+        }
+    }
+    p
+}
+
 /// What an edge is, with its length.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EdgeKind {
@@ -355,12 +411,104 @@ impl DesignWorkspace {
         let picks = self.model.picks.clone();
         let bodies = self.bodies.clone();
         let target = self.target_index();
+        // a mesh body is measured from its triangles when it is the active one (or the only kind there is)
+        let mesh_sel = self
+            .mesh_bodies
+            .iter()
+            .find(|m| self.active_body == Some(m.root))
+            .or_else(|| self.mesh_bodies.first().filter(|_| bodies.is_none()))
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.material.clone(),
+                    mesh_props(&m.mesh),
+                    m.mesh.stats(),
+                )
+            });
         egui::Window::new(egui::RichText::new("MEASURE").size(11.5).strong())
             .open(&mut open)
             .default_pos(egui::pos2(330.0, 190.0))
             .collapsible(false)
             .default_width(330.0)
             .show(ctx, |ui| {
+                if let Some((name, material, p, st)) = &mesh_sel {
+                    ui.label(egui::RichText::new(format!("Mesh body: {name}")).strong());
+                    ui.label(
+                        egui::RichText::new(if st.watertight {
+                            "a closed mesh: volume and mass come from its triangles".to_string()
+                        } else {
+                            format!(
+                                "an open mesh ({} open edges): it has an area but no volume",
+                                st.open_edges
+                            )
+                        })
+                        .size(10.5)
+                        .color(TEXT_WEAK),
+                    );
+                    if let Some(i) = material
+                        .as_deref()
+                        .and_then(|n| materials().iter().position(|m| m.name == n))
+                    {
+                        self.material = i;
+                    }
+                    if !p.surface {
+                        egui::ComboBox::from_id_salt("material")
+                            .selected_text(
+                                materials()[self.material.min(materials().len() - 1)]
+                                    .name
+                                    .clone(),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (i, m) in materials().iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.material,
+                                        i,
+                                        format!("{} ({} kg/m³)", m.name, m.density),
+                                    );
+                                }
+                            });
+                    }
+                    let density = materials()[self.material.min(materials().len() - 1)].density;
+                    let size = p.size();
+                    egui::Grid::new("mesh_props")
+                        .num_columns(2)
+                        .spacing([14.0, 3.0])
+                        .show(ui, |ui| {
+                            let mut row = |k: &str, v: String| {
+                                ui.label(egui::RichText::new(k).color(TEXT_WEAK));
+                                ui.label(v);
+                                ui.end_row();
+                            };
+                            row("Triangles", st.triangles.to_string());
+                            row("Vertices", st.vertices.to_string());
+                            if !p.surface {
+                                row("Volume", format!("{:.3} mm³", p.volume));
+                            }
+                            row("Surface area", format!("{:.3} mm²", p.area));
+                            if !p.surface {
+                                row("Mass", format!("{:.4} g", p.mass_g(density)));
+                                row(
+                                    "Centre of mass",
+                                    format!(
+                                        "({:.3}, {:.3}, {:.3}) mm",
+                                        p.centroid[0], p.centroid[1], p.centroid[2]
+                                    ),
+                                );
+                            }
+                            row(
+                                "Bounding box",
+                                format!("{:.3} × {:.3} × {:.3} mm", size[0], size[1], size[2]),
+                            );
+                            if !p.surface {
+                                let i = p.inertia_g_mm2(density);
+                                row(
+                                    "Inertia Ixx, Iyy, Izz",
+                                    format!("{:.2}, {:.2}, {:.2} g·mm²", i[0][0], i[1][1], i[2][2]),
+                                );
+                            }
+                        });
+                    return;
+                }
                 let Some(bodies) = bodies else {
                     ui.label("There is no solid to measure yet.");
                     return;

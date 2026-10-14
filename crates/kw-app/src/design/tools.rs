@@ -249,6 +249,9 @@ pub enum Tool {
         /// For a tapped hole (`kind == 3`): the thread size and the length of the thread.
         thread: String,
         thread_length: String,
+        /// Cut the thread into the model (else it is only recorded), and its hand.
+        thread_modelled: bool,
+        thread_left: bool,
     },
     Fillet {
         radius: String,
@@ -358,11 +361,13 @@ pub enum Tool {
         axis: u8,
         position: String,
     },
-    /// A cosmetic thread on a picked cylindrical face.
+    /// A thread on a picked cylindrical face: cosmetic, or cut into the model.
     Thread {
         designation: String,
         length: String,
         internal: bool,
+        modelled: bool,
+        left_hand: bool,
     },
     /// A sheet-metal strip: thickness, K-factor, bend radius, width and the flats and bends along it.
     SheetMetal {
@@ -579,6 +584,42 @@ fn point_input_ui(ui: &mut egui::Ui, id: &str, label: &str, doc: &Document, p: &
 }
 
 /// A drop-down of the standard thread sizes, grouped by series.
+/// The choice between a cosmetic and a modelled thread, with the hand and a note on what that costs.
+fn thread_model_ui(
+    ui: &mut egui::Ui,
+    modelled: &mut bool,
+    left: &mut bool,
+    length: &str,
+    _depth: &str,
+) {
+    row(ui, "Thread", |ui| {
+        ui.selectable_value(modelled, false, "Cosmetic");
+        ui.selectable_value(modelled, true, "Modelled");
+    });
+    if *modelled {
+        row(ui, "Hand", |ui| {
+            ui.selectable_value(left, false, "Right");
+            ui.selectable_value(left, true, "Left");
+        });
+        ui.label(
+            egui::RichText::new(
+                "The helical groove is cut into the body (a few seconds per ten turns); the body is slower to measure, mesh and draw than a cosmetic thread. A thread that starts at a closed end begins half a pitch in.",
+            )
+            .color(TEXT_WEAK)
+            .size(10.5),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(
+                "Cosmetic: the model is not changed; the thread is listed in Measure and the feature list.",
+            )
+            .color(TEXT_WEAK)
+            .size(10.5),
+        );
+    }
+    let _ = length;
+}
+
 fn thread_size_ui(ui: &mut egui::Ui, id: &str, designation: &mut String) {
     use kw_feature::threads::{self, ThreadFamily};
     row(ui, "Size", |ui| {
@@ -1138,12 +1179,19 @@ impl Tool {
                         "90 deg".into(),
                     ),
                 };
-                let (thread, thread_length) = match &x.kind {
+                let (thread, thread_length, thread_modelled, thread_left) = match &x.kind {
                     HoleKind::Tapped {
                         designation,
                         thread_length,
-                    } => (designation.clone(), param_text(thread_length)),
-                    _ => ("M6".into(), "8 mm".into()),
+                        modelled,
+                        right_hand,
+                    } => (
+                        designation.clone(),
+                        param_text(thread_length),
+                        *modelled,
+                        !*right_hand,
+                    ),
+                    _ => ("M6".into(), "8 mm".into(), false, false),
                 };
                 let (px, py) = x
                     .points
@@ -1163,6 +1211,8 @@ impl Tool {
                     through_all: x.through_all,
                     thread,
                     thread_length,
+                    thread_modelled,
+                    thread_left,
                 }
             }
             FeatureSpec::SheetMetal(x) => Tool::SheetMetal {
@@ -1201,6 +1251,8 @@ impl Tool {
                 designation: x.designation.clone(),
                 length: param_text(&x.length),
                 internal: x.internal,
+                modelled: x.modelled,
+                left_hand: !x.right_hand,
             },
             _ => return None,
         })
@@ -1220,6 +1272,8 @@ impl Tool {
             through_all: false,
             thread: "M6".into(),
             thread_length: "8 mm".into(),
+            thread_modelled: false,
+            thread_left: false,
         }
     }
 
@@ -1465,6 +1519,8 @@ impl Tool {
                 through_all,
                 thread,
                 thread_length,
+                thread_modelled,
+                thread_left,
             } => {
                 let plane = match (orig, &ctx.hole_plane) {
                     (_, Some(p)) => p.clone(),
@@ -1491,6 +1547,8 @@ impl Tool {
                     3 => HoleKind::Tapped {
                         designation: thread.clone(),
                         thread_length: len(thread_length)?,
+                        modelled: *thread_modelled,
+                        right_hand: !*thread_left,
                     },
                     _ => HoleKind::Simple { diameter: d },
                 };
@@ -1831,6 +1889,8 @@ impl Tool {
                 designation,
                 length,
                 internal,
+                modelled,
+                left_hand,
             } => FeatureSpec::Thread(kw_feature::ThreadSpec {
                 face: match orig {
                     Some(FeatureSpec::Thread(o)) if ctx.picks.is_empty() => o.face.clone(),
@@ -1843,6 +1903,8 @@ impl Tool {
                 length: len(length)?,
                 internal: *internal,
                 base: None,
+                modelled: *modelled,
+                right_hand: !*left_hand,
             }),
             Tool::MoveBody {
                 copy,
@@ -2266,6 +2328,8 @@ impl Tool {
                 through_all,
                 thread,
                 thread_length,
+                thread_modelled,
+                thread_left,
             } => {
                 row(ui, "Placement", |ui| {
                     ui.label(if picks.iter().any(|p| matches!(p, Pick::Face(_))) {
@@ -2295,6 +2359,7 @@ impl Tool {
                         );
                     }
                     text_field(ui, "Thread length", thread_length);
+                    thread_model_ui(ui, thread_modelled, thread_left, thread_length, depth);
                 } else {
                     text_field(ui, "Diameter", diameter);
                 }
@@ -2894,7 +2959,7 @@ impl Tool {
                     }
                 });
                 ui.label(
-                    egui::RichText::new("Move the highlighted cage vertex with the numbers; the result is the smooth surface the cage describes (the body updates as you edit).")
+                    egui::RichText::new("Drag the green cage in the view (see EDIT CAGE) or type the numbers of the highlighted vertex. The blue surface is a quick preview of what the cage describes; the body is fitted when you press OK.")
                         .color(TEXT_WEAK)
                         .size(10.5),
                 );
@@ -2903,6 +2968,8 @@ impl Tool {
                 designation,
                 length,
                 internal,
+                modelled,
+                left_hand,
             } => {
                 let n = picks.iter().filter(|p| matches!(p, Pick::Face(_))).count();
                 row(ui, "Face", |ui| {
@@ -2925,13 +2992,7 @@ impl Tool {
                     );
                 }
                 text_field(ui, "Length", length);
-                ui.label(
-                    egui::RichText::new(
-                        "Cosmetic: the model is not changed; the thread is listed in Measure and the feature list.",
-                    )
-                    .color(TEXT_WEAK)
-                    .size(10.5),
-                );
+                thread_model_ui(ui, modelled, left_hand, length, "");
             }
             Tool::MoveBody {
                 copy,

@@ -7,7 +7,7 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 * Fusion-style frame: light theme, application bar (home, File, Undo, Redo, Save, project name with `*` when unsaved), workspace menu (DESIGN, MANUFACTURE, SIMULATION, ELECTRONICS, RENDER), ribbon with tabs, browser, timeline, status line.
 * Unsaved-changes prompts when closing, opening another project, opening the demo or quitting; the window closes after the answer.
 * `.kwf` project file: feature document plus CAM, FEA, board and assembly data as extra entries; unknown fields and entries survive a save; three schema versions migrate; files from newer versions are read, files that need a newer reader are refused cleanly.
-* File ▸ Import STEP / IGES (kept inside the project), Export STEP / STL / OBJ (+MTL) / GLB.
+* File ▸ Import STEP / IGES / STL (kept inside the project), Export STEP / STL / OBJ (+MTL) / GLB.
 * Command-line: `--demo`, `--workspace`, `--screenshot`, `--design-demo`, `--open-menu`, per-workspace demos, `--exit-after-frames`.
 
 ## 2. Ribbon and interface widgets
@@ -38,14 +38,14 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 * **Extrude:** distance, symmetric, flip, through all, second side, taper, to a face, start offset, thin wall (inside / outside / centred), New Body / Join / Cut / Intersect, live preview, drag arrow, region picking (click or tick regions; Default / All / None; neighbours merge into one profile).
 * **Revolve:** about the sketch X or Y axis, a clicked body edge, or a construction axis.
 * **Sweep:** arc or spline path, or a single straight line. **Loft** between profiles. **Pipe** along a path (outer diameter + wall). **Rib** from open lines and arcs.
-* **Hole:** simple, counterbore, countersink, tapped (ISO metric coarse/fine, UNC, UNF tables with tap drills), through all; cosmetic **Thread** on a hole wall or pin.
+* **Hole:** simple, counterbore, countersink, tapped (ISO metric coarse/fine, UNC, UNF tables with tap drills), through all; **Thread** on a hole wall or pin, cosmetic or modelled (helical groove cut into the body, right- or left-hand).
 * Patterns of any feature; mirror about origin planes, construction planes or planar faces.
 
 **Modify:** Fillet, Variable fillet, Chamfer, Shell, Draft, Offset body, Combine (Join / Cut / Intersect, keep tools), Move / Copy body, Scale (uniform), Split Body, Change Parameters.
 **Construct:** planes (offset/tilted, midplane, through 3 points), axes (2 points, edge, normal to face, two planes), points (coordinates, edge middle, axis ∩ plane); drawn in the view with eye toggles; used by Revolve, patterns, Mirror, Section, joints.
 **Bodies:** multi-body documents, active body, per-body name, colour and material (Appearance), body list.
 **Inspect:** Measure (face area/kind, edge length/radius, distances and angles between picks, volume, area, mass in 10 materials, centre of mass, bounding box, inertia, threads), Interference (overlap volumes), Section Analysis (clip plane with cap; origin or construction plane, offset, flip).
-**Import:** STEP / IGES solids as a feature.
+**Import:** STEP / IGES solids as a feature; STL as a mesh body (units, up axis, welded and wound outward) with *Convert to solid* into a faceted B-rep (coplanar triangles merged into faces).
 **Persistent naming:** faces keep their names through edits and later features; references survive rollback and reorder.
 
 ## 4a. Surfaces and analysis
@@ -68,7 +68,7 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 L, U, Z and custom strips (thickness, K-factor, bend radius, width, flats and bends), edit strip, flat pattern with bend table and allowances, DXF export, refold, flat pattern of a recognised folded body.
 
 ## 7. Form (subdivision)
-Box, cylinder, sphere, torus cages; move cage vertices numerically, sharp / smooth edges, scale and tolerance; cage drawn in the view; finished into a body of patches. *(limit: no pyramid, no dragging in the view, smooth cages are slow to finish)*
+Box, cylinder, sphere, torus cages; the cage is drawn in the view and edited there: click or box-select vertices, edges, faces; drag them in the camera plane or locked to an axis or plane (X / Y / Z keys), with grid snap and mirror symmetry; sharp / smooth per edge; live preview of the smooth surface while dragging; Ctrl+Z inside the dialog; numbers still work; scale and tolerance; finished into a body of patches on OK. *(limits: no pyramid, no adding / removing cage faces, smooth cages are slow to finish)*
 
 ## 8. TOOLS tab
 Measure, Section Analysis, Appearance, Parameters, Import, Export.
@@ -98,4 +98,4 @@ Realtime PBR viewport (ambient occlusion, edge lines, picking buffer), CPU/GPU p
 * **kw-cam / kw-gsim / kw-fem / kw-mesh3d / kw-ecad / kw-fabcheck / kw-render / kw-job:** the manufacturing, simulation, electronics and rendering engines.
 
 ## 14. Known limits
-No modelled (helical) threads; assembly joints form a tree (no closed kinematic loops) and components are copies in the project (no linked files); no Mesh tab (surfaces are in `docs/surface-report.md`); Form cages edited by numbers only; ellipse/spline crossings that only graze can be missed when splitting sketches; chosen regions that touch only at a corner become separate pieces of one body; CAM and FEA use the last solid only; STL import not built; drawing limits are listed in `docs/fusion-parity.md`, no collaboration.
+assembly joints form a tree (no closed kinematic loops) and components are copies in the project (no linked files); no Mesh tab (surfaces are in `docs/surface-report.md`); Form cages cannot get new faces or edges (only their vertices and creases move); ellipse/spline crossings that only graze can be missed when splitting sketches; chosen regions that touch only at a corner become separate pieces of one body; CAM and FEA use the last solid only; STL meshes convert to faceted solids only (no cylinder / sphere fitting, 150 000 triangle cap, FEA and CAM need the converted solid); drawing limits are listed in `docs/fusion-parity.md`, no collaboration.

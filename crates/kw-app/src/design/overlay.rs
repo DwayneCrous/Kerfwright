@@ -110,8 +110,10 @@ impl DesignWorkspace {
         }
     }
 
-    /// The control cage of the Form dialog: its edges, creased edges thicker, the edited vertex marked.
+    /// The control cage of the Form dialog: its edges (creased ones thicker), its vertices, the selected ones
+    /// and the one under the pointer marked, and the box being dragged out.
     fn draw_cage(&self, painter: &egui::Painter) {
+        use super::form_edit::Hit;
         let Some(Tool::Form {
             cage,
             scale,
@@ -122,36 +124,105 @@ impl DesignWorkspace {
             return;
         };
         let k = scale.trim().parse::<f64>().unwrap_or(1.0);
+        // the view draws in scene coordinates: the scene is centred on its own middle, not on the origin
+        let o = self.viewport.origin_in_scene();
+        let fe = &self.form_edit;
         let at = |v: u32| {
             let p = cage.verts.get(v as usize)?;
-            self.viewport.project([p[0] * k, p[1] * k, p[2] * k])
+            self.viewport
+                .project([p[0] * k + o.x, p[1] * k + o.y, p[2] * k + o.z])
         };
-        let creased = |a: u32, b: u32| {
-            cage.creases
-                .iter()
-                .any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
-        };
+        let creased = |a: u32, b: u32| cage.crease_of(a, b) > 0.0;
         let colour = Color32::from_rgb(40, 150, 90);
+        let hot_edge = match fe.hover {
+            Some(Hit::Edge(a, b)) => Some((a, b)),
+            _ => None,
+        };
+        let hot_face = match fe.hover {
+            Some(Hit::Face(f)) => Some(f),
+            _ => None,
+        };
+        // a hovered face is tinted
+        if let Some(f) = hot_face {
+            let poly: Vec<egui::Pos2> = cage.faces[f].iter().filter_map(|v| at(*v)).collect();
+            if poly.len() == cage.faces[f].len() && poly.len() >= 3 {
+                painter.add(Shape::convex_polygon(
+                    poly,
+                    Color32::from_rgba_unmultiplied(6, 150, 215, 40),
+                    Stroke::NONE,
+                ));
+            }
+        }
         for f in &cage.faces {
             for i in 0..f.len() {
                 let (a, b) = (f[i], f[(i + 1) % f.len()]);
                 if let (Some(pa), Some(pb)) = (at(a), at(b)) {
+                    let on = fe.selected.contains(&a) && fe.selected.contains(&b);
+                    let hot =
+                        hot_edge.is_some_and(|(x, y)| (x == a && y == b) || (x == b && y == a));
                     painter.line_segment(
                         [pa, pb],
-                        Stroke::new(if creased(a, b) { 2.2 } else { 1.0 }, colour),
+                        Stroke::new(
+                            if creased(a, b) { 2.2 } else { 1.0 } + if hot { 1.5 } else { 0.0 },
+                            if on || hot { ACCENT } else { colour },
+                        ),
                     );
                 }
             }
         }
         for v in 0..cage.verts.len() as u32 {
             if let Some(p) = at(v) {
-                let on = v as usize == *vertex;
+                let selected = fe.selected.contains(&v);
+                let current = v as usize == *vertex;
+                let hot = fe.hover == Some(Hit::Vertex(v));
+                let r = if selected {
+                    5.5
+                } else if hot {
+                    5.0
+                } else if current {
+                    4.5
+                } else {
+                    2.5
+                };
                 painter.circle_filled(
                     p,
-                    if on { 5.0 } else { 2.5 },
-                    if on { ACCENT } else { colour },
+                    r,
+                    if selected || hot || current {
+                        ACCENT
+                    } else {
+                        colour
+                    },
                 );
+                if selected {
+                    painter.circle_stroke(p, r + 2.0, Stroke::new(1.0, Color32::WHITE));
+                }
             }
+        }
+        if let Some((a, b)) = fe.boxsel {
+            let r = egui::Rect::from_two_pos(a, b);
+            painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(6, 150, 215, 30));
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+        }
+        // what the drag is locked to
+        if fe.drag.is_some() || fe.lock != super::form_edit::Lock::Free {
+            let rect = self.viewport.rect();
+            painter.text(
+                rect.left_bottom() + vec2(10.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!(
+                    "drag: {}{}{}",
+                    fe.lock.label(),
+                    fe.snap.map_or(String::new(), |g| format!(", grid {g} mm")),
+                    match fe.mirror {
+                        None => String::new(),
+                        Some(0) => ", mirror x".into(),
+                        Some(1) => ", mirror y".into(),
+                        Some(_) => ", mirror z".into(),
+                    }
+                ),
+                egui::FontId::proportional(11.5),
+                ACCENT,
+            );
         }
     }
 
@@ -487,6 +558,7 @@ impl DesignWorkspace {
         self.asm_joint_props_window(ui.ctx(), project);
         self.flat_window(ui.ctx());
         self.body_props_window(ui.ctx(), project);
+        self.form_edit_window(ui.ctx());
     }
 
     /// The arrow that drags the Extrude distance.

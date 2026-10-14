@@ -339,8 +339,9 @@ pub struct DraftSpec {
     pub base: Option<FeatureId>,
 }
 
-/// A cosmetic thread on a cylindrical face: the geometry is not changed; the designation, length and
-/// hand are recorded for drawings, the feature list and export.
+/// A thread on a cylindrical face. Cosmetic by default: the geometry is not changed and the designation,
+/// length and hand are recorded for drawings, the feature list and export. A `modelled` thread cuts the
+/// helical groove into the body (see [`crate::thread_geom`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpec {
     pub face: Reference,
@@ -349,6 +350,16 @@ pub struct ThreadSpec {
     /// A tapped hole (true) or a bolt (false).
     pub internal: bool,
     pub base: Option<FeatureId>,
+    /// Cut the thread into the body instead of only recording it.
+    #[serde(default)]
+    pub modelled: bool,
+    /// Right-handed (the usual) or left-handed.
+    #[serde(default = "right_handed")]
+    pub right_hand: bool,
+}
+
+fn right_handed() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -383,11 +394,16 @@ pub enum HoleKind {
         /// Full included angle of the countersink cone.
         cs_angle: Param,
     },
-    /// Drilled to the tap-drill diameter of a standard size (see [`crate::threads`]) with a cosmetic
-    /// internal thread of `thread_length` (the rest of the hole stays plain).
+    /// Drilled to the tap-drill diameter of a standard size (see [`crate::threads`]) with an internal
+    /// thread of `thread_length` (the rest of the hole stays plain). The thread is cosmetic unless
+    /// `modelled`; then the hole is drilled to the thread's minor diameter and the helical groove is cut.
     Tapped {
         designation: String,
         thread_length: Param,
+        #[serde(default)]
+        modelled: bool,
+        #[serde(default = "right_handed")]
+        right_hand: bool,
     },
 }
 
@@ -609,6 +625,27 @@ pub struct ImportSpec {
     pub data: String,
 }
 
+/// A triangle mesh read from a file (STL): a body that is not a solid. It can be moved, scaled, measured and
+/// exported; "convert to solid" ([`MeshToSolidSpec`]) turns it into a faceted B-rep.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportMeshSpec {
+    /// Name of the file it came from (for display).
+    pub source: String,
+    /// The unit the file is written in.
+    pub units: crate::mesh_body::MeshUnits,
+    /// The file has y up (the model has z up).
+    pub y_up: bool,
+    pub data: crate::mesh_body::MeshBlob,
+}
+
+/// Turn a closed mesh body into a solid of planar faces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeshToSolidSpec {
+    pub base: Option<FeatureId>,
+    /// Make one face of the triangles that lie in one plane.
+    pub merge_coplanar: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum FeatureSpec {
@@ -643,6 +680,8 @@ pub enum FeatureSpec {
     SheetMetal(SheetMetalSpec),
     Subd(SubdSpec),
     Import(ImportSpec),
+    ImportMesh(ImportMeshSpec),
+    MeshToSolid(MeshToSolidSpec),
     MoveBody(MoveBodySpec),
     ScaleBody(ScaleBodySpec),
     SplitBody(SplitBodySpec),
@@ -704,6 +743,8 @@ impl FeatureSpec {
             FeatureSpec::SheetMetal(_) => "SheetMetal",
             FeatureSpec::Subd(_) => "Subd",
             FeatureSpec::Import(_) => "Import",
+            FeatureSpec::ImportMesh(_) => "ImportMesh",
+            FeatureSpec::MeshToSolid(_) => "MeshToSolid",
             FeatureSpec::MoveBody(m) => {
                 if m.copy {
                     "CopyBody"
@@ -888,7 +929,7 @@ impl FeatureSpec {
                 MirrorPlane::Xy(o) | MirrorPlane::Yz(o) | MirrorPlane::Xz(o) => f(o),
                 MirrorPlane::Datum(_) | MirrorPlane::Face(_) => {}
             },
-            FeatureSpec::Import(_) => {}
+            FeatureSpec::Import(_) | FeatureSpec::ImportMesh(_) | FeatureSpec::MeshToSolid(_) => {}
             FeatureSpec::MoveBody(m) => {
                 for p in &mut m.delta {
                     f(p);
@@ -1022,6 +1063,7 @@ impl FeatureSpec {
             FeatureSpec::SplitBody(x) => x.base,
             FeatureSpec::Rib(x) => x.base,
             FeatureSpec::Pipe(x) => x.base,
+            FeatureSpec::MeshToSolid(x) => x.base,
             _ => None,
         }
     }
@@ -1056,6 +1098,7 @@ impl FeatureSpec {
             FeatureSpec::SplitBody(x) => x.base = b,
             FeatureSpec::Rib(x) => x.base = b,
             FeatureSpec::Pipe(x) => x.base = b,
+            FeatureSpec::MeshToSolid(x) => x.base = b,
             _ => {}
         }
     }
@@ -1076,6 +1119,7 @@ impl FeatureSpec {
             | FeatureSpec::Stitch(_)
             | FeatureSpec::SheetMetal(_)
             | FeatureSpec::Import(_)
+            | FeatureSpec::ImportMesh(_)
             | FeatureSpec::Subd(_) => false,
             FeatureSpec::Sketch(s) => matches!(s.plane, PlaneSpec::Face(_)),
             FeatureSpec::Extrude(x) => x.op != BodyOp::New,
@@ -1233,6 +1277,8 @@ impl FeatureSpec {
             FeatureSpec::SheetMetal(_)
             | FeatureSpec::Subd(_)
             | FeatureSpec::Import(_)
+            | FeatureSpec::ImportMesh(_)
+            | FeatureSpec::MeshToSolid(_)
             | FeatureSpec::MoveBody(_)
             | FeatureSpec::ScaleBody(_) => {}
         }

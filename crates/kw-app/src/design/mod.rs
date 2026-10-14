@@ -15,6 +15,8 @@ pub mod bodyprops;
 pub mod browser;
 pub mod continuity;
 pub mod form;
+pub mod form_edit;
+pub mod form_view;
 pub mod geom;
 pub mod measure;
 pub mod overlay;
@@ -124,6 +126,8 @@ pub enum Action {
     NewEmptyComponent,
     /// The body ending at this feature becomes a component.
     ComponentFromBody(FeatureId),
+    /// Turn the mesh body ending at this feature into a faceted solid.
+    ConvertMesh(FeatureId),
     /// Open this part of the assembly for editing in place.
     ActivateComponent(usize),
     /// Close the component being edited.
@@ -188,6 +192,10 @@ pub struct DesignWorkspace {
     pub sketch_panel: Option<sketch_ops::SketchPanel>,
     /// The body new features go to when no pick says otherwise (a body root).
     pub active_body: Option<FeatureId>,
+    /// The interactive editing of the cage of the open Form dialog.
+    pub form_edit: form_edit::FormEdit,
+    /// The bodies that are triangle meshes (imported STL), as of the last frame.
+    pub mesh_bodies: Vec<crate::bodies::MeshBody>,
     /// The body whose properties window (name, colour, material) is open.
     pub body_props: Option<FeatureId>,
     /// The body a sketch about to be started on a face belongs to.
@@ -234,6 +242,8 @@ impl Default for DesignWorkspace {
             sketch_frame: None,
             sketch_panel: None,
             active_body: None,
+            form_edit: form_edit::FormEdit::default(),
+            mesh_bodies: Vec::new(),
             body_props: None,
             next_sketch_base: None,
             region_view: None,
@@ -852,6 +862,15 @@ impl DesignWorkspace {
                         self.model.error = e;
                     }
                 }
+                Action::ConvertMesh(head) => {
+                    match crate::exchange::convert_mesh(project, head, true) {
+                        Ok(m) => self.status = m,
+                        Err(e) => {
+                            self.status = e.clone();
+                            self.model.error = e;
+                        }
+                    }
+                }
                 Action::ActivateComponent(p) => {
                     if let Err(e) = self.activate_component(project, p) {
                         self.model.error = e;
@@ -1015,11 +1034,22 @@ impl DesignWorkspace {
             .dialog
             .as_ref()
             .is_some_and(|d| d.tool.picks_edges() || d.tool.picks_faces());
-        self.bodies = Bodies::new(&doc, &ev, &self.hidden_bodies).map(Arc::new);
+        // the old body of a Form being edited is replaced by the live preview of its cage
+        let mut hidden = self.hidden_bodies.clone();
+        if let Some(Dialog {
+            tool: Tool::Form { .. },
+            editing: Some((id, _)),
+        }) = &self.dialog
+        {
+            hidden.insert(doc.body_root(*id));
+        }
+        self.bodies = Bodies::new(&doc, &ev, &hidden).map(Arc::new);
+        self.mesh_bodies = crate::bodies::mesh_bodies(&doc, &ev, &self.hidden_bodies);
         if self.active_body.is_some_and(|r| {
             self.bodies
                 .as_ref()
                 .is_none_or(|b| b.index_of_root(r).is_none())
+                && !self.mesh_bodies.iter().any(|m| m.root == r)
         }) {
             self.active_body = None;
         }
@@ -1059,7 +1089,17 @@ impl DesignWorkspace {
             Some(kw_analysis::CurvKind::Max) => 3,
             Some(kw_analysis::CurvKind::Min) => 4,
         };
+        let form_preview = self.form_preview();
+        let form_key = form_preview.as_ref().map_or(0, |p| p.key());
+        let frozen = self.form_edit.frozen_centre;
+        let mesh_key = crate::bodies::mesh_key(&self.mesh_bodies) ^ form_key.rotate_left(41);
+        let mesh_data: Vec<(Arc<kw_mesh3d::SurfaceMesh>, [u8; 3])> = self
+            .mesh_bodies
+            .iter()
+            .map(|m| (m.mesh.clone(), m.colour))
+            .collect();
         let key = geom_key
+            ^ mesh_key.rotate_left(17)
             ^ base_key
             ^ ((segs.len() as u128) << 96)
             ^ ((hidden_now.len() as u128) << 90)
@@ -1075,7 +1115,7 @@ impl DesignWorkspace {
             (None, _) => 4,
         };
         // dragging a component of the posed assembly takes the pointer from the camera
-        let dragging = self.asm_drag_frame(ui, project);
+        let dragging = self.asm_drag_frame(ui, project) | self.form_drag_frame(ui);
         let opts = ViewOpts {
             hover: true,
             navigate: !dragging,
@@ -1095,6 +1135,18 @@ impl DesignWorkspace {
                     (None, Some(b)) => ModelScene::build_analysed(&b.brep, &b.colours(), curvature),
                     (None, None) => ModelScene::empty(),
                 };
+                if asm_view.is_none() {
+                    let preview = form_preview.as_ref().and_then(|p| p.mesh());
+                    let mut refs: Vec<(&kw_mesh3d::SurfaceMesh, [u8; 3])> =
+                        mesh_data.iter().map(|(m, c)| (&**m, *c)).collect();
+                    if let Some(p) = &preview {
+                        refs.push((p, form_view::PREVIEW_COLOUR));
+                    }
+                    m.add_meshes(&refs);
+                    if let (Some(c), true) = (frozen, preview.is_some()) {
+                        m.recenter(nalgebra::Vector3::new(c[0], c[1], c[2]));
+                    }
+                }
                 m.add_segments(&segs);
                 m
             },
@@ -1276,7 +1328,20 @@ impl DesignWorkspace {
                             }
                         }
                         None => {
-                            if !shift && self.dialog.is_none() {
+                            // a mesh body is not seen by the pick buffer: ask the ray
+                            let mesh = out
+                                .click_pos
+                                .filter(|_| self.dialog.is_none() && !self.mesh_bodies.is_empty())
+                                .and_then(|pos| {
+                                    let (o, d) = self.viewport.ray(pos);
+                                    self.viewport.model().and_then(|m| m.mesh_at(o, d))
+                                });
+                            if let Some(i) = mesh {
+                                let m = &self.mesh_bodies[i.min(self.mesh_bodies.len() - 1)];
+                                self.active_body = Some(m.root);
+                                self.status = format!("selected mesh body {}", m.name);
+                                self.model.picks.clear();
+                            } else if !shift && self.dialog.is_none() {
                                 self.model.picks.clear();
                             }
                         }

@@ -591,7 +591,7 @@ impl DesignWorkspace {
             "file_import",
             Icon::Folder,
             "Import",
-            "Add the solids of a STEP or IGES file",
+            "Add the solids of a STEP or IGES file, or the triangles of an STL file as a mesh body",
         );
         let exports: Vec<Item> = crate::exchange::ExportFormat::ALL
             .iter()
@@ -742,7 +742,7 @@ impl DesignWorkspace {
             "thread",
             Icon::Thread,
             "Thread",
-            "Cosmetic thread on a hole wall or a pin (click the cylindrical face)",
+            "Thread on a hole wall or a pin (click the cylindrical face): cosmetic, or cut into the model",
         )
         .active(dlg("THREAD"))
         .enabled_if(cx.has_solid, need_solid);
@@ -1342,6 +1342,8 @@ impl DesignWorkspace {
                     through_all,
                     thread,
                     thread_length,
+                    thread_modelled,
+                    thread_left,
                     ..
                 } => Tool::Hole {
                     x,
@@ -1356,6 +1358,8 @@ impl DesignWorkspace {
                     through_all,
                     thread,
                     thread_length,
+                    thread_modelled,
+                    thread_left,
                 },
                 t => t,
             },
@@ -1363,6 +1367,8 @@ impl DesignWorkspace {
                 designation: "M6".into(),
                 length: "8 mm".into(),
                 internal: true,
+                modelled: false,
+                left_hand: false,
             },
             "rect_pattern" => Tool::Pattern {
                 source: None,

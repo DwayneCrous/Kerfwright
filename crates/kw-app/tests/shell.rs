@@ -3730,6 +3730,72 @@ fn tapped_holes_and_cosmetic_threads_are_made_from_their_dialogs() {
     assert!(report.iter().all(|t| t.size.designation == "M6"));
 }
 
+#[test]
+fn a_modelled_thread_is_chosen_in_the_dialog_and_cut_into_the_body() {
+    let (mut h, _d) = design_harness("modelled_threads");
+    sketch_block(&mut h, 30.0, 30.0, "20 mm");
+    commit(&mut h);
+    let block = vol(&mut h);
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.design.command("hole_tapped", project);
+    }
+    h.frame();
+    let f = top_face(&mut h, 20.0);
+    click(&mut h, Some(Pick::Face(f)));
+    {
+        let d = h.app.design.dialog.as_mut().unwrap();
+        let Tool::Hole {
+            x,
+            y,
+            depth,
+            thread,
+            thread_length,
+            thread_modelled,
+            thread_left,
+            ..
+        } = &mut d.tool
+        else {
+            panic!("{:?}", d.tool)
+        };
+        (*x, *y, *depth) = ("15 mm".into(), "15 mm".into(), "10 mm".into());
+        *thread = "M6".into();
+        *thread_length = "6 mm".into();
+        *thread_modelled = true;
+        *thread_left = true;
+    }
+    h.frame();
+    h.frame();
+    commit(&mut h);
+    // the hole is the thread's cavity (a little narrower than the 5 mm tap drill, with grooves out to 6 mm)
+    let v = vol(&mut h);
+    assert!(v < block - 100.0 && v > block - 600.0, "{v} of {block}");
+    // the dialog reads the choice back, and the thread is listed as modelled and left-handed
+    let id = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(id));
+    assert!(matches!(
+        &h.app.design.dialog.as_ref().unwrap().tool,
+        Tool::Hole {
+            thread_modelled: true,
+            thread_left: true,
+            ..
+        }
+    ));
+    h.app.design.close_dialog();
+    let ev = proj(&mut h).evaluation();
+    let doc = proj(&mut h).document();
+    let report = kw_feature::threads::report(&doc, &ev.scope(&doc));
+    assert_eq!(report.len(), 1);
+    assert!(report[0].modelled && !report[0].right_hand);
+    let text = report[0].text();
+    assert!(
+        text.contains("modelled") && text.contains("left-hand"),
+        "{text}"
+    );
+}
+
 fn start_sketch_plane(h: &mut Harness, idx: usize) {
     act(h, Action::StartSketch);
     act(
@@ -8834,4 +8900,425 @@ fn the_fea_workspace_lists_the_bodies_and_runs_a_modal_study_with_animated_modes
     let st = back.fea[0].clone();
     assert_eq!(st.kind, StudyKind::Modal);
     assert_eq!(st.modes, 3);
+}
+
+#[test]
+fn an_stl_file_becomes_a_mesh_body_that_is_listed_measured_exported_and_converted_to_a_solid() {
+    let dir = scratch("stl_import");
+    // an STL made from the demo part
+    let mut src = kw_app::project::Project::demo();
+    let want = volume(&mut src);
+    let file = dir.join("bracket.stl");
+    exchange::export_file(&mut src, ExportFormat::Stl, &file).unwrap();
+    let (tris, stl_vol) = stl_volume(&std::fs::read(&file).unwrap());
+
+    let (mut h, _) = {
+        let mut h = Harness::new(app_in(&dir));
+        h.app.create_project("Meshy", &dir).unwrap();
+        h.app.set_workspace(Workspace::Design);
+        h.frame();
+        (h, ())
+    };
+    // choosing the file opens the options; nothing is added until they are confirmed
+    h.app.import_path(&file);
+    assert!(h.app.mesh_import.is_some(), "{}", h.app.message);
+    assert_eq!(h.app.project().unwrap().document().len(), 0);
+    h.frame();
+    h.app.confirm_mesh_import();
+    assert!(
+        h.app.message.contains("imported bracket.stl") && h.app.message.contains("closed"),
+        "{}",
+        h.app.message
+    );
+    assert!(h.app.mesh_import.is_none());
+    h.frame();
+    h.frame();
+
+    // one mesh body, listed as such
+    let doc = h.app.project().unwrap().document();
+    let infos = kw_app::bodies::summaries(&doc);
+    assert_eq!(infos.len(), 1);
+    assert!(infos[0].mesh);
+    assert_eq!(h.app.design.mesh_bodies.len(), 1);
+    let mesh = h.app.design.mesh_bodies[0].mesh.clone();
+    assert!(mesh.tris.len() <= tris);
+    assert!(
+        (mesh.volume() - stl_vol).abs() < 1e-4 * stl_vol,
+        "{} {stl_vol}",
+        mesh.volume()
+    );
+    // the viewport scene holds its triangles, and a ray through it finds the body
+    let scene = h.app.design.viewport.model().expect("a scene");
+    assert!(scene.scene.triangle_count() >= mesh.tris.len());
+    let c = scene.scene.center;
+    let (lo, hi) = mesh.bounds();
+    let mid = nalgebra::Vector3::new(
+        (lo[0] + hi[0]) / 2.0 - c.x,
+        (lo[1] + hi[1]) / 2.0 - c.y,
+        hi[2] + 50.0 - c.z,
+    );
+    assert_eq!(
+        scene.mesh_at(mid, nalgebra::Vector3::new(0.0, 0.0, -1.0)),
+        Some(0)
+    );
+    assert_eq!(
+        scene.mesh_at(mid, nalgebra::Vector3::new(0.0, 0.0, 1.0)),
+        None
+    );
+
+    // measure: the volume comes from the triangles
+    let p = kw_app::design::measure::mesh_props(&mesh);
+    assert!(!p.surface && (p.volume - stl_vol).abs() < 1e-4 * stl_vol);
+    // it exports as a mesh (STL and OBJ), but not as STEP
+    let out = dir.join("again.stl");
+    exchange::export_file(h.app.project_mut().unwrap(), ExportFormat::Stl, &out).unwrap();
+    let (_, again) = stl_volume(&std::fs::read(&out).unwrap());
+    assert!(
+        (again - stl_vol).abs() < 1e-4 * stl_vol.abs(),
+        "{again} vs {stl_vol}"
+    );
+    let e = exchange::export_file(
+        h.app.project_mut().unwrap(),
+        ExportFormat::Step,
+        &dir.join("m.step"),
+    )
+    .unwrap_err();
+    assert!(e.contains("convert the mesh"), "{e}");
+    // a solid tool is refused with the way out
+    let e = kw_app::model_source::ModelSource::design(
+        h.app.project_mut().unwrap(),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(e.contains("Convert to solid"), "{e}");
+
+    // the mesh survives save and reopen
+    assert!(h.app.save());
+    let reopened = kw_app::project::Project::open(&dir.join("Meshy.kwf")).unwrap();
+    assert_eq!(reopened.document().len(), 1);
+
+    // convert it
+    let head = infos[0].head;
+    act(&mut h, Action::ConvertMesh(head));
+    assert!(
+        h.app.design.status.contains("converted to a solid"),
+        "{}",
+        h.app.design.status
+    );
+    h.frame();
+    let got = volume(h.app.project_mut().unwrap());
+    assert!((got - want).abs() < 2e-3 * want, "{got} vs {want}");
+    assert!(h.app.design.mesh_bodies.is_empty());
+    let infos = kw_app::bodies::summaries(&h.app.project().unwrap().document());
+    assert_eq!(infos.len(), 1);
+    assert!(!infos[0].mesh);
+    // undo takes it back to the mesh
+    assert!(h.app.project_mut().unwrap().history.undo());
+    h.frame();
+    assert_eq!(h.app.design.mesh_bodies.len(), 1);
+
+    // a file that is not a mesh changes nothing
+    let junk = dir.join("junk.stl");
+    std::fs::write(&junk, "this is not an stl").unwrap();
+    let n = h.app.project().unwrap().document().len();
+    h.app.import_path(&junk);
+    assert!(
+        h.app.message.starts_with("import failed"),
+        "{}",
+        h.app.message
+    );
+    assert!(h.app.mesh_import.is_none());
+    assert_eq!(h.app.project().unwrap().document().len(), n);
+}
+
+/// One frame with pointer events and held modifiers, clearing the texture updates like `Harness::frame`.
+fn form_frame(h: &mut Harness, mut events: Vec<egui::Event>, modifiers: egui::Modifiers) {
+    let Harness { ctx, app, t } = h;
+    events.insert(0, egui::Event::ModifiersChanged(modifiers));
+    let raw = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360.0, 860.0))),
+        time: Some(*t),
+        events,
+        ..Default::default()
+    };
+    *t += 1.0 / 60.0;
+    let mut out = ctx.run_ui(raw, |ui| app.show(ui));
+    out.textures_delta.clear();
+}
+
+fn form_cage(h: &Harness) -> kw_subd::SubdMesh {
+    match h.app.design.dialog.as_ref().map(|d| &d.tool) {
+        Some(Tool::Form { cage, .. }) => cage.clone(),
+        t => panic!("{t:?}"),
+    }
+}
+
+#[test]
+fn cage_vertices_are_picked_dragged_boxed_locked_and_undone_in_the_view() {
+    let (mut h, _d) = design_harness("form_drag");
+    h.app.design.ribbon_tab = 3;
+    h.frame();
+    run_command(&mut h, "form_box");
+    h.frame();
+    assert!(h.app.design.form_dialog_open());
+    let before = form_cage(&h);
+    // the live preview of the surface is in the scene: a rounded box, drawn without finishing the form
+    let tris = h
+        .app
+        .design
+        .viewport
+        .model()
+        .unwrap()
+        .scene
+        .triangle_count();
+    assert!(tris > 100, "{tris}");
+    assert!(!proj(&mut h).is_dirty(), "nothing is in the document yet");
+
+    // the corner with the largest coordinates, pulled 60 px to the right
+    let corner = (0..before.verts.len())
+        .max_by(|a, b| {
+            let s = |v: usize| before.verts[v].iter().sum::<f64>();
+            s(*a).total_cmp(&s(*b))
+        })
+        .unwrap();
+    let p = before.verts[corner];
+    let from = screen_of(&h, p);
+    let to = from + egui::vec2(60.0, 0.0);
+    let none = egui::Modifiers::NONE;
+    form_frame(&mut h, vec![egui::Event::PointerMoved(from)], none);
+    assert_eq!(
+        h.app.design.form_edit.hover,
+        Some(kw_app::design::form_edit::Hit::Vertex(corner as u32)),
+    );
+    let cam_before = format!("{:?}", h.app.design.viewport.camera.view());
+    form_frame(&mut h, vec![press(from, true)], none);
+    assert!(h.app.design.form_edit.drag.is_some());
+    assert_eq!(h.app.design.form_edit.selected.len(), 1);
+    for k in 1..=6 {
+        let q = from + (to - from) * (k as f32 / 6.0);
+        form_frame(&mut h, vec![egui::Event::PointerMoved(q)], none);
+    }
+    form_frame(&mut h, vec![press(to, false)], none);
+    form_frame(&mut h, vec![], none);
+    assert!(h.app.design.form_edit.drag.is_none());
+    let moved = form_cage(&h);
+    let d: Vec<f64> = (0..3).map(|k| moved.verts[corner][k] - p[k]).collect();
+    let len = d.iter().map(|x| x * x).sum::<f64>().sqrt();
+    assert!(len > 3.0, "the vertex followed the pointer: {d:?}");
+    // in the plane facing the camera, and the other vertices stayed
+    let cam = &h.app.design.viewport.camera;
+    let fwd = (cam.target - cam.eye()).normalize();
+    assert!((d[0] * fwd.x + d[1] * fwd.y + d[2] * fwd.z).abs() < 1e-6 * len);
+    for v in 0..before.verts.len() {
+        if v != corner {
+            assert_eq!(moved.verts[v], before.verts[v]);
+        }
+    }
+    assert_eq!(
+        cam_before,
+        format!("{:?}", h.app.design.viewport.camera.view()),
+        "the view did not orbit"
+    );
+    // it is a custom cage now, the numeric vertex field follows, and the document is still untouched
+    match h.app.design.dialog.as_ref().map(|d| &d.tool) {
+        Some(Tool::Form { kind, vertex, .. }) => assert_eq!((*kind, *vertex), (255, corner)),
+        t => panic!("{t:?}"),
+    }
+    assert!(!proj(&mut h).is_dirty());
+    // the preview follows the cage
+    h.frame();
+    assert!(
+        h.app.design.form_edit.undo.len() == 1,
+        "{}",
+        h.app.design.form_edit.undo.len()
+    );
+
+    // Ctrl+Z steps back inside the dialog, not in the document
+    let ctrl = egui::Modifiers::COMMAND;
+    let z = egui::Event::Key {
+        key: egui::Key::Z,
+        physical_key: Some(egui::Key::Z),
+        pressed: true,
+        repeat: false,
+        modifiers: ctrl,
+    };
+    form_frame(&mut h, vec![z], ctrl);
+    h.frame();
+    assert_eq!(form_cage(&h), before);
+    assert!(h.app.design.form_dialog_open());
+
+    // X locks the drag to the x axis, Shift+X to the plane across it, and X again frees it
+    let key = |k: egui::Key, m: egui::Modifiers| egui::Event::Key {
+        key: k,
+        physical_key: Some(k),
+        pressed: true,
+        repeat: false,
+        modifiers: m,
+    };
+    form_frame(&mut h, vec![egui::Event::PointerMoved(from)], none);
+    form_frame(&mut h, vec![key(egui::Key::X, none)], none);
+    assert_eq!(
+        h.app.design.form_edit.lock,
+        kw_app::design::form_edit::Lock::Axis(0)
+    );
+    form_frame(
+        &mut h,
+        vec![key(egui::Key::X, egui::Modifiers::SHIFT)],
+        egui::Modifiers::SHIFT,
+    );
+    assert_eq!(
+        h.app.design.form_edit.lock,
+        kw_app::design::form_edit::Lock::Plane(0)
+    );
+    form_frame(
+        &mut h,
+        vec![key(egui::Key::X, egui::Modifiers::SHIFT)],
+        egui::Modifiers::SHIFT,
+    );
+    assert_eq!(
+        h.app.design.form_edit.lock,
+        kw_app::design::form_edit::Lock::Free
+    );
+
+    // a box (Shift-drag in empty space) selects what is inside it; the lock then holds the move to the z axis
+    let a = pos2_of(&h, 5.0, 40.0);
+    let b = pos2_of(&h, 1300.0, 700.0);
+    let shift = egui::Modifiers::SHIFT;
+    form_frame(&mut h, vec![egui::Event::PointerMoved(a)], shift);
+    form_frame(
+        &mut h,
+        vec![egui::Event::PointerButton {
+            pos: a,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: shift,
+        }],
+        shift,
+    );
+    assert!(h.app.design.form_edit.boxsel.is_some());
+    form_frame(&mut h, vec![egui::Event::PointerMoved(b)], shift);
+    form_frame(
+        &mut h,
+        vec![egui::Event::PointerButton {
+            pos: b,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: shift,
+        }],
+        shift,
+    );
+    form_frame(&mut h, vec![], none);
+    assert!(h.app.design.form_edit.boxsel.is_none());
+    assert_eq!(h.app.design.form_edit.selected.len(), before.verts.len());
+    // everything selected: pull one corner along z and the whole cage moves with it
+    h.app.design.form_edit.lock = kw_app::design::form_edit::Lock::Axis(2);
+    let from = screen_of(&h, p);
+    let up = screen_of(&h, [p[0], p[1], p[2] + 8.0]);
+    form_frame(&mut h, vec![egui::Event::PointerMoved(from)], none);
+    form_frame(&mut h, vec![press(from, true)], none);
+    assert!(h.app.design.form_edit.drag.is_some());
+    form_frame(&mut h, vec![egui::Event::PointerMoved(up)], none);
+    form_frame(&mut h, vec![press(up, false)], none);
+    form_frame(&mut h, vec![], none);
+    let lifted = form_cage(&h);
+    for v in 0..before.verts.len() {
+        assert!((lifted.verts[v][0] - before.verts[v][0]).abs() < 1e-9);
+        assert!((lifted.verts[v][1] - before.verts[v][1]).abs() < 1e-9);
+        assert!(
+            (lifted.verts[v][2] - before.verts[v][2] - 8.0).abs() < 0.2,
+            "{:?}",
+            lifted.verts[v]
+        );
+    }
+
+    // OK is one step in the document, with the edited cage
+    let n = proj(&mut h).document().len();
+    commit(&mut h);
+    assert_eq!(proj(&mut h).document().len(), n + 1);
+    assert!(!h.app.design.form_dialog_open());
+    assert!(
+        h.app.design.form_edit.selected.is_empty(),
+        "the dialog's state is gone"
+    );
+    let spec = proj(&mut h)
+        .document()
+        .features
+        .last()
+        .unwrap()
+        .spec
+        .clone();
+    match spec {
+        kw_feature::FeatureSpec::Subd(s) => assert_eq!(s.cage.verts.len(), before.verts.len()),
+        s => panic!("{s:?}"),
+    }
+}
+
+/// A point of the screen that is in the view but not over the cage (for starting a box).
+fn pos2_of(h: &Harness, x: f32, y: f32) -> Pos2 {
+    let r = h.app.design.viewport.rect();
+    Pos2::new(
+        r.min.x + x.min(r.width() - 4.0),
+        r.min.y + y.min(r.height() - 4.0),
+    )
+}
+
+#[test]
+fn editing_an_existing_form_shows_its_cage_and_preview_in_place_of_the_finished_body() {
+    let (mut h, _d) = design_harness("form_edit_existing");
+    h.app.design.ribbon_tab = 3;
+    h.frame();
+    run_command(&mut h, "form_box");
+    commit(&mut h);
+    h.frame();
+    assert!(h.app.design.bodies.is_some());
+    let id = proj(&mut h).document().features.last().unwrap().id;
+    act(&mut h, Action::Edit(id));
+    h.frame();
+    h.frame();
+    // the finished body is out of the way; the preview of the cage stands in for it
+    assert!(h.app.design.bodies.is_none());
+    let scene = h.app.design.viewport.model().unwrap();
+    assert!(scene.scene.triangle_count() > 100);
+    // the cage is where the pointer finds it, wherever the scene is centred
+    let cage = form_cage(&h);
+    let top = (0..cage.verts.len())
+        .max_by(|a, b| cage.verts[*a][2].total_cmp(&cage.verts[*b][2]))
+        .unwrap();
+    let p = screen_of(&h, cage.verts[top]);
+    form_frame(
+        &mut h,
+        vec![egui::Event::PointerMoved(p)],
+        egui::Modifiers::NONE,
+    );
+    assert!(
+        matches!(
+            h.app.design.form_edit.hover,
+            Some(kw_app::design::form_edit::Hit::Vertex(_))
+        ),
+        "{:?}",
+        h.app.design.form_edit.hover
+    );
+    // the scene centre did not move while the cage was dragged
+    let c0 = h.app.design.viewport.model().unwrap().scene.center;
+    form_frame(&mut h, vec![press(p, true)], egui::Modifiers::NONE);
+    for k in 1..=5 {
+        form_frame(
+            &mut h,
+            vec![egui::Event::PointerMoved(
+                p + egui::vec2(0.0, -12.0 * k as f32),
+            )],
+            egui::Modifiers::NONE,
+        );
+    }
+    form_frame(&mut h, vec![press(p, false)], egui::Modifiers::NONE);
+    form_frame(&mut h, vec![], egui::Modifiers::NONE);
+    let c1 = h.app.design.viewport.model().unwrap().scene.center;
+    assert!((c1 - c0).norm() < 1e-9, "{c0:?} {c1:?}");
+    assert!(form_cage(&h) != cage);
+    // cancelling brings the finished body back
+    h.app.design.dialog = None;
+    h.frame();
+    h.frame();
+    assert!(h.app.design.bodies.is_some());
+    assert!(h.app.design.form_edit.selected.is_empty());
 }

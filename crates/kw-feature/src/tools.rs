@@ -60,6 +60,10 @@ pub enum ToolShape {
         r1: f64,
         height: f64,
     },
+    /// The helical groove (or cavity) of a modelled thread, see [`crate::thread_geom`].
+    Thread {
+        tool: crate::thread_geom::ThreadTool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +214,14 @@ impl ToolGen {
                 r1: *r1,
                 height: *height,
             },
+            // a mirrored right-hand thread is a left-hand one
+            ToolShape::Thread { tool } => ToolShape::Thread {
+                tool: crate::thread_geom::ThreadTool {
+                    frame: place.axis_frame(&tool.frame),
+                    right_hand: tool.right_hand != place.mirrored(),
+                    ..*tool
+                },
+            },
         };
         ToolGen {
             tag: self.tag.clone(),
@@ -318,6 +330,11 @@ impl ToolGen {
                     ));
                 }
                 steps.push((make_cone(&mut rep, frame, *r0, *r1, *height), Vec::new()));
+            }
+            ToolShape::Thread { tool } => {
+                let r = crate::thread_geom::build_thread_tool(&mut rep, tool)
+                    .map_err(EvalError::Kernel)?;
+                steps.push((r, Vec::new()));
             }
         }
         let mut namer = Namer::new(feature);

@@ -348,6 +348,7 @@ fn assemble(
     v: &[f64],
     q: usize,
     sheet: bool,
+    chunks: usize,
 ) -> Result<BuildResult, ModelError> {
     let nloops = secs[0].loops.len();
     // outward direction of motion for orientation tests
@@ -394,29 +395,54 @@ fn assemble(
                 return Err(bad("profile loop is not closed"));
             }
         }
-        let sk = skin_loop(&sections, v, q, closed)?;
-        // vertices and rails
-        let mut rail_edges = Vec::new();
-        let mut vert_b = Vec::new();
-        let mut vert_t = Vec::new();
-        for (e, r) in sk.rails.iter().enumerate() {
-            let (pa, pb) = (r.point_at(0.0), r.point_at(1.0));
-            let (va, vb) = (rep.add_vertex(pa), rep.add_vertex(pb));
-            vert_b.push(va);
-            vert_t.push(vb);
-            let c = rep.add_curve(CurveGeom::Nurbs(r.clone()));
-            rail_edges.push(rep.add_edge(va, vb, Some(c), (0.0, 1.0)));
-            let _ = e;
+        // the sections are skinned in `chunks` pieces that share their end sections: a long twist is
+        // several short surfaces instead of one that winds many turns
+        let m = sections.len();
+        let bounds: Vec<usize> = (0..=chunks).map(|c| c * (m - 1) / chunks).collect();
+        let mut skins = Vec::with_capacity(chunks);
+        for c in 0..chunks {
+            let (s0, s1) = (bounds[c], bounds[c + 1]);
+            let (v0, v1) = (v[s0], v[s1]);
+            let vc: Vec<f64> = v[s0..=s1].iter().map(|x| (x - v0) / (v1 - v0)).collect();
+            skins.push(skin_loop(&sections[s0..=s1], &vc, q.min(s1 - s0), closed)?);
         }
-        let mut e0 = Vec::new();
-        let mut e1 = Vec::new();
-        for e in 0..n_edges {
-            let next = nexts(e);
-            let c0 = rep.add_curve(CurveGeom::Nurbs(sections[0][e].clone()));
-            e0.push(rep.add_edge(vert_b[e], vert_b[next], Some(c0), (0.0, 1.0)));
-            let c1 = rep.add_curve(CurveGeom::Nurbs(sections[sections.len() - 1][e].clone()));
-            e1.push(rep.add_edge(vert_t[e], vert_t[next], Some(c1), (0.0, 1.0)));
+        // vertices at every level between chunks, and the rails and rings joining them
+        let mut verts = Vec::with_capacity(chunks + 1);
+        for sk in &skins {
+            verts.push(
+                sk.rails
+                    .iter()
+                    .map(|r| rep.add_vertex(r.point_at(0.0)))
+                    .collect::<Vec<_>>(),
+            );
         }
+        verts.push(
+            skins[chunks - 1]
+                .rails
+                .iter()
+                .map(|r| rep.add_vertex(r.point_at(1.0)))
+                .collect::<Vec<_>>(),
+        );
+        let mut rail_edges = Vec::with_capacity(chunks);
+        for (c, sk) in skins.iter().enumerate() {
+            let mut level = Vec::new();
+            for (r, curve) in sk.rails.iter().enumerate() {
+                let cid = rep.add_curve(CurveGeom::Nurbs(curve.clone()));
+                level.push(rep.add_edge(verts[c][r], verts[c + 1][r], Some(cid), (0.0, 1.0)));
+            }
+            rail_edges.push(level);
+        }
+        let mut rings = Vec::with_capacity(chunks + 1);
+        for (level, &si) in bounds.iter().enumerate() {
+            let mut ring = Vec::new();
+            for e in 0..n_edges {
+                let next = nexts(e);
+                let cid = rep.add_curve(CurveGeom::Nurbs(sections[si][e].clone()));
+                ring.push(rep.add_edge(verts[level][e], verts[level][next], Some(cid), (0.0, 1.0)));
+            }
+            rings.push(ring);
+        }
+        let (e0, e1) = (rings[0].clone(), rings[chunks].clone());
         let kind = if li == 0 || sheet {
             LoopKind::Outer
         } else {
@@ -439,55 +465,57 @@ fn assemble(
         };
         for e in 0..n_edges {
             let next = nexts(e);
-            let surf = SurfaceGeom::Nurbs(sk.surfaces[e].clone());
-            // Su × Sv ∝ (loop tangent) × (motion), which points out of the solid for a loop that is
-            // counter-clockwise about the motion direction (outer) or clockwise (inner)
-            let forward = sign > 0.0;
-            let sid = rep.add_surface(surf);
-            let sense = if forward {
-                Sense::Forward
-            } else {
-                Sense::Reversed
-            };
-            let face = rep.add_face(shell, sid, sense);
-            // loop in (u, v): (0,0) → (1,0) → (1,1) → (0,1) is counter-clockwise
-            let mut pc = |o: (f64, f64), d: (f64, f64)| Some(rep.add_curve(line_pc(o, d)));
-            let mut uses = vec![
-                CoedgeSpec {
-                    edge: e0[e],
-                    sense: Sense::Forward,
-                    pcurve: pc((0.0, 0.0), (1.0, 0.0)),
-                },
-                CoedgeSpec {
-                    edge: rail_edges[next],
-                    sense: Sense::Forward,
-                    pcurve: pc((1.0, 0.0), (0.0, 1.0)),
-                },
-                CoedgeSpec {
-                    edge: e1[e],
-                    sense: Sense::Reversed,
-                    pcurve: pc((0.0, 1.0), (1.0, 0.0)),
-                },
-                CoedgeSpec {
-                    edge: rail_edges[e],
-                    sense: Sense::Reversed,
-                    pcurve: pc((0.0, 0.0), (0.0, 1.0)),
-                },
-            ];
-            if !forward {
-                // outer loops of reversed faces run clockwise in (u, v)
-                uses.reverse();
-                for u in &mut uses {
-                    u.sense = u.sense.flip();
+            for c in 0..chunks {
+                let surf = SurfaceGeom::Nurbs(skins[c].surfaces[e].clone());
+                // Su × Sv ∝ (loop tangent) × (motion), which points out of the solid for a loop that is
+                // counter-clockwise about the motion direction (outer) or clockwise (inner)
+                let forward = sign > 0.0;
+                let sid = rep.add_surface(surf);
+                let sense = if forward {
+                    Sense::Forward
+                } else {
+                    Sense::Reversed
+                };
+                let face = rep.add_face(shell, sid, sense);
+                // loop in (u, v): (0,0) → (1,0) → (1,1) → (0,1) is counter-clockwise
+                let mut pc = |o: (f64, f64), d: (f64, f64)| Some(rep.add_curve(line_pc(o, d)));
+                let mut uses = vec![
+                    CoedgeSpec {
+                        edge: rings[c][e],
+                        sense: Sense::Forward,
+                        pcurve: pc((0.0, 0.0), (1.0, 0.0)),
+                    },
+                    CoedgeSpec {
+                        edge: rail_edges[c][next],
+                        sense: Sense::Forward,
+                        pcurve: pc((1.0, 0.0), (0.0, 1.0)),
+                    },
+                    CoedgeSpec {
+                        edge: rings[c + 1][e],
+                        sense: Sense::Reversed,
+                        pcurve: pc((0.0, 1.0), (1.0, 0.0)),
+                    },
+                    CoedgeSpec {
+                        edge: rail_edges[c][e],
+                        sense: Sense::Reversed,
+                        pcurve: pc((0.0, 0.0), (0.0, 1.0)),
+                    },
+                ];
+                if !forward {
+                    // outer loops of reversed faces run clockwise in (u, v)
+                    uses.reverse();
+                    for u in &mut uses {
+                        u.sense = u.sense.flip();
+                    }
                 }
+                rep.add_loop(face, LoopKind::Outer, &uses);
+                let role = if chunks == 1 {
+                    format!("side-{li}-{e}")
+                } else {
+                    format!("side-{li}-{e}-{c}")
+                };
+                history.record(EntityRef::Face(face), Origin::New { role: role.into() });
             }
-            rep.add_loop(face, LoopKind::Outer, &uses);
-            history.record(
-                EntityRef::Face(face),
-                Origin::New {
-                    role: format!("side-{li}-{e}").into(),
-                },
-            );
         }
     }
     if sheet {
@@ -601,7 +629,7 @@ fn loft_secs(
     let q = if ruled { 1 } else { (secs.len() - 1).min(3) };
     let sheet = planes.is_none();
     let (p0, p1) = planes.unwrap_or((Frame3::world(), Frame3::world()));
-    assemble(rep, p0, p1, secs, &v, q, sheet)
+    assemble(rep, p0, p1, secs, &v, q, sheet, 1)
 }
 
 /// Periodic interpolation of homogeneous data on a closed ring of `m` stations: the uniform periodic cubic
@@ -1042,8 +1070,11 @@ fn sweep_core_seed(
             "sweep path must have a finite domain",
         ));
     }
-    let mut n = 16usize;
+    // a twist of more than a turn is skinned a turn at a time
+    let chunks = ((opts.twist.abs() / std::f64::consts::TAU - 1e-9).ceil() as usize).clamp(1, 64);
+    let mut per = 16usize;
     loop {
+        let n = chunks * (per - 1) + 1;
         let ts: Vec<f64> = (0..n)
             .map(|i| a + (b - a) * i as f64 / (n - 1) as f64)
             .collect();
@@ -1057,7 +1088,7 @@ fn sweep_core_seed(
         if v.windows(2).any(|w| w[1] - w[0] < 1e-12) {
             return Err(ModelError::BadParameter("degenerate sweep path"));
         }
-        let q = 3.min(n - 1);
+        let q = 3.min(per - 1);
         let planes = plane.map(|pl| {
             let at = |st: &Station| {
                 let o = pl.origin;
@@ -1078,24 +1109,24 @@ fn sweep_core_seed(
             (at(&sts[0]), at(&sts[n - 1]))
         });
         let (p0, p1) = planes.unwrap_or((Frame3::world(), Frame3::world()));
-        let result = assemble(rep, p0, p1, &secs, &v, q, plane.is_none());
+        let result = assemble(rep, p0, p1, &secs, &v, q, plane.is_none(), chunks);
         // deviation check on a twice-denser set of sections: odd samples are exact sweep positions
         let ok = match &result {
-            Ok(r) => deviation(rep, r.body, path, base, opts, seed, (a, b), n)
+            Ok(r) => deviation(rep, r.body, path, base, opts, seed, (a, b), n, chunks)
                 .is_ok_and(|d| d <= opts.tolerance),
             Err(_) => false,
         };
-        if ok || n >= opts.max_sections {
+        if ok || per >= opts.max_sections {
             return match result {
                 Ok(r) if ok => Ok(r),
                 Ok(_) => Err(bad(format!(
                     "sweep did not reach the tolerance {} with {} sections",
-                    opts.tolerance, n
+                    opts.tolerance, per
                 ))),
                 Err(e) => Err(e),
             };
         }
-        n *= 2;
+        per *= 2;
     }
 }
 
@@ -1108,6 +1139,7 @@ fn deviation(
     seed: Vector3<f64>,
     dom: (f64, f64),
     n: usize,
+    chunks: usize,
 ) -> Result<f64, ModelError> {
     // exact positions at the mid-parameters between consecutive samples
     let m = 2 * n - 1;
@@ -1126,16 +1158,25 @@ fn deviation(
         .collect();
     let mut worst = 0.0f64;
     let mut surf_idx = 0;
+    // sections per chunk (intervals)
+    let ivals = (n - 1) / chunks;
     for l in &base.loops {
         for c in l {
-            let Some(s) = surfaces.get(surf_idx) else {
-                continue;
-            };
+            let first_surface = surf_idx * chunks;
             surf_idx += 1;
             for j in (1..m).step_by(2) {
+                // the sample lies between sections k and k + 1, in chunk ch
+                let k = j / 2;
+                let ch = (k / ivals).min(chunks - 1);
+                let Some(s) = surfaces.get(first_surface + ch) else {
+                    continue;
+                };
+                let v_local = ((j as f64) / 2.0 - (ch * ivals) as f64) / ivals as f64;
                 for u in [0.0, 0.5, 1.0] {
                     let p = place(&first, &sts[j], &c.point_at(u));
-                    worst = worst.max(s.closest_point(&p).distance);
+                    // the sample belongs at (u, v_local) on the surface: refine from there (the whole
+                    // surface is searched only when that does not converge)
+                    worst = worst.max(s.closest_point_near(&p, u, v_local).distance);
                 }
             }
         }

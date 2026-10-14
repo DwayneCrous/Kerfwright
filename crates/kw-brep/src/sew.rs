@@ -477,13 +477,32 @@ impl Soup {
         scale: f64,
     ) -> Result<Vec<(FaceId, Origin)>, String> {
         let shell = scratch.add_shell(lump);
-        let mut vertices: Vec<(Point3<f64>, VertexId)> = Vec::new();
+        // a hash grid of the vertices made so far, so that finding one is not a search through all of them
+        let cell = (2.0 * vtol).max(1e-300);
+        let cell_of = |p: &Point3<f64>| {
+            [
+                (p.x / cell).floor() as i64,
+                (p.y / cell).floor() as i64,
+                (p.z / cell).floor() as i64,
+            ]
+        };
+        let mut vertices: HashMap<[i64; 3], Vec<(Point3<f64>, VertexId)>> = HashMap::new();
         let mut vertex = |s: &mut BRep, p: Point3<f64>| -> VertexId {
-            if let Some((_, v)) = vertices.iter().find(|(q, _)| (q - p).norm() <= vtol) {
-                return *v;
+            let c = cell_of(&p);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(list) = vertices.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
+                            if let Some((_, v)) = list.iter().find(|(q, _)| (q - p).norm() <= vtol)
+                            {
+                                return *v;
+                            }
+                        }
+                    }
+                }
             }
             let v = s.add_vertex(p);
-            vertices.push((p, v));
+            vertices.entry(c).or_default().push((p, v));
             v
         };
         let mut edge_ids: HashMap<usize, EdgeId> = HashMap::new();

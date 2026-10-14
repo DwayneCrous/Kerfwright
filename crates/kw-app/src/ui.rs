@@ -78,6 +78,13 @@ pub enum Pending {
     Quit,
 }
 
+/// The options asked for when an STL file is imported.
+pub struct MeshImportDialog {
+    pub preview: crate::exchange::MeshPreview,
+    pub units: kw_feature::mesh_body::MeshUnits,
+    pub y_up: bool,
+}
+
 pub enum Screen {
     Welcome,
     Project {
@@ -92,6 +99,8 @@ pub struct KerfwrightApp {
     recents_file: Option<PathBuf>,
     dialogs: Box<dyn Dialogs>,
     pub pending: Option<Pending>,
+    /// The STL file being imported, waiting for its units and axis (shown as a dialog).
+    pub mesh_import: Option<MeshImportDialog>,
     pub design: DesignWorkspace,
     pub ecad: EcadWorkspace,
     pub cam: CamWorkspace,
@@ -137,6 +146,7 @@ impl KerfwrightApp {
             recents_file,
             dialogs,
             pending: None,
+            mesh_import: None,
             design: DesignWorkspace::default(),
             themed: false,
             force_menu: None,
@@ -1286,7 +1296,7 @@ impl KerfwrightApp {
     pub fn import_file_dialog(&mut self) {
         let Some(path) = self
             .dialogs
-            .open_file("STEP / IGES", &["step", "stp", "iges", "igs"])
+            .open_file("STEP / IGES / STL", &["step", "stp", "iges", "igs", "stl"])
         else {
             return;
         };
@@ -1294,6 +1304,24 @@ impl KerfwrightApp {
     }
 
     pub fn import_path(&mut self, path: &Path) {
+        if crate::exchange::is_mesh_file(path) {
+            // a mesh file asks for its units and up axis first
+            if self.project().is_none() {
+                return;
+            }
+            match crate::exchange::MeshPreview::read(path) {
+                Ok(preview) => {
+                    self.mesh_import = Some(MeshImportDialog {
+                        preview,
+                        units: kw_feature::mesh_body::MeshUnits::Mm,
+                        y_up: false,
+                    });
+                    self.message = String::new();
+                }
+                Err(e) => self.message = format!("import failed: {e}"),
+            }
+            return;
+        }
         let Some(p) = self.project_mut() else {
             return;
         };
@@ -1301,6 +1329,63 @@ impl KerfwrightApp {
             Ok(m) => m,
             Err(e) => format!("import failed: {e}"),
         };
+    }
+
+    /// OK in the mesh import dialog: add the mesh body with the chosen units and axis.
+    pub fn confirm_mesh_import(&mut self) {
+        let Some(d) = self.mesh_import.take() else {
+            return;
+        };
+        let Some(p) = self.project_mut() else {
+            return;
+        };
+        self.message = match crate::exchange::import_mesh(p, &d.preview, d.units, d.y_up) {
+            Ok(m) => m,
+            Err(e) => format!("import failed: {e}"),
+        };
+    }
+
+    fn mesh_import_ui(&mut self, ctx: &egui::Context) {
+        use kw_feature::mesh_body::MeshUnits;
+        let Some(d) = self.mesh_import.as_mut() else {
+            return;
+        };
+        let (mut ok, mut cancel) = (false, false);
+        egui::Window::new("Import mesh")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&d.preview.source).strong());
+                ui.horizontal(|ui| {
+                    ui.label("The file is in");
+                    for u in MeshUnits::ALL {
+                        ui.selectable_value(&mut d.units, u, u.label());
+                    }
+                });
+                ui.checkbox(&mut d.y_up, "The file has y up (rotate it to z up)");
+                match d.preview.summary(d.units, d.y_up) {
+                    Ok(s) => ui.label(s),
+                    Err(e) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
+                };
+                ui.label(
+                    egui::RichText::new(
+                        "The mesh becomes a body you can move, scale, measure and export; \
+                         “Convert to solid” in the Bodies list makes a solid of it.",
+                    )
+                    .size(11.0)
+                    .weak(),
+                );
+                ui.horizontal(|ui| {
+                    ok = ui.button("Import").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if ok {
+            self.confirm_mesh_import();
+        } else if cancel {
+            self.mesh_import = None;
+        }
     }
 
     /// File ▸ Export: ask where to write the model's solid and write it.
@@ -1406,6 +1491,7 @@ impl KerfwrightApp {
             Screen::Project { .. } => self.project_ui(ui, rs),
         }
         self.pending_ui(ui.ctx());
+        self.mesh_import_ui(ui.ctx());
         if self.close_now {
             // the answer to “save before quitting?” was given: close, no second click on the button
             self.close_now = false;
@@ -1712,7 +1798,12 @@ impl KerfwrightApp {
         }
         let sketching = self.design.mode == crate::design::Mode::Sketching
             && self.workspace() == Some(Workspace::Design);
-        if (undo || redo) && !sketching {
+        // while the Form dialog is open Ctrl+Z steps through the cages made in it, not through the document
+        let form_open =
+            self.workspace() == Some(Workspace::Design) && self.design.form_dialog_open();
+        if (undo || redo) && form_open {
+            self.design.form_undo_redo(undo);
+        } else if (undo || redo) && !sketching {
             self.undo_redo(undo);
         }
         // ---- application bar
@@ -1735,7 +1826,7 @@ impl KerfwrightApp {
                     }
                     ui.separator();
                     if self.workspace().is_some() {
-                        if ui.button("Import STEP / IGES…").clicked() {
+                        if ui.button("Import STEP / IGES / STL…").clicked() {
                             self.import_file_dialog();
                             ui.close();
                         }

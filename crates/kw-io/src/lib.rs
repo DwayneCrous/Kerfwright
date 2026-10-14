@@ -9,7 +9,7 @@ mod stl;
 
 pub use gltf_out::{glb_bytes, gltf_json_and_bin, write_gltf_files, GltfOptions};
 pub use obj::{write_mtl, write_obj, ObjOptions};
-pub use stl::{write_stl_ascii, write_stl_binary};
+pub use stl::{read_stl, write_stl_ascii, write_stl_binary, StlError, StlSoup};
 
 use nalgebra::{Point3, Vector3};
 

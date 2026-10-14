@@ -205,3 +205,88 @@ fn check_gltf(
         assert!((amax[k].as_f64().unwrap() as f32 - hi[k]).abs() < 1e-5);
     }
 }
+
+fn soup_bounds(s: &StlSoup) -> ([f32; 3], [f32; 3]) {
+    bounds(
+        s.triangles
+            .iter()
+            .flatten()
+            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]),
+    )
+}
+
+#[test]
+fn our_own_stl_files_are_read_back() {
+    for (name, m) in meshes() {
+        let (elo, ehi) = mesh_bounds(&m, Axes::ZUp);
+        let mut bin = Vec::new();
+        write_stl_binary(&m, Axes::ZUp, name, &mut bin).unwrap();
+        let s = read_stl(&bin).unwrap();
+        assert!(s.binary, "{name}");
+        assert_eq!(s.triangles.len(), m.triangle_count(), "{name}");
+        let (lo, hi) = soup_bounds(&s);
+        assert!(close(lo, elo) && close(hi, ehi), "{name}");
+
+        let mut ascii = Vec::new();
+        write_stl_ascii(&m, Axes::ZUp, name, &mut ascii).unwrap();
+        let s = read_stl(&ascii).unwrap();
+        assert!(!s.binary, "{name}");
+        assert_eq!(s.triangles.len(), m.triangle_count(), "{name}");
+        assert_eq!(s.solids, vec![name.to_string()]);
+        let (lo, hi) = soup_bounds(&s);
+        assert!(close(lo, elo) && close(hi, ehi), "{name}");
+    }
+}
+
+#[test]
+fn a_binary_file_whose_header_says_solid_is_still_binary() {
+    let (_, m) = meshes().remove(0);
+    let mut bin = Vec::new();
+    write_stl_binary(&m, Axes::ZUp, "x", &mut bin).unwrap();
+    bin[..5].copy_from_slice(b"solid");
+    let s = read_stl(&bin).unwrap();
+    assert!(s.binary);
+    assert_eq!(s.triangles.len(), m.triangle_count());
+}
+
+#[test]
+fn an_ascii_file_with_several_solids_and_odd_spacing_is_read() {
+    let text = "  SOLID a\r\n facet normal 0 0 1\r\n outer loop\r\n vertex 0 0 0\r\n vertex 1 0 0\r\n vertex 0 1 0\r\n endloop\r\n endfacet\r\nendsolid a\r\nsolid b c\r\nfacet normal 0 0 0\r\nouter loop\r\nvertex 0 0 1e0\r\nvertex 1 0 1\r\nvertex 0 1 1.5E0\r\nendloop\r\nendfacet\r\nendsolid b c\r\n";
+    let s = read_stl(text.as_bytes()).unwrap();
+    assert_eq!(s.triangles.len(), 2);
+    assert_eq!(s.solids, vec!["a".to_string(), "b c".to_string()]);
+    assert_eq!(s.triangles[1][2], [0.0, 1.0, 1.5]);
+}
+
+#[test]
+fn files_that_are_not_stl_are_refused_with_a_reason() {
+    assert_eq!(read_stl(b""), Err(StlError::Empty));
+    let (_, m) = meshes().remove(0);
+    let mut bin = Vec::new();
+    write_stl_binary(&m, Axes::ZUp, "x", &mut bin).unwrap();
+    assert!(matches!(
+        read_stl(&bin[..bin.len() - 7]),
+        Err(StlError::Truncated { .. })
+    ));
+    assert!(matches!(
+        read_stl(b"this is a plain text file, not a mesh at all"),
+        Err(StlError::Syntax { .. })
+    ));
+    assert!(matches!(
+        read_stl(b"solid x\nfacet normal 0 0 1\nouter loop\nvertex 0 0 zero\n"),
+        Err(StlError::Syntax { line: 4, .. })
+    ));
+    assert!(matches!(
+        read_stl(b"solid x\nfacet normal 0 0 1\nvertex 0 0 0\nvertex 1 0 0\nendfacet\n"),
+        Err(StlError::Syntax { .. })
+    ));
+    assert_eq!(
+        read_stl(b"solid x\nendsolid x\n"),
+        Err(StlError::NoTriangles)
+    );
+    // a facet left open at the end of the file
+    assert!(matches!(
+        read_stl(b"solid x\nfacet normal 0 0 1\nvertex 0 0 0\n"),
+        Err(StlError::Syntax { .. })
+    ));
+}

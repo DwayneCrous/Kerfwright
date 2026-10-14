@@ -18,6 +18,8 @@ pub mod id;
 pub mod kwf;
 pub mod legacy_profile;
 pub mod legacy_regions;
+pub mod mesh_body;
+pub mod mesh_solid;
 pub mod namer;
 pub mod naming;
 pub mod ops;
@@ -25,6 +27,7 @@ pub mod profile;
 pub mod recipe;
 pub mod regions;
 pub mod spec;
+pub mod thread_geom;
 pub mod threads;
 pub mod tools;
 

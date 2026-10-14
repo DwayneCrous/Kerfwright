@@ -20,7 +20,9 @@
 mod finish;
 mod level;
 mod mesh;
+mod preview;
 
 pub use finish::{finish, FinishOptions, Finished, G1Report};
 pub use level::Level;
 pub use mesh::{Crease, SubdError, SubdMesh};
+pub use preview::{fast_mesh, levels_for, PreviewMesh};

@@ -32,7 +32,24 @@ struct FaceData {
     bbox: Aabb,
     /// Width (uv) of the band in which the boundary polygon and the true boundary may disagree.
     poly_err: f64,
+    /// Samples of a free-form surface over its uv box, taken on the first ray (see [`RayGrid`]).
+    grid: std::sync::OnceLock<Option<RayGrid>>,
 }
+
+/// A grid of points on a free-form surface, so that rays can be tested against its cells without
+/// evaluating the surface again for every ray.
+struct RayGrid {
+    u0: f64,
+    u1: f64,
+    v0: f64,
+    v1: f64,
+    pts: Vec<Point3<f64>>,
+    /// The largest distance between neighbouring samples.
+    spacing: f64,
+}
+
+/// Cells per direction of a [`RayGrid`].
+const RAY_GRID: usize = 40;
 
 /// Bounding-volume hierarchy over the face boxes of a body: point and ray queries visit only the faces
 /// whose boxes are hit, instead of every face.
@@ -220,6 +237,7 @@ impl SolidIndex {
                 uv_hi: p.uv_hi,
                 bbox: p.bbox,
                 poly_err: p.poly_err,
+                grid: std::sync::OnceLock::new(),
             });
         }
         let bvh = Bvh::build(&faces.iter().map(|f| f.bbox).collect::<Vec<_>>());
@@ -324,9 +342,59 @@ impl FaceData {
         )
     }
 
-    fn uv_of(&self, p: &Point3<f64>) -> UV {
+    /// The grid of a free-form surface (made on first use); `None` for an analytic one.
+    fn sample_grid(&self) -> Option<&RayGrid> {
+        if matches!(
+            self.surface,
+            SurfaceGeom::Plane(_)
+                | SurfaceGeom::Sphere(_)
+                | SurfaceGeom::Cylinder(_)
+                | SurfaceGeom::Cone(_)
+                | SurfaceGeom::Torus(_)
+        ) {
+            return None;
+        }
+        self.grid
+            .get_or_init(|| Some(build_ray_grid(&self.surface, (self.uv_lo, self.uv_hi))))
+            .as_ref()
+    }
+
+    /// The sample of the grid nearest to `p`: its distance and its surface parameters.
+    fn nearest_sample(g: &RayGrid, p: &Point3<f64>) -> (f64, UV) {
+        let n = RAY_GRID;
+        let (mut best, mut at) = (f64::INFINITY, 0usize);
+        for (k, q) in g.pts.iter().enumerate() {
+            let d = (q - p).norm_squared();
+            if d < best {
+                best = d;
+                at = k;
+            }
+        }
+        let (i, j) = (at / (n + 1), at % (n + 1));
+        (
+            best.sqrt(),
+            (
+                g.u0 + (g.u1 - g.u0) * i as f64 / n as f64,
+                g.v0 + (g.v1 - g.v0) * j as f64 / n as f64,
+            ),
+        )
+    }
+
+    /// The parameters and distance of the point of the surface nearest to `p`. A B-spline surface is
+    /// searched from the nearest sample of the grid, not from scratch.
+    fn project(&self, p: &Point3<f64>) -> (UV, f64) {
+        if let (SurfaceGeom::Nurbs(ns), Some(g)) = (&self.surface, self.sample_grid()) {
+            let (_, (u0, v0)) = Self::nearest_sample(g, p);
+            let r = ns.closest_point_seeded(p, u0, v0);
+            return ((r.u, r.v), r.distance);
+        }
         let r = surface_param_of(&self.surface, p, Some(self.centre()));
-        unwrap_uv(&self.surface, (r.u, r.v), self.centre())
+        ((r.u, r.v), r.distance)
+    }
+
+    fn uv_of(&self, p: &Point3<f64>) -> UV {
+        let (uv, _) = self.project(p);
+        unwrap_uv(&self.surface, uv, self.centre())
     }
 
     /// Is the point within `tol` of this face (surface distance and inside the trim)?
@@ -334,11 +402,17 @@ impl FaceData {
         if !self.bbox.contains(p, tol) {
             return false;
         }
-        let r = surface_param_of(&self.surface, p, Some(self.centre()));
-        if r.distance > tol {
+        // far from every sample of a free-form surface: not near it
+        if let Some(g) = self.sample_grid() {
+            if Self::nearest_sample(g, p).0 > 3.0 * g.spacing + tol {
+                return false;
+            }
+        }
+        let (uvr, distance) = self.project(p);
+        if distance > tol {
             return false;
         }
-        let uv = unwrap_uv(&self.surface, (r.u, r.v), self.centre());
+        let uv = unwrap_uv(&self.surface, uvr, self.centre());
         if self.index.contains(uv) {
             return true;
         }
@@ -348,9 +422,20 @@ impl FaceData {
         self.index.near(uv, tol / scale)
     }
 
-    fn make_hit(&self, o: &Point3<f64>, d: &Vector3<f64>, t: f64, tol: f64) -> Option<Hit> {
+    fn make_hit(
+        &self,
+        o: &Point3<f64>,
+        d: &Vector3<f64>,
+        t: f64,
+        tol: f64,
+        hint: Option<UV>,
+    ) -> Option<Hit> {
         let p = o + d * t;
-        let uv = self.uv_of(&p);
+        // the ray solve of a free-form surface already knows where it hit
+        let uv = match hint {
+            Some(h) => unwrap_uv(&self.surface, h, self.centre()),
+            None => self.uv_of(&p),
+        };
         let (su, sv) = self.surface.derivatives(uv.0, uv.1);
         let scale = su.norm().max(sv.norm()).max(1e-12);
         let inside = self.index.contains(uv);
@@ -376,17 +461,35 @@ impl FaceData {
         if !ray_hits_box(&self.bbox, o, d, t_max) {
             return Vec::new();
         }
-        let roots = ray_surface(
-            &self.surface,
-            o,
-            d,
-            t_max,
-            &self.bbox,
-            (self.uv_lo, self.uv_hi),
+        let analytic = matches!(
+            self.surface,
+            SurfaceGeom::Plane(_)
+                | SurfaceGeom::Sphere(_)
+                | SurfaceGeom::Cylinder(_)
+                | SurfaceGeom::Cone(_)
+                | SurfaceGeom::Torus(_)
         );
+        let roots: Vec<(f64, Option<UV>)> = if analytic {
+            ray_surface(
+                &self.surface,
+                o,
+                d,
+                t_max,
+                &self.bbox,
+                (self.uv_lo, self.uv_hi),
+            )
+            .into_iter()
+            .map(|t| (t, None))
+            .collect()
+        } else {
+            let grid = self.sample_grid();
+            let mut r = ray_parametric(&self.surface, o, d, t_max, (self.uv_lo, self.uv_hi), grid);
+            r.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            r.into_iter().map(|(t, uv)| (t, Some(uv))).collect()
+        };
         roots
             .into_iter()
-            .filter_map(|t| self.make_hit(o, d, t, tol))
+            .filter_map(|(t, hint)| self.make_hit(o, d, t, tol, hint))
             .collect()
     }
 }
@@ -530,7 +633,10 @@ fn implicit_or_generic(
             }
             out
         }
-        _ => ray_parametric(s, o, d, t_max, uvbox),
+        _ => ray_parametric(s, o, d, t_max, uvbox, None)
+            .into_iter()
+            .map(|r| r.0)
+            .collect(),
     }
 }
 
@@ -546,27 +652,66 @@ fn box_interval(b: &Aabb, o: &Point3<f64>, d: &Vector3<f64>, t_max: f64) -> (f64
     (t0, t1.max(t0))
 }
 
+/// The parameter window the ray search covers: the trim box, widened to a whole period in a periodic
+/// direction that the trim mostly spans.
+fn search_window(s: &SurfaceGeom, uvbox: (UV, UV)) -> (f64, f64, f64, f64) {
+    let (lo, hi) = uvbox;
+    let (u0, u1) = match s.period_u() {
+        Some(p) if hi.0 - lo.0 > 0.5 * p => (lo.0, lo.0 + p.max(hi.0 - lo.0)),
+        _ => (lo.0, hi.0),
+    };
+    let (v0, v1) = match s.period_v() {
+        Some(p) if hi.1 - lo.1 > 0.5 * p => (lo.1, lo.1 + p.max(hi.1 - lo.1)),
+        _ => (lo.1, hi.1),
+    };
+    (u0, u1, v0, v1)
+}
+
+fn build_ray_grid(s: &SurfaceGeom, uvbox: (UV, UV)) -> RayGrid {
+    let (u0, u1, v0, v1) = search_window(s, uvbox);
+    let n = RAY_GRID;
+    let mut pts = Vec::with_capacity((n + 1) * (n + 1));
+    for i in 0..=n {
+        let u = u0 + (u1 - u0) * i as f64 / n as f64;
+        for j in 0..=n {
+            let v = v0 + (v1 - v0) * j as f64 / n as f64;
+            pts.push(s.point_at(u, v));
+        }
+    }
+    let mut spacing = 0.0f64;
+    for i in 0..=n {
+        for j in 0..=n {
+            let p = pts[i * (n + 1) + j];
+            if i < n {
+                spacing = spacing.max((pts[(i + 1) * (n + 1) + j] - p).norm());
+            }
+            if j < n {
+                spacing = spacing.max((pts[i * (n + 1) + j + 1] - p).norm());
+            }
+        }
+    }
+    RayGrid {
+        u0,
+        u1,
+        v0,
+        v1,
+        pts,
+        spacing,
+    }
+}
+
 /// Generic parametric surfaces: the ray is the intersection of two planes through it; find the
-/// zeros of the 2-vector `((S − o)·n₁, (S − o)·n₂)` by cell seeding + Newton.
+/// zeros of the 2-vector `((S − o)·n₁, (S − o)·n₂)` by cell seeding + Newton. Returns the ray parameter and
+/// the surface parameters of each hit. With a `grid` the cell corners are not evaluated again.
 fn ray_parametric(
     s: &SurfaceGeom,
     o: &Point3<f64>,
     d: &Vector3<f64>,
     t_max: f64,
     uvbox: (UV, UV),
-) -> Vec<f64> {
-    let (lo, hi) = uvbox;
-    let pu = s.period_u();
-    let pv = s.period_v();
-    // periodic directions: search a full period if the trim spans most of it
-    let (u0, u1) = match pu {
-        Some(p) if hi.0 - lo.0 > 0.5 * p => (lo.0, lo.0 + p.max(hi.0 - lo.0)),
-        _ => (lo.0, hi.0),
-    };
-    let (v0, v1) = match pv {
-        Some(p) if hi.1 - lo.1 > 0.5 * p => (lo.1, lo.1 + p.max(hi.1 - lo.1)),
-        _ => (lo.1, hi.1),
-    };
+    grid: Option<&RayGrid>,
+) -> Vec<(f64, UV)> {
+    let (u0, u1, v0, v1) = search_window(s, uvbox);
     let helper = if d.x.abs() < 0.9 {
         Vector3::x()
     } else {
@@ -578,8 +723,28 @@ fn ray_parametric(
         let r = s.point_at(u, v) - o;
         (r.dot(&n1), r.dot(&n2))
     };
-    let n = 40usize;
-    let mut found: Vec<f64> = Vec::new();
+    let n = RAY_GRID;
+    // the two plane functions at the grid nodes
+    let node = |i: usize, j: usize| -> (f64, f64) {
+        match grid {
+            Some(g) => {
+                let r = g.pts[i * (n + 1) + j] - o;
+                (r.dot(&n1), r.dot(&n2))
+            }
+            None => f(
+                u0 + (u1 - u0) * i as f64 / n as f64,
+                v0 + (v1 - v0) * j as f64 / n as f64,
+            ),
+        }
+    };
+    let mut values: Vec<(f64, f64)> = Vec::with_capacity((n + 1) * (n + 1));
+    for i in 0..=n {
+        for j in 0..=n {
+            values.push(node(i, j));
+        }
+    }
+    let at = |i: usize, j: usize| values[i * (n + 1) + j];
+    let mut found: Vec<(f64, UV)> = Vec::new();
     let sgn = |x: f64| x > 0.0;
     for i in 0..n {
         for j in 0..n {
@@ -591,7 +756,7 @@ fn ray_parametric(
                 v0 + (v1 - v0) * j as f64 / n as f64,
                 v0 + (v1 - v0) * (j + 1) as f64 / n as f64,
             );
-            let c = [f(ua, va), f(ub, va), f(ub, vb), f(ua, vb)];
+            let c = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
             let ch1 = c.iter().any(|x| sgn(x.0)) && c.iter().any(|x| !sgn(x.0));
             let ch2 = c.iter().any(|x| sgn(x.1)) && c.iter().any(|x| !sgn(x.1));
             if !(ch1 && ch2) {
@@ -627,9 +792,9 @@ fn ray_parametric(
                 if r.0.hypot(r.1) < 1e-9
                     && t > 0.0
                     && t <= t_max
-                    && !found.iter().any(|x| (x - t).abs() < 1e-7)
+                    && !found.iter().any(|x| (x.0 - t).abs() < 1e-7)
                 {
-                    found.push(t);
+                    found.push((t, (u, v)));
                 }
             }
         }

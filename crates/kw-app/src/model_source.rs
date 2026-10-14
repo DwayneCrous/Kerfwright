@@ -70,7 +70,15 @@ impl ModelSource {
     ) -> Result<ModelSource, String> {
         let doc = project.document();
         let ev = project.evaluation();
-        let bodies = Bodies::new(&doc, &ev, hidden).ok_or("the design has no solid body")?;
+        let Some(bodies) = Bodies::new(&doc, &ev, hidden) else {
+            return Err(
+                if crate::bodies::mesh_bodies(&doc, &ev, hidden).is_empty() {
+                    "the design has no solid body".into()
+                } else {
+                    "the design has only mesh bodies: right-click one in Bodies and choose Convert to solid".into()
+                },
+            );
+        };
         let mut out = Vec::new();
         for b in &bodies.list {
             if b.output.is_sheet() {

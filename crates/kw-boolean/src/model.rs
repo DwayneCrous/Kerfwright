@@ -42,6 +42,8 @@ pub struct FaceRec {
     pub uv_hi: UV,
     pub bbox: Aabb,
     pub involved: bool,
+    /// Samples of a B-spline surface over the face's parameter box, made when first needed.
+    pub grid: std::sync::OnceLock<Option<kw_nurbs::SurfaceGrid>>,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +317,7 @@ impl Work {
                     uv_hi,
                     bbox,
                     involved: false,
+                    grid: std::sync::OnceLock::new(),
                 })
             })
             .collect();
@@ -443,6 +446,25 @@ impl FaceRec {
 
     /// Parameters of `p` on this face's surface, on the branch nearest the face.
     pub fn uv_of(&self, p: &Point3<f64>) -> UV {
+        // a B-spline surface is searched from the nearest of a grid of samples: a search of the whole
+        // surface costs milliseconds on a surface with many spans, and a cut asks for thousands of points
+        if let SurfaceGeom::Nurbs(ns) = &self.surface {
+            let grid = self.grid.get_or_init(|| {
+                let w = |lo: f64, hi: f64| {
+                    let m = 0.05 * (hi - lo).max(1e-6);
+                    (lo - m, hi + m)
+                };
+                Some(ns.sample_grid(
+                    w(self.uv_lo.0, self.uv_hi.0),
+                    w(self.uv_lo.1, self.uv_hi.1),
+                    40,
+                ))
+            });
+            if let Some(g) = grid {
+                let r = ns.project_in_grid(g, p);
+                return kw_brep::uvgeom::unwrap_uv(&self.surface, (r.u, r.v), self.centre());
+            }
+        }
         let r = kw_nurbs::proj::surface_param_of(&self.surface, p, Some(self.centre()));
         kw_brep::uvgeom::unwrap_uv(&self.surface, (r.u, r.v), self.centre())
     }

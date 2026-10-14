@@ -181,6 +181,9 @@ fn hide_seams(brep: &BRep, t: &mut Tessellation) {
         .retain(|(ei, _, _)| keys.get(*ei as usize).is_none_or(|e| !is_seam(brep, *e)));
 }
 
+/// Pick-table object numbers from here up are mesh bodies, not tessellations.
+const MESH_OBJECT: u32 = 1 << 30;
+
 /// The model as drawn: tessellations of the bodies, their scene, and the lookup from pick ids to B-rep ids.
 pub struct ModelScene {
     pub scene: Scene,
@@ -860,6 +863,177 @@ impl ModelScene {
             }
         }
         out
+    }
+
+    /// Add triangle meshes (world coordinates) to the scene, each in its colour: smooth shaded where the
+    /// surface turns by less than 30°, with a line along every sharper edge and along open boundaries. The
+    /// body index of a mesh (its place in `meshes`) can be found again from a ray with
+    /// [`ModelScene::mesh_at`]; the GPU pick buffer does not see meshes.
+    pub fn add_meshes(&mut self, meshes: &[(&kw_mesh3d::SurfaceMesh, [u8; 3])]) {
+        use kw_viewer::scene::{PickTarget, Segment, Vertex};
+        const CREASE: f64 = 0.866_025_403_784_438_6; // cos 30°
+        if meshes.iter().all(|(m, _)| m.tris.is_empty()) {
+            return;
+        }
+        // bounds of the meshes, to keep them in view
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for (m, _) in meshes {
+            let (a, b) = m.bounds();
+            for k in 0..3 {
+                lo[k] = lo[k].min(a[k]);
+                hi[k] = hi[k].max(b[k]);
+            }
+        }
+        if self.scene.vertices.is_empty() {
+            self.scene.center = nalgebra::Vector3::new(
+                (lo[0] + hi[0]) / 2.0,
+                (lo[1] + hi[1]) / 2.0,
+                (lo[2] + hi[2]) / 2.0,
+            );
+            self.scene.radius = 0.0;
+        }
+        let c = self.scene.center;
+        for x in [lo[0], hi[0]] {
+            for y in [lo[1], hi[1]] {
+                for z in [lo[2], hi[2]] {
+                    let d = nalgebra::Vector3::new(x, y, z) - c;
+                    self.scene.radius = self.scene.radius.max(d.norm());
+                }
+            }
+        }
+        for (bi, (m, colour)) in meshes.iter().enumerate() {
+            let pick_id = self.scene.pick.len() as u32 + 1;
+            self.scene.pick.push(PickTarget::Face {
+                object: MESH_OBJECT + bi as u32,
+                face: 0,
+            });
+            let node = |v: u32| {
+                let p = m.nodes[v as usize];
+                nalgebra::Vector3::new(p[0], p[1], p[2])
+            };
+            // triangle normals (area weighted) and the triangles around each node
+            let tri_n: Vec<nalgebra::Vector3<f64>> = m
+                .tris
+                .iter()
+                .map(|t| (node(t[1]) - node(t[0])).cross(&(node(t[2]) - node(t[0]))))
+                .collect();
+            let mut around: Vec<Vec<u32>> = vec![Vec::new(); m.nodes.len()];
+            for (k, t) in m.tris.iter().enumerate() {
+                for v in t {
+                    around[*v as usize].push(k as u32);
+                }
+            }
+            let base = self.scene.vertices.len() as u32;
+            for (k, t) in m.tris.iter().enumerate() {
+                let own = tri_n[k]
+                    .try_normalize(0.0)
+                    .unwrap_or_else(nalgebra::Vector3::z);
+                for v in t {
+                    let mut n = nalgebra::Vector3::zeros();
+                    for &j in &around[*v as usize] {
+                        let nj = tri_n[j as usize];
+                        if nj.dot(&own) > CREASE * nj.norm() {
+                            n += nj;
+                        }
+                    }
+                    let n = n.try_normalize(0.0).unwrap_or(own);
+                    let p = node(*v) - c;
+                    self.scene.vertices.push(Vertex {
+                        pos: [p.x as f32, p.y as f32, p.z as f32],
+                        normal: [n.x as f32, n.y as f32, n.z as f32],
+                        id: pick_id,
+                        color: [colour[0], colour[1], colour[2], 255],
+                    });
+                }
+                let i = base + 3 * k as u32;
+                self.scene.indices.extend_from_slice(&[i, i + 1, i + 2]);
+            }
+            // sharp and open edges
+            let mut first: std::collections::HashMap<(u32, u32), (u32, bool)> =
+                std::collections::HashMap::with_capacity(m.tris.len() * 2);
+            let mut lines: Vec<(u32, u32)> = Vec::new();
+            for (k, t) in m.tris.iter().enumerate() {
+                for i in 0..3 {
+                    let (a, b) = (t[i], t[(i + 1) % 3]);
+                    let key = (a.min(b), a.max(b));
+                    match first.get_mut(&key) {
+                        None => {
+                            first.insert(key, (k as u32, false));
+                        }
+                        Some((other, seen_twice)) => {
+                            if *seen_twice {
+                                // a third triangle on the edge: draw it
+                                lines.push(key);
+                                continue;
+                            }
+                            *seen_twice = true;
+                            let (na, nb) = (tri_n[*other as usize], tri_n[k]);
+                            if na.dot(&nb) < CREASE * na.norm() * nb.norm() {
+                                lines.push(key);
+                            }
+                        }
+                    }
+                }
+            }
+            for (key, (_, twice)) in &first {
+                if !twice {
+                    lines.push(*key);
+                }
+            }
+            lines.sort_unstable();
+            lines.dedup();
+            for (a, b) in lines {
+                let (pa, pb) = (node(a) - c, node(b) - c);
+                self.scene.segments.push(Segment {
+                    p0: [pa.x as f32, pa.y as f32, pa.z as f32],
+                    p1: [pb.x as f32, pb.y as f32, pb.z as f32],
+                    id: u32::MAX,
+                });
+            }
+        }
+    }
+
+    /// Keep the same geometry but express it about another centre (so that a changing preview does not move
+    /// the picture: the camera looks at a point of the scene frame).
+    pub fn recenter(&mut self, c: nalgebra::Vector3<f64>) {
+        let d = self.scene.center - c;
+        if d.norm() == 0.0 {
+            return;
+        }
+        let (dx, dy, dz) = (d.x as f32, d.y as f32, d.z as f32);
+        for v in &mut self.scene.vertices {
+            v.pos = [v.pos[0] + dx, v.pos[1] + dy, v.pos[2] + dz];
+        }
+        for s in &mut self.scene.segments {
+            for k in 0..3 {
+                s.p0[k] += [dx, dy, dz][k];
+                s.p1[k] += [dx, dy, dz][k];
+            }
+        }
+        for (a, b) in &mut self.free_edges {
+            for k in 0..3 {
+                a[k] += d[k];
+                b[k] += d[k];
+            }
+        }
+        self.scene.center = c;
+        self.scene.radius += d.norm();
+    }
+
+    /// The mesh (its index in the list given to [`ModelScene::add_meshes`]) a ray in the scene frame hits first,
+    /// unless a face of a solid is in front of it.
+    pub fn mesh_at(
+        &self,
+        origin: nalgebra::Vector3<f64>,
+        dir: nalgebra::Vector3<f64>,
+    ) -> Option<usize> {
+        let hit = self.scene.raycast(origin, dir)?;
+        match self.scene.pick.get(hit.id.checked_sub(1)? as usize)? {
+            kw_viewer::scene::PickTarget::Face { object, .. } if *object >= MESH_OBJECT => {
+                Some((*object - MESH_OBJECT) as usize)
+            }
+            _ => None,
+        }
     }
 
     /// Add line segments (world coordinates) to the scene, drawn like edges and not pickable.

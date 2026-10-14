@@ -65,8 +65,25 @@ impl Hasher128 {
     }
 }
 
+thread_local! {
+    static HASHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Is this thread serialising for [`hash_serde`]? A large payload (an imported mesh) then writes only its own
+/// content hash, so that hashing the recipe, which happens every frame, does not walk megabytes.
+pub fn hashing() -> bool {
+    HASHING.with(|h| h.get())
+}
+
 /// Hash of anything serialisable, through its canonical CBOR encoding.
 pub fn hash_serde<T: Serialize>(v: &T) -> u128 {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HASHING.with(|h| h.set(self.0));
+        }
+    }
+    let _reset = Reset(HASHING.with(|h| h.replace(true)));
     let mut buf = Vec::with_capacity(256);
     let _ = ciborium::into_writer(v, &mut buf);
     let mut h = Hasher128::new();

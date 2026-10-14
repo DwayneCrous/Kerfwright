@@ -714,13 +714,19 @@ fn arrange_lumps(
     lump0: kw_brep::LumpId,
     shells: &[ShellId],
 ) -> Result<f64, BooleanError> {
-    let vols: Vec<f64> = shells
-        .iter()
-        .map(|s| {
-            rep.shell_volume(*s)
-                .ok_or_else(|| BooleanError::Invalid("shell volume".into()))
-        })
-        .collect::<Result<_, _>>()?;
+    // with one shell there is nothing to tell apart (a lone shell is the outer one, and the sampling check of
+    // the caller catches an inverted result); the volume integral of a trimmed free-form face is dear
+    let vols: Vec<f64> = if shells.len() == 1 {
+        vec![1.0]
+    } else {
+        shells
+            .iter()
+            .map(|s| {
+                rep.shell_volume(*s)
+                    .ok_or_else(|| BooleanError::Invalid("shell volume".into()))
+            })
+            .collect::<Result<_, _>>()?
+    };
     let outer: Vec<usize> = (0..shells.len()).filter(|&i| vols[i] > 0.0).collect();
     let voids: Vec<usize> = (0..shells.len()).filter(|&i| vols[i] < 0.0).collect();
     if outer.is_empty() {

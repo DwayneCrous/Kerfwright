@@ -4,7 +4,7 @@
 use crate::{cross, dot, norm, sub, P3};
 use std::collections::HashMap;
 
-/// A closed 2-manifold triangle mesh, counter-clockwise seen from outside, with a tag per triangle (the
+/// A triangle mesh (closed and 2-manifold for solids; imported meshes may be open), counter-clockwise seen from outside, with a tag per triangle (the
 /// identifier of the geometry face it approximates).
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceMesh {
@@ -37,6 +37,209 @@ impl SurfaceMesh {
             out.tags.push(mesh.tri_face.get(k).copied().unwrap_or(0));
         }
         out
+    }
+
+    /// Build from a triangle soup: corners closer than `tol` become one node (a hash grid, so the node order
+    /// follows the first appearance in `tris` and is the same on every run), triangles that collapse or have
+    /// no area are dropped and counted in the second result.
+    pub fn from_soup(tris: &[[P3; 3]], tol: f64) -> (SurfaceMesh, usize) {
+        let cell = tol.max(1e-300) * 2.0;
+        let key = |p: &P3| {
+            [
+                (p[0] / cell).floor() as i64,
+                (p[1] / cell).floor() as i64,
+                (p[2] / cell).floor() as i64,
+            ]
+        };
+        let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+        let mut out = SurfaceMesh::default();
+        let mut dropped = 0;
+        for tri in tris {
+            let mut t = [0u32; 3];
+            for (i, p) in tri.iter().enumerate() {
+                let k = key(p);
+                let mut found = None;
+                'search: for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            if let Some(list) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
+                                for &n in list {
+                                    if norm(sub(out.nodes[n as usize], *p)) <= tol {
+                                        found = Some(n);
+                                        break 'search;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                t[i] = found.unwrap_or_else(|| {
+                    out.nodes.push(*p);
+                    let n = (out.nodes.len() - 1) as u32;
+                    grid.entry(k).or_default().push(n);
+                    n
+                });
+            }
+            let (a, b, c) = (
+                out.nodes[t[0] as usize],
+                out.nodes[t[1] as usize],
+                out.nodes[t[2] as usize],
+            );
+            if t[0] == t[1]
+                || t[1] == t[2]
+                || t[0] == t[2]
+                || norm(cross(sub(b, a), sub(c, a))) <= 1e-12 * tol.max(1e-300)
+            {
+                dropped += 1;
+                continue;
+            }
+            out.tris.push(t);
+            out.tags.push(0);
+        }
+        // nodes that only the dropped triangles used
+        let mut used = vec![false; out.nodes.len()];
+        for t in &out.tris {
+            for &v in t {
+                used[v as usize] = true;
+            }
+        }
+        if used.iter().any(|u| !u) {
+            let mut map = vec![u32::MAX; out.nodes.len()];
+            let mut nodes = Vec::new();
+            for (i, p) in out.nodes.iter().enumerate() {
+                if used[i] {
+                    map[i] = nodes.len() as u32;
+                    nodes.push(*p);
+                }
+            }
+            for t in out.tris.iter_mut() {
+                for v in t.iter_mut() {
+                    *v = map[*v as usize];
+                }
+            }
+            out.nodes = nodes;
+        }
+        (out, dropped)
+    }
+
+    /// Make the winding of neighbouring triangles agree (flooding from the lowest-numbered triangle of each
+    /// connected piece) and turn every piece with a negative volume inside out. Returns how many triangles
+    /// were flipped. Triangles on a non-manifold edge are left as they are.
+    pub fn orient(&mut self) -> usize {
+        let n = self.tris.len();
+        let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        for (k, t) in self.tris.iter().enumerate() {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                edges
+                    .entry((a.min(b), a.max(b)))
+                    .or_default()
+                    .push(k as u32);
+            }
+        }
+        let mut flip = vec![false; n];
+        let mut seen = vec![false; n];
+        let mut flipped = 0;
+        for start in 0..n {
+            if seen[start] {
+                continue;
+            }
+            let mut piece = vec![start as u32];
+            seen[start] = true;
+            let mut head = 0;
+            while head < piece.len() {
+                let k = piece[head] as usize;
+                head += 1;
+                let t = self.tris[k];
+                for i in 0..3 {
+                    let (a, b) = (t[i], t[(i + 1) % 3]);
+                    let list = &edges[&(a.min(b), a.max(b))];
+                    if list.len() != 2 {
+                        continue;
+                    }
+                    let o = if list[0] as usize == k {
+                        list[1]
+                    } else {
+                        list[0]
+                    } as usize;
+                    if seen[o] {
+                        continue;
+                    }
+                    seen[o] = true;
+                    // the neighbour must run the shared edge the other way (taking flips into account)
+                    let u = self.tris[o];
+                    let same = (0..3).any(|j| u[j] == a && u[(j + 1) % 3] == b);
+                    // k runs a→b unless it is flipped; o has to run the other way
+                    flip[o] = if flip[k] { !same } else { same };
+                    piece.push(o as u32);
+                }
+            }
+            let vol: f64 = piece
+                .iter()
+                .map(|&k| {
+                    let t = self.tris[k as usize];
+                    let t = if flip[k as usize] {
+                        [t[0], t[2], t[1]]
+                    } else {
+                        t
+                    };
+                    dot(
+                        self.nodes[t[0] as usize],
+                        cross(self.nodes[t[1] as usize], self.nodes[t[2] as usize]),
+                    ) / 6.0
+                })
+                .sum();
+            if vol < 0.0 {
+                for &k in &piece {
+                    flip[k as usize] = !flip[k as usize];
+                }
+            }
+        }
+        for (k, f) in flip.iter().enumerate() {
+            if *f {
+                self.tris[k].swap(1, 2);
+                flipped += 1;
+            }
+        }
+        flipped
+    }
+
+    /// Counts that say whether the mesh is a closed solid.
+    pub fn stats(&self) -> MeshStats {
+        let mut edges: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+        for t in &self.tris {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                let e = edges.entry((a.min(b), a.max(b))).or_default();
+                if a < b {
+                    e.0 += 1;
+                } else {
+                    e.1 += 1;
+                }
+            }
+        }
+        let (mut open, mut non_manifold, mut inconsistent) = (0, 0, 0);
+        for &(f, r) in edges.values() {
+            match (f, r) {
+                (1, 1) => {}
+                (1, 0) | (0, 1) => open += 1,
+                (2, 0) | (0, 2) => inconsistent += 1,
+                _ => non_manifold += 1,
+            }
+        }
+        MeshStats {
+            triangles: self.tris.len(),
+            vertices: self.nodes.len(),
+            open_edges: open,
+            non_manifold_edges: non_manifold,
+            inconsistent_edges: inconsistent,
+            watertight: open == 0
+                && non_manifold == 0
+                && inconsistent == 0
+                && !self.tris.is_empty(),
+            volume: self.volume(),
+            area: self.area(),
+        }
     }
 
     /// Signed volume enclosed (positive for outward orientation).
@@ -451,6 +654,99 @@ fn apex(t: [u32; 3], a: u32, b: u32) -> u32 {
 mod tests {
     use super::*;
 
+    fn soup_of(m: &SurfaceMesh) -> Vec<[P3; 3]> {
+        m.tris
+            .iter()
+            .map(|t| {
+                [
+                    m.nodes[t[0] as usize],
+                    m.nodes[t[1] as usize],
+                    m.nodes[t[2] as usize],
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_soup_is_welded_and_degenerate_triangles_are_dropped() {
+        let b = SurfaceMesh::cuboid(2.0, 3.0, 4.0);
+        let mut soup = soup_of(&b);
+        // jitter below the tolerance
+        for (i, t) in soup.iter_mut().enumerate() {
+            for p in t.iter_mut() {
+                p[0] += 1e-9 * (i % 3) as f64;
+            }
+        }
+        // a sliver and a repeated corner
+        soup.push([[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        soup.push([[5.0; 3], [5.0; 3], [6.0, 5.0, 5.0]]);
+        let (m, dropped) = SurfaceMesh::from_soup(&soup, 1e-6);
+        assert_eq!(dropped, 2);
+        assert_eq!((m.nodes.len(), m.tris.len()), (8, 12));
+        let st = m.stats();
+        assert!(st.watertight, "{st:?}");
+        assert!((st.volume - 24.0).abs() < 1e-6);
+        // the order of the nodes is the order of first appearance, run after run
+        let (again, _) = SurfaceMesh::from_soup(&soup, 1e-6);
+        assert_eq!(m.nodes, again.nodes);
+        assert_eq!(m.tris, again.tris);
+    }
+
+    #[test]
+    fn orient_makes_mixed_and_inverted_windings_outward() {
+        let b = SurfaceMesh::cuboid(2.0, 3.0, 4.0);
+        // every triangle reversed: inside out
+        let mut inv = b.clone();
+        for t in inv.tris.iter_mut() {
+            t.swap(1, 2);
+        }
+        assert!(inv.stats().volume < 0.0);
+        assert_eq!(inv.orient(), 12);
+        assert!((inv.volume() - 24.0).abs() < 1e-9 && inv.stats().watertight);
+        // some triangles reversed
+        let mut mixed = b.clone();
+        for k in [0, 3, 4, 9] {
+            mixed.tris[k].swap(1, 2);
+        }
+        assert!(!mixed.stats().watertight);
+        mixed.orient();
+        assert!((mixed.volume() - 24.0).abs() < 1e-9 && mixed.stats().watertight);
+        // two separate pieces, one of them inside out
+        let mut two = b.clone();
+        let n = two.nodes.len() as u32;
+        for p in &b.nodes {
+            two.nodes.push([p[0] + 10.0, p[1], p[2]]);
+        }
+        for t in &b.tris {
+            two.tris.push([t[0] + n, t[2] + n, t[1] + n]);
+            two.tags.push(0);
+        }
+        two.orient();
+        assert!((two.volume() - 48.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stats_tell_open_and_non_manifold_meshes_apart() {
+        let b = SurfaceMesh::cuboid(1.0, 1.0, 1.0);
+        let st = b.stats();
+        assert!(st.watertight);
+        assert_eq!((st.open_edges, st.non_manifold_edges), (0, 0));
+        let mut open = b.clone();
+        open.tris.pop();
+        open.tags.pop();
+        let st = open.stats();
+        assert!(!st.watertight);
+        assert_eq!(st.open_edges, 3);
+        // a third triangle on one edge
+        let mut fin = b.clone();
+        fin.nodes.push([0.5, 0.5, 5.0]);
+        let (a, c) = (fin.tris[0][0], fin.tris[0][1]);
+        fin.tris.push([a, c, 8]);
+        fin.tags.push(0);
+        let st = fin.stats();
+        assert!(st.non_manifold_edges >= 1 && !st.watertight);
+    }
+
     #[test]
     fn builders_are_closed_and_outward() {
         let b = SurfaceMesh::cuboid(2.0, 3.0, 4.0);
@@ -500,4 +796,21 @@ mod tests {
         out.check_closed().unwrap();
         assert!((out.volume() - 1.0).abs() < 1e-12);
     }
+}
+
+/// What [`SurfaceMesh::stats`] counts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshStats {
+    pub triangles: usize,
+    pub vertices: usize,
+    /// Edges used by one triangle only.
+    pub open_edges: usize,
+    /// Edges used by more than two triangles.
+    pub non_manifold_edges: usize,
+    /// Edges two triangles run in the same direction (a flipped neighbour).
+    pub inconsistent_edges: usize,
+    /// Every edge has exactly two triangles that run it in opposite directions.
+    pub watertight: bool,
+    pub volume: f64,
+    pub area: f64,
 }

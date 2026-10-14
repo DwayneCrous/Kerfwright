@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Bumped when a kernel change can alter results, so that stale caches are never trusted.
-pub const KERNEL_VERSION: u64 = 4;
+pub const KERNEL_VERSION: u64 = 5;
 
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);

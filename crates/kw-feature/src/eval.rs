@@ -96,6 +96,8 @@ pub enum Product {
     Datum(Frame3),
     Sketch(Arc<SketchProduct>),
     Solid(SolidProduct),
+    /// A triangle mesh body (an imported STL): not a B-rep, so most solid features refuse it.
+    Mesh(Arc<kw_mesh3d::SurfaceMesh>),
 }
 
 /// A reference that did not resolve by its own name but was followed (by lineage or geometry).
@@ -189,6 +191,19 @@ impl EvalOutput {
             names_hash,
             output_hash: combine(2, geom, names_hash),
             notes,
+        }
+    }
+
+    pub fn mesh_body(mesh: kw_mesh3d::SurfaceMesh, notes: Vec<Resolution>) -> EvalOutput {
+        let geom = crate::mesh_body::mesh_hash(&mesh);
+        EvalOutput::plain(Product::Mesh(Arc::new(mesh)), geom, notes)
+    }
+
+    /// The triangle mesh, if this output is a mesh body.
+    pub fn mesh(&self) -> Option<&Arc<kw_mesh3d::SurfaceMesh>> {
+        match &self.product {
+            Product::Mesh(m) => Some(m),
+            _ => None,
         }
     }
 

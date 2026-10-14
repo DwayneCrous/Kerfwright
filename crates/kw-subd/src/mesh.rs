@@ -82,6 +82,40 @@ impl SubdMesh {
         self
     }
 
+    /// Every edge of the cage once, as `(a, b)` with `a < b`, in order of first use.
+    pub fn edges(&self) -> Vec<(u32, u32)> {
+        let mut seen: HashMap<(u32, u32), ()> = HashMap::new();
+        let mut out = Vec::new();
+        for f in &self.faces {
+            for i in 0..f.len() {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                let k = (a.min(b), a.max(b));
+                if seen.insert(k, ()).is_none() {
+                    out.push(k);
+                }
+            }
+        }
+        out
+    }
+
+    /// The sharpness of the crease along `a`–`b` (0 for a smooth edge).
+    pub fn crease_of(&self, a: u32, b: u32) -> f64 {
+        self.creases
+            .iter()
+            .filter(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
+            .map(|c| c.sharpness)
+            .fold(0.0, f64::max)
+    }
+
+    /// Give the edge `a`–`b` this sharpness, replacing what it had; 0 or less makes it smooth again.
+    pub fn set_crease(&mut self, a: u32, b: u32, sharpness: f64) {
+        self.creases
+            .retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
+        if sharpness > 0.0 {
+            self.creases.push(Crease { a, b, sharpness });
+        }
+    }
+
     /// Check indices, manifoldness and orientation. A closed, consistently oriented cage passes.
     pub fn validate(&self) -> Result<(), SubdError> {
         let bad = |m: String| Err(SubdError::Invalid(m));

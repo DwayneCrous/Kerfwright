@@ -183,13 +183,25 @@ pub struct ThreadInfo {
     pub size: &'static ThreadSize,
     pub internal: bool,
     pub length: f64,
-    /// A tapped hole (true) or a cosmetic thread on a face (false).
+    /// A tapped hole (true) or a thread on a face (false).
     pub from_hole: bool,
+    /// The helical groove is cut into the body (else the thread is only recorded).
+    pub modelled: bool,
+    pub right_hand: bool,
 }
 
 impl ThreadInfo {
     pub fn text(&self) -> String {
-        describe(self.size, self.length, self.internal)
+        let mut t = describe(self.size, self.length, self.internal);
+        t.push_str(if self.modelled {
+            ", modelled"
+        } else {
+            ", cosmetic"
+        });
+        if !self.right_hand {
+            t.push_str(", left-hand");
+        }
+        t
     }
 }
 
@@ -210,6 +222,8 @@ pub fn report(doc: &crate::Document, scope: &dyn kw_expr::Scope) -> Vec<ThreadIn
                 if let HoleKind::Tapped {
                     designation,
                     thread_length,
+                    modelled,
+                    right_hand,
                 } = &h.kind
                 {
                     if let (Some(size), Some(length)) = (lookup(designation), len(thread_length)) {
@@ -220,6 +234,8 @@ pub fn report(doc: &crate::Document, scope: &dyn kw_expr::Scope) -> Vec<ThreadIn
                                 internal: true,
                                 length,
                                 from_hole: true,
+                                modelled: *modelled,
+                                right_hand: *right_hand,
                             });
                         }
                     }
@@ -233,6 +249,8 @@ pub fn report(doc: &crate::Document, scope: &dyn kw_expr::Scope) -> Vec<ThreadIn
                         internal: t.internal,
                         length,
                         from_hole: false,
+                        modelled: t.modelled,
+                        right_hand: t.right_hand,
                     });
                 }
             }
