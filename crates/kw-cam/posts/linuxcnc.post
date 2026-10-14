@@ -25,3 +25,4 @@ rapid5 = G00 {X} {Y} {Z} {A} {B} {C}
 feed5 = G01 {X} {Y} {Z} {A} {B} {C} {F}
 tcp_on = (TCP is provided by the machine kinematics)
 tcp_off = (TCP off)
+work_offset = G{wcs}

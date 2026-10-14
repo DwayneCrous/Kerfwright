@@ -243,7 +243,7 @@ fn cam_fea_and_board_data_ride_along_in_the_saved_file() {
     }
     assert!(h.app.save());
     let back = kw_app::project::Project::open(&dir.join("Multi.kwf")).unwrap();
-    assert!(back.board.is_some() && back.cam.is_none());
+    assert!(back.board.is_some() && back.cam.is_empty());
     assert!(!back.is_dirty());
 }
 
@@ -576,7 +576,7 @@ fn the_ecad_workspace_generates_places_routes_checks_pours_and_exports() {
 
 // ---------------------------------------------------------------------------------------- CAM workspace
 
-use kw_app::cam::{Dialect, OpKind, ToolChoice};
+use kw_app::cam::{OpKind, ToolChoice, BUILTIN_POSTS};
 
 #[test]
 fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stock() {
@@ -589,9 +589,7 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
     let Screen::Project { project, .. } = &mut h.app.screen else {
         panic!()
     };
-    let ev = project.evaluation();
-    let brep = ev.final_solid().and_then(|(_, o)| o.brep().cloned());
-    h.app.cam.fit_to_model(brep.as_ref().unwrap());
+    h.app.cam.fit_to_workpiece(project);
     let s = &h.app.cam.settings;
     for (got, want) in [
         (s.x0, 0.0),
@@ -611,7 +609,7 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
     ] {
         h.app.cam.settings.op = op;
         h.app.cam.settings.tool = tool;
-        h.app.cam.fit_to_model(brep.as_ref().unwrap());
+        h.app.cam.fit_to_workpiece(project);
         let st = &mut h.app.cam.settings;
         if matches!(op, OpKind::Pocket | OpKind::Adaptive) {
             st.x0 += 5.0;
@@ -625,10 +623,10 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
         }
         h.app
             .cam
-            .run_now(project, brep.as_ref())
+            .run_now(project)
             .unwrap_or_else(|e| panic!("{op:?}: {e}"));
     }
-    let cam = project.cam.as_ref().unwrap();
+    let cam = &project.cam[0];
     assert_eq!(cam.operations.len(), 4);
     assert!(
         cam.operations
@@ -640,8 +638,8 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
     // post every operation in every dialect; each program replays in the independent interpreter
     for sel in 0..4 {
         h.app.cam.selected = Some(sel);
-        for d in Dialect::ALL {
-            h.app.cam.dialect = d;
+        for d in BUILTIN_POSTS {
+            h.app.cam.set_post(project, d).unwrap();
             let text = h
                 .app
                 .cam
@@ -649,11 +647,11 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
                 .unwrap()
                 .unwrap_or_else(|e| panic!("{d:?}: {e}"));
             let gd = match d {
-                Dialect::Fanuc => kw_gsim::Dialect::Fanuc,
-                Dialect::Haas => kw_gsim::Dialect::Haas,
-                Dialect::Siemens => kw_gsim::Dialect::Siemens840D,
-                Dialect::Heidenhain => kw_gsim::Dialect::Heidenhain,
-                Dialect::LinuxCnc => kw_gsim::Dialect::LinuxCnc,
+                "Fanuc" => kw_gsim::Dialect::Fanuc,
+                "Haas" => kw_gsim::Dialect::Haas,
+                "Siemens840D" => kw_gsim::Dialect::Siemens840D,
+                "Heidenhain" => kw_gsim::Dialect::Heidenhain,
+                _ => kw_gsim::Dialect::LinuxCnc,
             };
             kw_gsim::run(gd, &text).unwrap_or_else(|e| panic!("op {sel} {d:?}: {e}"));
         }
@@ -662,26 +660,24 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
     h.app.cam.settings.op = OpKind::Pocket;
     h.app.cam.settings.x1 = h.app.cam.settings.x0 + 2.0;
     assert!(
-        h.app.cam.run_now(project, brep.as_ref()).is_err(),
+        h.app.cam.run_now(project).is_err(),
         "a region smaller than the tool is refused"
     );
     h.app.cam.settings.top = h.app.cam.settings.bottom - 1.0;
-    assert!(h.app.cam.run_now(project, brep.as_ref()).is_err());
+    assert!(h.app.cam.run_now(project).is_err());
     // the operations are saved with the project
     project.save_as(&dir.join("cam.kwf")).unwrap();
     let back = kw_app::project::Project::open(&dir.join("cam.kwf")).unwrap();
-    assert_eq!(back.cam.unwrap().operations.len(), 4);
+    assert_eq!(back.cam[0].operations.len(), 4);
     // draw with an operation selected (the viewport has no GPU here, the panels still run)
     h.app.cam.selected = Some(0);
     h.frame();
     // stock removal by the pocket: the volume removed is about the pocket's area times its depth
     {
-        let Screen::Project { project, .. } = &h.app.screen else {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
             panic!()
         };
-        let ev2 = ev.clone();
-        let b2 = ev2.final_solid().and_then(|(_, o)| o.brep().cloned());
-        h.app.cam.start_sim(project, b2.as_ref());
+        h.app.cam.start_sim(project);
     }
     let t = std::time::Instant::now();
     while !h.app.cam.message.contains("removed") {
@@ -690,6 +686,98 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     eprintln!("{}", h.app.cam.message);
+}
+
+#[test]
+fn the_cam_workspace_draws_two_setups_with_a_simulated_stock() {
+    let dir = scratch("cam_two");
+    let mut h = Harness::new(app_in(&dir));
+    h.app.open_demo(); // a 40 x 25 x 10 block
+    h.app.set_workspace(Workspace::Cam);
+    h.frame();
+    h.frame();
+    {
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        h.app.cam.fit_to_workpiece(project);
+        h.app.cam.settings.x0 += 5.0;
+        h.app.cam.settings.y0 += 5.0;
+        h.app.cam.settings.x1 -= 5.0;
+        h.app.cam.settings.y1 -= 5.0;
+        h.app.cam.settings.bottom = h.app.cam.settings.top - 3.0;
+        h.app.cam.run_now(project).unwrap();
+    }
+    // the ribbon's New Setup button asks for a second setup
+    h.app.cam.requests.push("new_setup");
+    h.frame();
+    h.frame();
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    assert_eq!(project.cam.len(), 2);
+    assert_eq!(h.app.cam.current, 1);
+    assert_eq!(project.cam[1].wcs.offset, 2);
+    assert!(project.cam[1].operations.is_empty());
+    // simulate the second (empty) setup and draw the stock, then go back to the first
+    h.app.cam.requests.push("simulate");
+    let t = std::time::Instant::now();
+    while h.app.cam.sim.is_none() {
+        h.frame();
+        assert!(t.elapsed().as_secs() < 120, "{}", h.app.cam.message);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.app.cam.view_stock);
+    h.frame();
+    h.app.cam.current = 0;
+    h.app.cam.selected = Some(0);
+    h.frame();
+    h.frame();
+}
+
+#[test]
+fn the_cam_libraries_window_and_tool_pickers_draw_on_every_tab() {
+    let dir = scratch("cam_lib");
+    let mut h = Harness::new(app_in(&dir));
+    h.app.open_demo();
+    h.app.set_workspace(Workspace::Cam);
+    h.app.cam.library_dir = Some(dir.join("camlib"));
+    h.frame();
+    h.frame();
+    for tab in 0..4 {
+        h.app.cam.open_library(tab);
+        h.frame();
+        h.frame();
+    }
+    // a library tool and a holder go into the operation, which then makes a toolpath with them
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    h.app.cam.fit_to_workpiece(project);
+    let lib = h.app.cam.library.clone();
+    let tool = lib
+        .tool("6 mm flat end mill")
+        .expect("a 6 mm flat")
+        .tool
+        .clone();
+    h.app.cam.settings.diameter = tool.diameter;
+    h.app.cam.settings.preset = Some(tool);
+    h.app.cam.settings.holder = lib.holder("ER32 collet chuck").cloned();
+    h.app.cam.settings.x0 += 5.0;
+    h.app.cam.settings.y0 += 5.0;
+    h.app.cam.settings.x1 -= 5.0;
+    h.app.cam.settings.y1 -= 5.0;
+    h.app.cam.settings.bottom = h.app.cam.settings.top - 3.0;
+    h.app.cam.run_now(project).unwrap();
+    assert_eq!(project.cam[0].tools[0].holder_name, "ER32 collet chuck");
+    assert_eq!(project.cam[0].tools[0].holder.sections, vec![(25.0, 45.0)]);
+    h.frame();
+    h.frame();
+    // the user's library is written and read back
+    h.app.cam.save_library().unwrap();
+    h.app.cam.library.tools.clear();
+    h.app.cam.load_library();
+    assert!(h.app.cam.library.tool("6 mm flat end mill").is_some());
 }
 
 // ---------------------------------------------------------------------------------------- FEA workspace
@@ -749,7 +837,7 @@ fn the_fea_workspace_solves_a_cantilever_close_to_beam_theory_and_stores_its_stu
     fea.study.max_size = 4.0;
     fea.fix_face(&mut p, fixed);
     fea.add_force(&mut p, loaded, [0.0, 0.0, -100.0]);
-    assert!(p.is_dirty() && p.fea.is_some());
+    assert!(p.is_dirty() && !p.fea.is_empty());
     // without supports or loads the solve explains what is missing
     let mut empty = fea.study.clone();
     empty.fixed_tags.clear();
@@ -809,7 +897,7 @@ fn the_fea_workspace_solves_a_cantilever_close_to_beam_theory_and_stores_its_stu
     };
     project.save().unwrap();
     let back = kw_app::project::Project::open(project.path.as_ref().unwrap()).unwrap();
-    let st = back.fea.unwrap();
+    let st = back.fea[0].clone();
     assert_eq!(st.fixed_tags, vec![fixed]);
     assert_eq!(st.loads.len(), 1);
 }
@@ -8530,7 +8618,7 @@ fn a_project_with_a_damaged_cam_entry_still_opens_and_keeps_the_entry() {
         .insert(kw_store::CAM_ENTRY.into(), b"garbage".to_vec());
     f.save(&path).unwrap();
     let mut p = kw_app::project::Project::open(&path).unwrap();
-    assert!(p.cam.is_none());
+    assert!(p.cam.is_empty());
     assert!(
         p.load_warnings.iter().any(|w| w.contains("CAM")),
         "{:?}",
@@ -8743,7 +8831,7 @@ fn the_fea_workspace_lists_the_bodies_and_runs_a_modal_study_with_animated_modes
     };
     project.save_as(&dir.join("modal.kwf")).unwrap();
     let back = kw_app::project::Project::open(&dir.join("modal.kwf")).unwrap();
-    let st = back.fea.unwrap();
+    let st = back.fea[0].clone();
     assert_eq!(st.kind, StudyKind::Modal);
     assert_eq!(st.modes, 3);
 }

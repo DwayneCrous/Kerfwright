@@ -28,3 +28,4 @@ rapid5 = G0 {X} {Y} {Z} {A} {B} {C}
 feed5 = G1 {X} {Y} {Z} {A} {B} {C} {F}
 tcp_on = TRAORI
 tcp_off = TRAFOOF
+work_offset = G{wcs}

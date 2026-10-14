@@ -278,6 +278,10 @@ pub struct FeaWorkspace {
     pub roller_axes: [bool; 3],
     pub roller_value: [f64; 3],
     picked: Option<(kw_brep::FaceId, u32)>,
+    /// The study being edited, among the project's.
+    pub current: usize,
+    /// The model the faces of the study were last matched against.
+    reconciled_for: Option<u128>,
     job: Option<Job<FeaResult>>,
     version: u64,
     initialised: bool,
@@ -307,12 +311,23 @@ impl Default for FeaWorkspace {
             roller_axes: [true, false, false],
             roller_value: [0.0; 3],
             picked: None,
+            current: 0,
+            reconciled_for: None,
             job: None,
             version: 0,
             initialised: false,
             cached: None,
             requests: Vec::new(),
         }
+    }
+}
+
+/// How a face tag is named in the lists.
+fn tag_name(tag: u32) -> String {
+    if crate::fea_faces::is_missing(tag) {
+        "a face that is gone".into()
+    } else {
+        format!("face {tag}")
     }
 }
 
@@ -406,9 +421,139 @@ impl FeaWorkspace {
         self.job.is_none()
     }
 
-    fn store(&self, project: &mut Project) {
-        project.fea = Some(self.study.clone());
+    fn store(&mut self, project: &mut Project) {
+        // a face just picked gets its signature
+        let unsigned = self.study.face_tags().iter().any(|t| {
+            !crate::fea_faces::is_missing(*t) && !self.study.face_sigs.iter().any(|(s, _)| s == t)
+        });
+        if unsigned {
+            self.note_faces();
+        }
+        while project.fea.len() <= self.current {
+            project.fea.push(FeaStudy {
+                name: format!("Study {}", project.fea.len() + 1),
+                ..FeaStudy::default()
+            });
+        }
+        project.fea[self.current] = self.study.clone();
         project.mark_extras_dirty();
+    }
+
+    /// Switch to study `i` of the project (the one being edited is kept first).
+    pub fn select_study(&mut self, project: &mut Project, i: usize) {
+        if i >= project.fea.len() || i == self.current {
+            return;
+        }
+        self.store(project);
+        self.current = i;
+        self.study = project.fea[i].clone();
+        self.result = None;
+        self.field = Field::Model;
+        self.picked = None;
+        self.reconciled_for = None;
+        self.cached = None;
+    }
+
+    /// Add a study like the current one (bodies, materials, element size) without its supports and loads.
+    pub fn new_study(&mut self, project: &mut Project) {
+        self.store(project);
+        let n = project.fea.len() + 1;
+        let fresh = FeaStudy {
+            name: format!("Study {n}"),
+            material: self.study.material,
+            max_size: self.study.max_size,
+            source: self.study.source,
+            bodies: self.study.bodies.clone(),
+            ..FeaStudy::default()
+        };
+        project.fea.push(fresh.clone());
+        project.mark_extras_dirty();
+        self.current = n - 1;
+        self.study = fresh;
+        self.result = None;
+        self.field = Field::Model;
+        self.picked = None;
+        self.reconciled_for = None;
+    }
+
+    pub fn delete_study(&mut self, project: &mut Project, i: usize) {
+        if project.fea.len() <= 1 || i >= project.fea.len() {
+            return;
+        }
+        self.store(project);
+        project.fea.remove(i);
+        project.mark_extras_dirty();
+        self.current = if i < self.current {
+            self.current - 1
+        } else {
+            self.current.min(project.fea.len() - 1)
+        };
+        self.study = project.fea[self.current].clone();
+        self.result = None;
+        self.field = Field::Model;
+        self.picked = None;
+        self.reconciled_for = None;
+        self.cached = None;
+    }
+
+    /// Bring the bodies of the model up to date, and the faces of the study with them.
+    pub fn sync_model(&mut self, project: &mut Project) {
+        self.refresh_model(project);
+        if self.cached.as_ref().map(|c| c.key) != self.reconciled_for {
+            self.reconcile_faces(project);
+        }
+    }
+
+    /// The bodies the study works on as the workspace last built them.
+    pub fn combined(&self) -> Option<Arc<Combined>> {
+        self.cached.as_ref().map(|c| c.combined.clone())
+    }
+
+    /// Match the faces of the study with the faces the model has now. Returns what changed.
+    pub fn reconcile_faces(&mut self, project: &mut Project) -> crate::fea_faces::Reconciled {
+        let Some(c) = &self.cached else {
+            return Default::default();
+        };
+        let current = crate::fea_faces::face_signatures(&c.combined);
+        let key = c.key;
+        let before = self.study.clone();
+        let r = crate::fea_faces::reconcile(&mut self.study, &current);
+        self.reconciled_for = Some(key);
+        if self.study != before {
+            self.store(project);
+        }
+        if r.missing > 0 {
+            self.result = None;
+            self.field = Field::Model;
+            self.message = format!(
+                "{} face(s) of this study no longer exist in the model: remove them or put the support or load on a face again",
+                r.missing
+            );
+        } else if r.moved > 0 {
+            self.message = format!(
+                "{} face(s) of the study follow the model's new numbering",
+                r.moved
+            );
+        }
+        r
+    }
+
+    /// Faces of the study that are gone.
+    pub fn missing_faces(&self) -> Vec<kw_store::FaceSig> {
+        self.study
+            .face_sigs
+            .iter()
+            .filter(|(t, _)| crate::fea_faces::is_missing(*t))
+            .map(|(_, s)| s.clone())
+            .collect()
+    }
+
+    /// Make the signatures of the faces just picked (a new support or load).
+    fn note_faces(&mut self) {
+        if let Some(c) = &self.cached {
+            let current = crate::fea_faces::face_signatures(&c.combined);
+            crate::fea_faces::reconcile(&mut self.study, &current);
+        }
     }
 
     pub fn fix_face(&mut self, project: &mut Project, tag: u32) {
@@ -443,6 +588,15 @@ impl FeaWorkspace {
             self.message = "there is no solid body to run a study on".into();
             return;
         };
+        if self
+            .study
+            .face_tags()
+            .iter()
+            .any(|t| crate::fea_faces::is_missing(*t))
+        {
+            self.message = "a face of this study no longer exists in the model: remove it, or put the support or load on a face again".into();
+            return;
+        }
         let combined = cached.combined.clone();
         let study = self.study.clone();
         let materials: Vec<StudyMaterial> = study
@@ -552,11 +706,11 @@ impl FeaWorkspace {
         rs: Option<&eframe::egui_wgpu::RenderState>,
     ) {
         if !self.initialised {
-            if let Some(s) = &project.fea {
+            if let Some(s) = project.fea.get(self.current) {
                 self.study = s.clone();
             }
         }
-        self.refresh_model(project);
+        self.sync_model(project);
         self.initialised = true;
         let brep = self.cached.as_ref().map(|c| c.combined.brep.clone());
         let model_key = self.cached.as_ref().map_or(0, |c| c.key);
@@ -715,8 +869,62 @@ impl FeaWorkspace {
         let busy = self.job.is_some();
         let mut changed = false;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Study");
+            ui.heading("Studies");
+            let names: Vec<String> = if project.fea.is_empty() {
+                vec![self.study.name.clone()]
+            } else {
+                project.fea.iter().map(|s| s.name.clone()).collect()
+            };
+            let mut pick = None;
+            let mut delete = None;
+            for (i, n) in names.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let shown = if i == self.current { &self.study.name } else { n };
+                    if ui.selectable_label(i == self.current, shown).clicked() {
+                        pick = Some(i);
+                    }
+                    if names.len() > 1 && ui.small_button("Delete").clicked() {
+                        delete = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = pick {
+                self.select_study(project, i);
+            }
+            if let Some(i) = delete {
+                self.delete_study(project, i);
+            }
+            if ui.button("New study").on_hover_text("A study on the same bodies with no supports or loads yet").clicked() {
+                self.new_study(project);
+            }
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                changed |= ui.text_edit_singleline(&mut self.study.name).changed();
+            });
             ui.label(self.study.kind.name());
+            let missing = self.missing_faces();
+            if !missing.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 110, 90),
+                    format!("{} face(s) of this study are gone from the model:", missing.len()),
+                );
+                for m in &missing {
+                    ui.weak(crate::fea_faces::describe(m));
+                }
+                if ui.button("Remove them").clicked() {
+                    let tags: Vec<u32> = self
+                        .study
+                        .face_sigs
+                        .iter()
+                        .filter(|(t, _)| crate::fea_faces::is_missing(*t))
+                        .map(|(t, _)| *t)
+                        .collect();
+                    for t in tags {
+                        self.study.drop_face(t);
+                    }
+                    changed = true;
+                }
+            }
             if project.assembly.is_some() {
                 ui.horizontal(|ui| {
                     ui.label("Bodies from");
@@ -954,7 +1162,7 @@ impl FeaWorkspace {
             let mut remove_fixed = None;
             for (i, t) in self.study.fixed_tags.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Fixed: face {t}"));
+                    ui.label(format!("Fixed: {}", tag_name(*t)));
                     if ui.small_button("Remove").clicked() {
                         remove_fixed = Some(i);
                     }
@@ -973,7 +1181,7 @@ impl FeaWorkspace {
                         .filter(|(_, on)| *on)
                         .map(|(l, _)| *l)
                         .collect();
-                    ui.label(format!("Support face {} ({axes})", s.tag));
+                    ui.label(format!("Support on {} ({axes})", tag_name(s.tag)));
                     if ui.small_button("Remove").clicked() {
                         remove_support = Some(i);
                     }
@@ -988,11 +1196,12 @@ impl FeaWorkspace {
                 ui.horizontal(|ui| {
                     ui.label(match l {
                         FeaLoad::Force { tag, force } => format!(
-                            "Force on face {tag}: ({:.0}, {:.0}, {:.0}) N",
+                            "Force on {}: ({:.0}, {:.0}, {:.0}) N",
+                            tag_name(*tag),
                             force[0], force[1], force[2]
                         ),
                         FeaLoad::Pressure { tag, pressure } => {
-                            format!("Pressure on face {tag}: {pressure} MPa")
+                            format!("Pressure on {}: {pressure} MPa", tag_name(*tag))
                         }
                         FeaLoad::Gravity { g } => {
                             format!("Gravity ({:.0}, {:.0}, {:.0})", g[0], g[1], g[2])
@@ -1011,10 +1220,10 @@ impl FeaWorkspace {
             for (i, bc) in self.study.thermal.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(match bc {
-                        ThermalBc::Temperature { tag, t } => format!("Face {tag} held at {t} °C"),
-                        ThermalBc::Flux { tag, q } => format!("Heat flux {q} W/m² into face {tag}"),
+                        ThermalBc::Temperature { tag, t } => format!("{} held at {t} °C", tag_name(*tag)),
+                        ThermalBc::Flux { tag, q } => format!("Heat flux {q} W/m² into {}", tag_name(*tag)),
                         ThermalBc::Convection { tag, h, t_inf } => {
-                            format!("Convection on face {tag}: h {h} W/m²K, {t_inf} °C")
+                            format!("Convection on {}: h {h} W/m²K, {t_inf} °C", tag_name(*tag))
                         }
                         ThermalBc::Generation { q } => format!("Heat generation {q} W/m³"),
                     });

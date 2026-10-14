@@ -31,7 +31,58 @@ fn cam_fea_and_board_entries_round_trip_through_a_kwf_file() {
             name: "Rough".into(),
             tool: 1,
             path,
+            params: Some(kw_cam::OpParams {
+                kind: kw_cam::OpKind::Pocket,
+                region: kw_cam::RegionSpec::Polygon {
+                    outer: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0]],
+                    islands: vec![vec![[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]]],
+                },
+                top: 0.0,
+                bottom: -2.0,
+                step_down: 1.0,
+                stepover: 2.0,
+                feed: 600.0,
+                rpm: 8000.0,
+                tool: 1,
+                points: vec![[3.0, 4.0]],
+                hole_diameter: 8.0,
+                peck: 2.0,
+                width: 0.7,
+                inside: true,
+                taper: 5.0,
+                tilt: 12.0,
+                threshold: 0.3,
+                grid: 0.25,
+            }),
+            input_hash: 0xDEAD_BEEF_1234_5678,
         }],
+        name: "Top".into(),
+        source: SourceKind::Assembly,
+        bodies: vec![
+            SetupBody {
+                key: BodyKey::Assembly("Vise/Jaw".into()),
+                role: BodyRole::Fixture,
+            },
+            SetupBody {
+                key: BodyKey::Assembly("Part".into()),
+                role: BodyRole::Workpiece,
+            },
+        ],
+        wcs: Wcs {
+            origin: [5.0, 6.0, 7.0],
+            x_axis: [0.0, 1.0, 0.0],
+            z_axis: [1.0, 0.0, 0.0],
+            offset: 3,
+        },
+        stock: kw_cam::StockSpec::Cylinder {
+            axis: 2,
+            margin: 1.5,
+            ends: 2.0,
+        },
+        machine_def: kw_cam::library::Library::builtin()
+            .machine("AC trunnion table")
+            .cloned(),
+        post: kw_cam::library::Library::builtin().post("Haas").cloned(),
     };
     let fea = FeaStudy {
         name: "Bracket load".into(),
@@ -198,4 +249,79 @@ fn a_damaged_entry_is_an_error_to_report_not_a_panic() {
     assert!(cam_file_from_file(&file).unwrap().is_err());
     assert!(fea_file_from_file(&file).unwrap().is_err());
     assert!(cam_from_file(&file).unwrap().is_err());
+}
+
+/// The setups of the second version, before work coordinate systems, stock specifications and operation
+/// parameters existed.
+mod second_version {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub struct Operation {
+        pub name: String,
+        pub tool: u32,
+        pub path: kw_cam::Toolpath,
+    }
+
+    #[derive(Serialize)]
+    pub struct Setup {
+        pub machine: String,
+        pub stock_min: [f64; 3],
+        pub stock_max: [f64; 3],
+        pub tools: Vec<kw_cam::Tool>,
+        pub operations: Vec<Operation>,
+    }
+
+    #[derive(Serialize)]
+    pub struct File {
+        pub version: u32,
+        pub setups: Vec<Setup>,
+    }
+}
+
+#[test]
+fn setups_written_before_work_systems_and_stock_specs_get_defaults() {
+    let mut file = KwfFile::new(Document::new());
+    let old = second_version::File {
+        version: 2,
+        setups: vec![second_version::Setup {
+            machine: "3-axis mill".into(),
+            stock_min: [0.0, 0.0, -5.0],
+            stock_max: [30.0, 20.0, 0.0],
+            tools: vec![Tool::flat(1, 6.0, 20.0)],
+            operations: vec![second_version::Operation {
+                name: "Pocket 1".into(),
+                tool: 1,
+                path: Toolpath::new("p"),
+            }],
+        }],
+    };
+    file.extra_entries
+        .insert(CAM_ENTRY.into(), first_version::bytes(&old));
+    let back = KwfFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+    let cam = cam_file_from_file(&back).unwrap().unwrap();
+    let s = &cam.setups[0];
+    assert_eq!(s.operations[0].params, None);
+    assert_eq!(s.operations[0].input_hash, 0);
+    assert_eq!(s.wcs, Wcs::default());
+    assert_eq!(s.wcs.offset, 1);
+    assert_eq!(s.source, SourceKind::Design);
+    assert!(s.bodies.is_empty());
+    assert_eq!(s.stock, kw_cam::StockSpec::default());
+    assert!(s.machine_def.is_none() && s.post.is_none());
+    // a body with no role is a workpiece
+    assert_eq!(
+        s.role_of(&BodyKey::Assembly("anything".into())),
+        BodyRole::Workpiece
+    );
+}
+
+#[test]
+fn roles_are_set_once_per_body() {
+    let mut s = CamSetup::default();
+    let k = BodyKey::Assembly("Vise".into());
+    s.set_role(&k, BodyRole::Fixture);
+    s.set_role(&k, BodyRole::Ignore);
+    assert_eq!(s.bodies.len(), 1);
+    assert_eq!(s.role_of(&k), BodyRole::Ignore);
 }

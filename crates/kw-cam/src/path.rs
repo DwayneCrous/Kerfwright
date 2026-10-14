@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     Comment(String),
+    /// Select the work offset of the setup (1 to 6: G54 to G59).
+    WorkOffset {
+        number: u8,
+    },
     ToolChange {
         number: u32,
         name: String,
@@ -45,6 +49,14 @@ pub enum Event {
         rot: [f64; 2],
         names: [char; 2],
         feed: f64,
+    },
+    /// A tool pose with the tool axis tilted: the tip and the unit axis (tip towards spindle) in the work
+    /// coordinate system of the setup. `feed` is `None` for a rapid. The post needs a five-axis machine to
+    /// write it (see `kin`); the stock simulation sweeps the tilted tool.
+    Pose {
+        p: P3,
+        axis: P3,
+        feed: Option<f64>,
     },
     /// Switch the controller's tool-centre-point control on or off.
     Tcp {

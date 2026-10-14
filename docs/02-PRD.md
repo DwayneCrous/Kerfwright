@@ -7,7 +7,7 @@ Kerfwright is a pure-Rust, cross-platform (Linux, macOS, Windows, WebGPU/WASM) i
 
 **Target users:** hobbyists/makers, small manufacturers, and product designers who want one tool from sketch to G-code, with an open, scriptable, auditable core.
 
-**Non-goals (v1):** full Class-A surfacing, large-assembly PDM, nonlinear/explicit FEA, full-featured EDA schematic capture, cloud CAM post libraries for every machine, parity with any vendor's feature count.
+**Non-goals (v1):** full Class-A surfacing, large-assembly PDM, explicit FEA (nonlinear static FEA — large displacement and plasticity at moderate strain — is built, see `docs/fusion-parity.md`), full-featured EDA schematic capture, cloud CAM post libraries for every machine, parity with any vendor's feature count.
 
 ## 2. Workspaces
 

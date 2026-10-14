@@ -11,6 +11,7 @@ pub mod drawing;
 pub mod ecad;
 pub mod exchange;
 pub mod fea;
+pub mod fea_faces;
 pub mod fea_run;
 pub mod job;
 pub mod messages;

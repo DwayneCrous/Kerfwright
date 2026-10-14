@@ -12,8 +12,8 @@ pub struct Project {
     pub path: Option<PathBuf>,
     pub history: History,
     pub engine: Engine,
-    pub cam: Option<CamSetup>,
-    pub fea: Option<FeaStudy>,
+    pub cam: Vec<CamSetup>,
+    pub fea: Vec<FeaStudy>,
     pub board: Option<kw_ecad::Board>,
     /// The assembly (components and joints) stored with the project, if there is one.
     pub assembly: Option<kw_assembly::Assembly>,
@@ -94,17 +94,21 @@ impl Project {
         let cam = tolerate(
             "CAM",
             kw_store::CAM_ENTRY,
-            kw_store::cam_from_file(&file),
+            kw_store::cam_file_from_file(&file),
             &mut load_warnings,
             &mut damaged_entries,
-        );
+        )
+        .map(|f| f.setups)
+        .unwrap_or_default();
         let fea = tolerate(
             "FEA",
             kw_store::FEA_ENTRY,
-            kw_store::fea_from_file(&file),
+            kw_store::fea_file_from_file(&file),
             &mut load_warnings,
             &mut damaged_entries,
-        );
+        )
+        .map(|f| f.studies)
+        .unwrap_or_default();
         let board = kw_store::board_from_file(&file).transpose()?;
         let mut assembly = kw_assembly::Assembly::from_file(&file).transpose()?;
         // linked files are found again from where the project is now (it may have been moved)
@@ -417,11 +421,23 @@ impl Project {
                 self.file.extra_entries.remove(name);
             }
         }
-        if let Some(c) = &self.cam {
-            kw_store::attach_cam(&mut self.file, c);
+        if !self.cam.is_empty() {
+            kw_store::attach_cam_file(
+                &mut self.file,
+                &kw_store::CamFile {
+                    version: kw_store::STORE_VERSION,
+                    setups: self.cam.clone(),
+                },
+            );
         }
-        if let Some(f) = &self.fea {
-            kw_store::attach_fea(&mut self.file, f);
+        if !self.fea.is_empty() {
+            kw_store::attach_fea_file(
+                &mut self.file,
+                &kw_store::FeaFile {
+                    version: kw_store::STORE_VERSION,
+                    studies: self.fea.clone(),
+                },
+            );
         }
         if let Some(b) = &self.board {
             kw_store::attach_board(&mut self.file, b);

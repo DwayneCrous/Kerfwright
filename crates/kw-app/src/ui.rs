@@ -915,17 +915,13 @@ impl KerfwrightApp {
     pub fn cam_demo(&mut self) {
         self.open_demo();
         if let Screen::Project { project, .. } = &mut self.screen {
-            let ev = project.evaluation();
-            let brep = ev.final_solid().and_then(|(_, o)| o.brep().cloned());
-            if let Some(b) = &brep {
-                self.cam.fit_to_model(b);
-            }
+            self.cam.fit_to_workpiece(project);
             self.cam.settings.x0 += 4.0;
             self.cam.settings.y0 += 4.0;
             self.cam.settings.x1 -= 4.0;
             self.cam.settings.y1 -= 4.0;
             self.cam.settings.bottom = self.cam.settings.top - 4.0;
-            let _ = self.cam.run_now(project, brep.as_ref());
+            let _ = self.cam.run_now(project);
         }
         self.set_workspace(Workspace::Cam);
     }

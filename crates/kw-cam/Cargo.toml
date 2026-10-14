@@ -10,6 +10,7 @@ bench = false
 [dependencies]
 rayon.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 cavalier_contours.workspace = true
 i_overlay.workspace = true
 rstar.workspace = true

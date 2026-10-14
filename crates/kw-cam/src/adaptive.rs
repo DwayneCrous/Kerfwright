@@ -948,8 +948,9 @@ pub fn adaptive(
                     tp.push(Event::Rapid {
                         p: [first[0], first[1], safe],
                     });
+                    // the level above is cleared everywhere: come down to just above its floor
                     tp.push(Event::Rapid {
-                        p: [first[0], first[1], near(z)],
+                        p: [first[0], first[1], near(z_prev)],
                     });
                     tp.push(Event::Feed {
                         p: [first[0], first[1], z],

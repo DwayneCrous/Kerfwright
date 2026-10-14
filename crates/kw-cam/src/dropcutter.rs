@@ -14,27 +14,26 @@ use crate::bvh::{Aabb, Tri, TriMesh};
 use crate::tool::{Tool, ToolKind};
 use crate::P3;
 
-/// Profile parameters of a cutter: disc radius `rho`, corner radius `r`, total radius `big`.
+/// Profile parameters of a cutter: disc radius `rho`, corner radius `r`, total radius `big`. A conical tool
+/// (drill, chamfer mill, engraver) has `slope > 0`: its surface rises `slope` mm per mm of radius beyond
+/// `rho` instead of along a corner arc.
 #[derive(Debug, Clone, Copy)]
 pub struct Profile {
     pub rho: f64,
     pub r: f64,
     pub big: f64,
+    pub slope: f64,
 }
 
 impl Profile {
     pub fn of(tool: &Tool) -> Profile {
         let big = tool.radius();
         match tool.kind {
-            ToolKind::Flat => Profile {
-                rho: big,
-                r: 0.0,
-                big,
-            },
             ToolKind::Ball => Profile {
                 rho: 0.0,
                 r: big,
                 big,
+                slope: 0.0,
             },
             ToolKind::Bull { corner_radius } => {
                 let r = corner_radius.min(big);
@@ -42,8 +41,48 @@ impl Profile {
                     rho: big - r,
                     r,
                     big,
+                    slope: 0.0,
                 }
             }
+            // a point angle of 180 degrees is a flat tool
+            ToolKind::Drill { point_angle } => Profile {
+                rho: 0.0,
+                r: 0.0,
+                big,
+                slope: cone_slope(point_angle),
+            },
+            ToolKind::Chamfer {
+                tip_angle,
+                tip_diameter,
+            }
+            | ToolKind::Engraver {
+                tip_angle,
+                tip_diameter,
+            } => Profile {
+                rho: (tip_diameter / 2.0).clamp(0.0, big),
+                r: 0.0,
+                big,
+                slope: cone_slope(tip_angle),
+            },
+            ToolKind::Flat | ToolKind::FaceMill | ToolKind::Bore | ToolKind::Tap { .. } => {
+                Profile {
+                    rho: big,
+                    r: 0.0,
+                    big,
+                    slope: 0.0,
+                }
+            }
+        }
+    }
+
+    /// Radius of the cutter's section at height `h` above the tip.
+    pub fn reach(&self, h: f64) -> f64 {
+        if self.slope > 0.0 {
+            (self.rho + h / self.slope).min(self.big)
+        } else if self.r == 0.0 || h >= self.r {
+            self.big
+        } else {
+            self.rho + (2.0 * self.r * h - h * h).max(0.0).sqrt()
         }
     }
 
@@ -51,11 +90,19 @@ impl Profile {
     pub fn lift(&self, d: f64) -> f64 {
         if d <= self.rho {
             0.0
+        } else if self.slope > 0.0 {
+            (d - self.rho) * self.slope
         } else {
             let e = (d - self.rho).min(self.r);
             self.r - (self.r * self.r - e * e).max(0.0).sqrt()
         }
     }
+}
+
+/// Rise per unit of radius of a cone of included angle `angle` degrees.
+fn cone_slope(angle: f64) -> f64 {
+    let half = (angle / 2.0).clamp(1.0, 89.9).to_radians();
+    1.0 / half.tan()
 }
 
 fn dist_xy(p: P3, c: [f64; 2]) -> f64 {

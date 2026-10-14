@@ -32,3 +32,4 @@ rapid5 = L {X} {Y} {Z} {A} {B} {C} R0 FMAX
 feed5 = L {X} {Y} {Z} {A} {B} {C} R0 {F}
 tcp_on = FUNCTION TCPM F TCP AXIS POS PATHCTRL AXIS
 tcp_off = FUNCTION RESET TCPM
+work_offset = CYCL DEF 247 DATUM SETTING Q339={wcsn}

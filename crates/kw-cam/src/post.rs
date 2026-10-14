@@ -18,7 +18,8 @@
 //!
 //! Every other key is the template of an event: `program_start`, `program_end`, `tool_change`,
 //! `spindle_on_cw`, `spindle_on_ccw`, `spindle_off`, `coolant_on`, `coolant_off`, `rapid`, `feed`,
-//! `arc_cw`, `arc_ccw`, `drill_start`, `drill_peck_start`, `drill_at`, `drill_end`. A template may hold
+//! `arc_cw`, `arc_ccw`, `drill_start`, `drill_peck_start`, `drill_at`, `drill_end`, `work_offset`
+//! (placeholders `{wcs}` 54 to 59 and `{wcsn}` 1 to 6; a post without it writes a comment). A template may hold
 //! several lines (`\n`); a line starting with `@` gets no line number. Placeholders are `{X}`-style words
 //! (letter and number; empty when modal and unchanged) and `{x}`-style bare numbers:
 //! `X Y Z F I J CX CY R Q S` words and `x y z f i j cx cy r q rpm tool depth rtp rfp sdis dp program name
@@ -130,7 +131,7 @@ impl PostConfig {
                 "cw_text" => c.cw_text = v,
                 "ccw_text" => c.ccw_text = v,
                 other => {
-                    const KNOWN: [&str; 20] = [
+                    const KNOWN: [&str; 21] = [
                         "program_start",
                         "program_end",
                         "tool_change",
@@ -151,6 +152,7 @@ impl PostConfig {
                         "feed5",
                         "tcp_on",
                         "tcp_off",
+                        "work_offset",
                     ];
                     if !KNOWN.contains(&other) {
                         return Err(bad(&format!("unknown key '{other}'")));
@@ -289,6 +291,22 @@ pub fn render(cfg: &PostConfig, path: &Toolpath) -> Result<String, PostError> {
                 let line = cfg.comment.replace("{text}", &sanitize(t));
                 emit(&mut out, &mut st, &line);
             }
+            Event::WorkOffset { number } => {
+                let n = (*number).clamp(1, 6);
+                set(&mut vars, "wcsn", n.to_string());
+                set(&mut vars, "wcs", (53 + n as u32).to_string());
+                match cfg.templates.get("work_offset") {
+                    Some(t) => emit(&mut out, &mut st, &expand(t, &vars, cfg)),
+                    None => {
+                        let line = cfg
+                            .comment
+                            .replace("{text}", &format!("WORK OFFSET G{}", 53 + n as u32));
+                        emit(&mut out, &mut st, &line);
+                    }
+                }
+                // a new offset: the machine positions are written in full again
+                st.last.clear();
+            }
             Event::ToolChange {
                 number,
                 name,
@@ -341,6 +359,12 @@ pub fn render(cfg: &PostConfig, path: &Toolpath) -> Result<String, PostError> {
                 rot_vars(cfg, &mut st, &mut vars, rot, names);
                 feed_vars(cfg, &mut st, &mut vars, *feed);
                 emit(&mut out, &mut st, &expand(tpl("feed5")?, &vars, cfg));
+            }
+            Event::Pose { .. } => {
+                return Err(PostError(
+                    "a tilted tool pose needs a five-axis machine: choose one with rotary axes"
+                        .into(),
+                ));
             }
             Event::Tcp { on } => {
                 set(&mut vars, "tool", cur_tool.to_string());

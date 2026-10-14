@@ -128,7 +128,7 @@ pub struct Pose {
     pub axis: V3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Machine {
     pub name: String,
     /// Joints carrying the tool, outermost (nearest the machine base) first.

@@ -59,8 +59,8 @@ Also verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-target
 3. **Adaptive clearing**: the planner and the verifier have the same author. The 5 % bound holds outside entry, links and the finish pass; coverage is 93.5–100 % (the rest is left for the finish pass). It follows boundaries and steers a spiral from a helical entry; the planned trochoidal corner fallback was not built. **The freedom-to-operate review is not done** — `LICENSES/patent-watch.md` records that adaptive clearing must not ship until it is. The medial-axis method of US 9,164,503 is deliberately not used, which is why `kw-voronoi` (planned for entry points only) was **cut**.
 4. **Meshing**: radius-edge ≥ 99 % holds everywhere measured, but steep size grading on thick curved parts is weak (a quarter ring at h = 1.4 gives 99.85 % with 2 unfixable tets; earlier at h = 1.6 it was 96.8 %), and unfixed elements sit at trihedral corners. Stress recovery at edge nodes is 1.3–1.8 % (face and volume nodes < 1.3 %), inside the 2 % criterion but close. The references are closed-form elasticity solutions (Timoshenko–Goodier, Kirsch, Lamé), not NAFEMS tables. The 1 M-DOF PCG run uses a structured (box-split) mesh with a Jacobi preconditioner; its 81 s is for that mesh, and block-Jacobi was not faster.
 5. **SIMP reference**: Andreassen et al. (2011) print no compliance number for the MBB beam. The value 216.81 is quoted by a third-party port that cites the paper's figure; the transcription of top88 reproduces it (216.8137 in 106 iterations) and the density-filter variant gives 233.71 as that port does. The original MATLAB could not be run here (no Octave). The criterion is met against that reference, not against a number in the paper.
-6. **Stock simulation** handles a vertical cutter (3-axis and 3+2 in the setup frame); continuous five-axis motion is not simulated. Tool and holder are checked against the part and fixtures; the **machine housing is not modelled**, so axis-limit and housing collisions are out of scope. The drop-cutter treats the tool as infinitely long (shank and holder are separate cylinder tests).
-7. **Not built**: waterline finishing, PathFinder negotiated congestion (the router is A* with rip-up-and-retry, which sufficed: 100 % on all boards), thermal-relief pours (the pour connects directly to same-net copper and is added after the net is routed), GPU LBVH construction (CPU build), hardware-validated 5-axis posts, `kw-voronoi`.
+6. **Stock simulation** handles a vertical cutter in the setup frame, and since the CAM-scale work (`docs/fusion-parity.md`) a tilted one too: each dexel ray is intersected with the cutter's body of revolution (one interval, found by sampling and bisection), checked against an oblique cylinder (3 %) and against the vertical fast path; the fixture check still assumes an upright tool. Tool and holder are checked against the part and fixtures; the **machine housing is not modelled**, so axis-limit and housing collisions are out of scope. The drop-cutter treats the tool as infinitely long (shank and holder are separate cylinder tests).
+7. **Not built**: PathFinder negotiated congestion (the router is A* with rip-up-and-retry, which sufficed: 100 % on all boards), thermal-relief pours (the pour connects directly to same-net copper and is added after the net is routed), GPU LBVH construction (CPU build), hardware-validated 5-axis posts, `kw-voronoi`.
 8. **Path tracer scene** is small (Cornell box, 1 302 triangles, 96×96); the 1 % relative-MSE criterion is met at 16 spp because the metric is dominated by bright regions — the PSNR figures are the more telling noise measure. The denoiser's 30 dB needs 64 spp on this scene; it is a spatial filter that divides by the first-hit albedo, so the glossy ball is filtered with the diffuse model and its reflections are smoothed rather than preserved.
 9. **WBOIT** is an approximation: against an exact sorted blend of two translucent layers the worst channel difference is 24/255, as expected for the technique.
 10. A 100 k-DOF direct solve took 28.6 s once, when the two performance tests ran at the same time; the tests now exclude each other and the measured 3.6 s is for an otherwise idle machine.
@@ -74,3 +74,23 @@ KW_PT_REF_SPP=65536 scripts/phase5_acceptance.sh   # a cleaner reference image
 ```
 
 CPU steps run under a soft `ulimit -v` and ≤ 8 threads; the GPU steps run uncapped (Mesa/Vulkan reserve huge virtual ranges) and skip themselves when no adapter is found.
+
+## 5. CAM at scale (setups, libraries, more operations, rotary axes)
+
+Added after the criteria above were met; everything here is checked by `cargo test -p kw-cam --release` and `cargo test -p kw-app --test cam_setups --test cam_library --test cam_ops`.
+
+| Check | Result |
+|---|---|
+| Material sampled from a closed mesh (box, cylinders along z and x) | aligned box exact; off-cell box within the sideways quantisation (6 %); cylinders 2–5 % at 0.5 mm cells |
+| The stock's surface read back as a mesh | volume within 0.5 % at the same cell, 3 % at twice the cell |
+| Two-setup flip (top 4 mm and bottom 4 mm of waste) | setup 2 starts at setup 1's final volume (1 %); both removals within 4 % of 4 000 mm³; what is left is the part (≤ 4 %); no overcut |
+| Fixture beside the part | the contour around the part reports the tip in the fixture; ignoring the jaw clears it |
+| Face, inside contour, chamfer (90°, 1 mm), drill (3 holes, cone tip), helical bore (2 holes ⌀12) | removed volume vs closed form: 2 %, inside the walls, 8 % (corner effect), 3 %, 3 %; no rapid through stock |
+| Waterline on the 21-part suite | 0 gouges at a 0.03 mm tolerance; > 80 % of the poses touch the part within 0.03 mm |
+| Rest finishing | cuts the strips the rough pass left; sideways cutting length 40 % or less of the full finish after the pocket |
+| Tilted flat cutter, oblique cylinder | within 3 % of π R² d / cos θ at 0°, 30°, 45° |
+| Drill and chamfer cones in the dexel | within 2 % / 3 % of the closed form |
+| 3+2 on an AC trunnion machine, front face | A = ±90°, tool axis within 1e-3°, tip within 1e-3 mm; replays in all five dialects |
+| Feeds and speeds | match the hand calculation (n = 1000 Vc / π D, F = n z fz), clamped by the machine |
+
+Qualifications: nothing was run on a real machine; the machine housing is not modelled; the axis-limit report covers the travel in the machine model only; the dexel grid sets the sideways accuracy of every simulated surface; the work offsets stop at G59; the post templates for a tilted work plane (G68.2) are not used, tilted setups are written with tool-centre-point control instead.

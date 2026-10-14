@@ -155,6 +155,16 @@ pub fn run_heidenhain(text: &str) -> Result<Run, SimError> {
                 if toks.len() < 4 || toks[1] != "DEF" {
                     return err(ln, "CYCL DEF <number> <name> …");
                 }
+                if toks[2] == "247" {
+                    // CYCL DEF 247 DATUM SETTING Q339=<datum number>
+                    let ok = toks.get(3) == Some(&"DATUM")
+                        && toks.get(4) == Some(&"SETTING")
+                        && toks.get(5).is_some_and(|t| t.starts_with("Q339="));
+                    if !ok {
+                        return err(ln, "CYCL DEF 247 DATUM SETTING Q339=<number>");
+                    }
+                    continue;
+                }
                 if toks[2] != "200" {
                     return err(ln, format!("cycle {} is not supported", toks[2]));
                 }

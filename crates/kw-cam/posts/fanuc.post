@@ -28,3 +28,4 @@ rapid5 = G00 {X} {Y} {Z} {A} {B} {C}
 feed5 = G01 {X} {Y} {Z} {A} {B} {C} {F}
 tcp_on = G43.4 H{tool}
 tcp_off = G49
+work_offset = G{wcs}

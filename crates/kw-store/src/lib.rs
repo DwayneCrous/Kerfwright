@@ -50,20 +50,126 @@ pub enum SourceKind {
 /// The version written to `cam.cbor` and `fea.cbor` now.
 pub const STORE_VERSION: u32 = 2;
 
+/// One machining operation. `path` is its toolpath in the work coordinate system of the setup. An operation
+/// made with parameters (`params`) can be regenerated; `input_hash` says what model, tool, stock and work
+/// coordinate system it was generated from, so a later change shows as a stale operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CamOperation {
     pub name: String,
     pub tool: u32,
     pub path: Toolpath,
+    #[serde(default)]
+    pub params: Option<kw_cam::OpParams>,
+    #[serde(default)]
+    pub input_hash: u64,
+}
+
+/// What a body is for in a setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BodyRole {
+    /// The part being made: machined to, and the shape the stock is compared with.
+    #[default]
+    Workpiece,
+    /// Vise, jaws, clamps, a fixture plate: not machined, but the tool and holder must not touch it.
+    Fixture,
+    /// Left out of this setup.
+    Ignore,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupBody {
+    pub key: BodyKey,
+    pub role: BodyRole,
+}
+
+/// The work coordinate system of a setup: where its origin is in the model, which way x and z point, and
+/// which work offset of the machine (1 to 6: G54 to G59) holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Wcs {
+    pub origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub z_axis: [f64; 3],
+    pub offset: u8,
+}
+
+impl Default for Wcs {
+    fn default() -> Self {
+        Wcs {
+            origin: [0.0; 3],
+            x_axis: [1.0, 0.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+            offset: 1,
+        }
+    }
+}
+
+/// One setup: a way of holding the workpiece, with its stock, work coordinate system and operations. The
+/// first fields are the form of the first version of the file; the others have defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CamSetup {
     pub machine: String,
+    /// Stock corners as the first version stored them (kept up to date as the box of the resolved stock).
     pub stock_min: [f64; 3],
     pub stock_max: [f64; 3],
     pub tools: Vec<Tool>,
     pub operations: Vec<CamOperation>,
+    #[serde(default)]
+    pub name: String,
+    /// Where the bodies come from (the design, or the posed assembly).
+    #[serde(default)]
+    pub source: SourceKind,
+    /// The roles of the bodies; a body not listed is a workpiece.
+    #[serde(default)]
+    pub bodies: Vec<SetupBody>,
+    #[serde(default)]
+    pub wcs: Wcs,
+    #[serde(default)]
+    pub stock: kw_cam::StockSpec,
+    /// A copy of the machine from the library, so the file posts the same without it.
+    #[serde(default)]
+    pub machine_def: Option<kw_cam::library::MachineDef>,
+    /// A copy of the post-processor the setup's programs are written with.
+    #[serde(default)]
+    pub post: Option<kw_cam::library::PostDef>,
+}
+
+impl Default for CamSetup {
+    fn default() -> Self {
+        CamSetup {
+            machine: "3-axis mill".into(),
+            stock_min: [0.0; 3],
+            stock_max: [0.0; 3],
+            tools: Vec::new(),
+            operations: Vec::new(),
+            name: "Setup 1".into(),
+            source: SourceKind::Design,
+            bodies: Vec::new(),
+            wcs: Wcs::default(),
+            stock: kw_cam::StockSpec::default(),
+            machine_def: None,
+            post: None,
+        }
+    }
+}
+
+impl CamSetup {
+    /// The role of a body in this setup.
+    pub fn role_of(&self, key: &BodyKey) -> BodyRole {
+        self.bodies
+            .iter()
+            .find(|b| &b.key == key)
+            .map_or(BodyRole::Workpiece, |b| b.role)
+    }
+
+    pub fn set_role(&mut self, key: &BodyKey, role: BodyRole) {
+        match self.bodies.iter_mut().find(|b| &b.key == key) {
+            Some(b) => b.role = role,
+            None => self.bodies.push(SetupBody {
+                key: key.clone(),
+                role,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +276,20 @@ pub struct Support {
     pub value: [f64; 3],
 }
 
+/// What a face looked like when a support or load was put on it: the body, the centre of its surface, its
+/// area and its mean normal. A tag counts faces in order and changes when the model gains or loses faces;
+/// the signature finds the face again, or shows that it is gone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceSig {
+    pub body: BodyKey,
+    pub centre: [f64; 3],
+    pub area: f64,
+    pub normal: [f64; 3],
+    /// The size of the body (its bounding box diagonal) when the signature was made.
+    #[serde(default)]
+    pub scale: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeaStudy {
     pub name: String,
@@ -208,6 +328,9 @@ pub struct FeaStudy {
     pub nl_steps: usize,
     #[serde(default = "yes")]
     pub nl_geometric: bool,
+    /// The signature of the face behind each tag the study uses.
+    #[serde(default)]
+    pub face_sigs: Vec<(u32, FaceSig)>,
 }
 
 fn yes() -> bool {
@@ -238,7 +361,80 @@ impl Default for FeaStudy {
             supports: Vec::new(),
             nl_steps: 0,
             nl_geometric: true,
+            face_sigs: Vec::new(),
         }
+    }
+}
+
+impl FeaStudy {
+    /// Every face tag the study uses (supports, loads, thermal conditions), once each, in order.
+    pub fn face_tags(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.fixed_tags.clone();
+        v.extend(self.supports.iter().map(|s| s.tag));
+        for l in &self.loads {
+            match l {
+                FeaLoad::Force { tag, .. } | FeaLoad::Pressure { tag, .. } => v.push(*tag),
+                FeaLoad::Gravity { .. } => {}
+            }
+        }
+        for t in &self.thermal {
+            match t {
+                ThermalBc::Temperature { tag, .. }
+                | ThermalBc::Flux { tag, .. }
+                | ThermalBc::Convection { tag, .. } => v.push(*tag),
+                ThermalBc::Generation { .. } => {}
+            }
+        }
+        let mut seen = Vec::new();
+        v.retain(|t| {
+            let new = !seen.contains(t);
+            seen.push(*t);
+            new
+        });
+        v
+    }
+
+    /// Rewrite the tags by `map` (old, new) all at once; tags not in it stay.
+    pub fn remap_faces(&mut self, map: &[(u32, u32)]) {
+        let to = |t: &mut u32| {
+            if let Some((_, n)) = map.iter().find(|(o, _)| o == t) {
+                *t = *n;
+            }
+        };
+        self.fixed_tags.iter_mut().for_each(to);
+        self.supports.iter_mut().for_each(|s| to(&mut s.tag));
+        for l in &mut self.loads {
+            match l {
+                FeaLoad::Force { tag, .. } | FeaLoad::Pressure { tag, .. } => to(tag),
+                FeaLoad::Gravity { .. } => {}
+            }
+        }
+        for t in &mut self.thermal {
+            match t {
+                ThermalBc::Temperature { tag, .. }
+                | ThermalBc::Flux { tag, .. }
+                | ThermalBc::Convection { tag, .. } => to(tag),
+                ThermalBc::Generation { .. } => {}
+            }
+        }
+        self.face_sigs.iter_mut().for_each(|(t, _)| to(t));
+    }
+
+    /// Remove every support, load and condition on the face tag `tag`, and its signature.
+    pub fn drop_face(&mut self, tag: u32) {
+        self.fixed_tags.retain(|t| *t != tag);
+        self.supports.retain(|s| s.tag != tag);
+        self.loads.retain(|l| match l {
+            FeaLoad::Force { tag: t, .. } | FeaLoad::Pressure { tag: t, .. } => *t != tag,
+            FeaLoad::Gravity { .. } => true,
+        });
+        self.thermal.retain(|b| match b {
+            ThermalBc::Temperature { tag: t, .. }
+            | ThermalBc::Flux { tag: t, .. }
+            | ThermalBc::Convection { tag: t, .. } => *t != tag,
+            ThermalBc::Generation { .. } => true,
+        });
+        self.face_sigs.retain(|(t, _)| *t != tag);
     }
 }
 

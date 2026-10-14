@@ -109,6 +109,7 @@ pub fn contour(region: &Region, tool: &Tool, side: Side, cut: &Cut) -> Toolpath 
     };
     let loops = path_region.loops();
     let mut pos: Option<P3> = None;
+    let mut z_prev = cut.top;
     for z in cut.levels() {
         for pl in &loops {
             let s = nearest_vertex(pl, pos.map_or([0.0, 0.0], |p| [p[0], p[1]]));
@@ -116,8 +117,9 @@ pub fn contour(region: &Region, tool: &Tool, side: Side, cut: &Cut) -> Toolpath 
             tp.push(Event::Rapid {
                 p: [sp[0], sp[1], cut.top + cut.clearance],
             });
+            // the level above is cut along the same loops: come down to just above its floor
             tp.push(Event::Rapid {
-                p: [sp[0], sp[1], z + 1.0_f64.min(cut.clearance)],
+                p: [sp[0], sp[1], z_prev + 1.0_f64.min(cut.clearance)],
             });
             tp.push(Event::Feed {
                 p: [sp[0], sp[1], z],
@@ -128,6 +130,7 @@ pub fn contour(region: &Region, tool: &Tool, side: Side, cut: &Cut) -> Toolpath 
             tp.events.extend(evs);
             pos = Some([sp[0], sp[1], z]);
         }
+        z_prev = z;
     }
     end_program(&mut tp, cut);
     tp
@@ -221,8 +224,9 @@ pub fn pocket(region: &Region, tool: &Tool, cut: &Cut) -> Toolpath {
                         tp.push(Event::Rapid {
                             p: [sp[0], sp[1], cut.top + cut.clearance],
                         });
+                        // the level above is cleared everywhere: come down to just above it
                         tp.push(Event::Rapid {
-                            p: [sp[0], sp[1], z + 1.0_f64.min(cut.clearance)],
+                            p: [sp[0], sp[1], z_prev + 1.0_f64.min(cut.clearance)],
                         });
                         tp.push(Event::Feed {
                             p: [sp[0], sp[1], z],
@@ -276,4 +280,64 @@ pub fn drill(points: &[P2], tool: &Tool, cut: &Cut, peck: Option<f64>) -> Toolpa
     tp.push(Event::DrillEnd);
     end_program(&mut tp, cut);
     tp
+}
+
+/// Bore a hole of `hole_diameter` centred at `centre` with a smaller tool on a helix: down in turns of
+/// `step_down` from `cut.top` to `cut.bottom`, a flat lap at the bottom, then out through the middle.
+/// `None` when the tool is not smaller than the hole.
+pub fn bore(centre: P2, hole_diameter: f64, tool: &Tool, cut: &Cut) -> Option<Toolpath> {
+    let r = 0.5 * (hole_diameter - tool.diameter) - cut.wall_allowance;
+    if r <= 1e-6 || cut.top <= cut.bottom {
+        return None;
+    }
+    let mut tp = Toolpath::new("bore");
+    start_program(&mut tp, tool, cut);
+    let start = [centre[0] + r, centre[1]];
+    let safe = cut.top + cut.clearance;
+    let near = cut.top + 1.0_f64.min(cut.clearance);
+    tp.push(Event::Rapid {
+        p: [centre[0], centre[1], safe],
+    });
+    tp.push(Event::Rapid {
+        p: [start[0], start[1], near],
+    });
+    let depth = near - cut.bottom;
+    let turns = ((depth / cut.step_down.max(0.05)).ceil() as usize).max(1);
+    // a turn is two half circles; the height falls evenly over them
+    let halves = 2 * turns;
+    for k in 0..halves {
+        let ang = std::f64::consts::PI * (k + 1) as f64;
+        let z = near - depth * (k + 1) as f64 / halves as f64;
+        tp.push(Event::Arc {
+            p: [centre[0] + r * ang.cos(), centre[1] + r * ang.sin(), z],
+            centre,
+            ccw: true,
+            feed: cut.plunge_feed.min(cut.feed),
+        });
+    }
+    // a flat lap at the bottom takes off the helix
+    for k in 0..2 {
+        let ang = std::f64::consts::PI * (k + 1) as f64;
+        tp.push(Event::Arc {
+            p: [
+                centre[0] + r * ang.cos(),
+                centre[1] + r * ang.sin(),
+                cut.bottom,
+            ],
+            centre,
+            ccw: true,
+            feed: cut.feed,
+        });
+    }
+    tp.push(Event::Feed {
+        p: [centre[0], centre[1], cut.bottom],
+        feed: cut.feed,
+    });
+    tp.push(Event::Rapid {
+        p: [centre[0], centre[1], safe],
+    });
+    tp.push(Event::CoolantOff);
+    tp.push(Event::SpindleOff);
+    tp.push(Event::ProgramEnd);
+    Some(tp)
 }
