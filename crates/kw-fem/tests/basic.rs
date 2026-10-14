@@ -133,3 +133,23 @@ fn a_raised_cancel_flag_stops_the_iterative_solver() {
         .solve_with(kind, Some(&kw_job::CancelFlag::new()))
         .is_ok());
 }
+
+#[test]
+fn colouring_copes_with_a_node_shared_by_hundreds_of_elements() {
+    use kw_fem::assemble::colour_elements;
+    // 300 elements that all share node 0 and otherwise have nodes of their own
+    let elems: Vec<[u32; 10]> = (0..300u32)
+        .map(|k| {
+            let mut e = [0u32; 10];
+            for (i, v) in e.iter_mut().enumerate().skip(1) {
+                *v = 1 + k * 9 + (i as u32 - 1);
+            }
+            e
+        })
+        .collect();
+    let nnodes = 1 + 300 * 9;
+    let colours = colour_elements(nnodes, &elems);
+    assert_eq!(colours.len(), 300, "each needs its own colour");
+    let total: usize = colours.iter().map(|c| c.len()).sum();
+    assert_eq!(total, 300);
+}

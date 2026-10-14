@@ -106,26 +106,42 @@ pub fn build_pattern(nnodes: usize, elems: &[[u32; 10]]) -> Pattern {
     Pattern { nbr_ptr, nbr }
 }
 
-/// Greedy element colouring (up to 128 colours).
+/// Greedy element colouring. A node with many elements around it (a vertex where thousands of slivers meet
+/// is rare, but a badly graded mesh has some) needs as many colours as it has elements, so the colour sets
+/// are kept in as many 128-bit words as the mesh turns out to need.
 pub fn colour_elements(nnodes: usize, elems: &[[u32; 10]]) -> Vec<Vec<u32>> {
-    let mut node_mask = vec![0u128; nnodes];
-    let mut colours: Vec<Vec<u32>> = Vec::new();
-    for (ei, e) in elems.iter().enumerate() {
-        let mut used = 0u128;
-        for &n in e {
-            used |= node_mask[n as usize];
+    let mut words = 1usize;
+    loop {
+        if let Some(c) = try_colour(nnodes, elems, words) {
+            return c;
         }
-        let c = (!used).trailing_zeros() as usize;
-        assert!(c < 128, "element colouring needs more than 128 colours");
+        words *= 2;
+    }
+}
+
+fn try_colour(nnodes: usize, elems: &[[u32; 10]], words: usize) -> Option<Vec<Vec<u32>>> {
+    let mut node_mask = vec![0u128; nnodes * words];
+    let mut colours: Vec<Vec<u32>> = Vec::new();
+    let mut used = vec![0u128; words];
+    for (ei, e) in elems.iter().enumerate() {
+        used.iter_mut().for_each(|u| *u = 0);
         for &n in e {
-            node_mask[n as usize] |= 1u128 << c;
+            for (w, u) in used.iter_mut().enumerate() {
+                *u |= node_mask[n as usize * words + w];
+            }
+        }
+        let c = used.iter().enumerate().find_map(|(w, u)| {
+            (*u != u128::MAX).then(|| w * 128 + (!*u).trailing_zeros() as usize)
+        })?;
+        for &n in e {
+            node_mask[n as usize * words + c / 128] |= 1u128 << (c % 128);
         }
         if colours.len() <= c {
             colours.resize(c + 1, Vec::new());
         }
         colours[c].push(ei as u32);
     }
-    colours
+    Some(colours)
 }
 
 struct SyncPtr(*mut f64);
