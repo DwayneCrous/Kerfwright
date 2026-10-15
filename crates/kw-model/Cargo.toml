@@ -3,6 +3,7 @@ name = "kw-model"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Feature-level solid modelling: extrude, revolve, sweep, loft, shell, offset, draft"
 
 [lib]

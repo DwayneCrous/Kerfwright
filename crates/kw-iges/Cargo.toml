@@ -3,6 +3,7 @@ name = "kw-iges"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "IGES 5.3 import: NURBS curves/surfaces, trimmed surfaces (sewn into solids) and manifold solid B-reps"
 
 [lib]

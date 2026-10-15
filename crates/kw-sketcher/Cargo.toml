@@ -3,6 +3,7 @@ name = "kw-sketcher"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Interactive 2D sketcher (egui) on top of kw-sketch and kw-dxf"
 
 [dependencies]

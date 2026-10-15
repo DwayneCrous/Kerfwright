@@ -3,6 +3,7 @@ name = "kw-materials"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [lib]
 bench = false

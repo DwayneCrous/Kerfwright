@@ -3,6 +3,7 @@ name = "kw-ssi"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Surface-surface intersection: exact analytic cases and certified level-set tracing"
 
 [lib]

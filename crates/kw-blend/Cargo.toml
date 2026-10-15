@@ -3,6 +3,7 @@ name = "kw-blend"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Edge blends: constant-radius fillets and chamfers"
 
 [lib]

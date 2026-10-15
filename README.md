@@ -1,87 +1,355 @@
+<div align="center">
+
+<img src="docs/images/logo.svg" alt="Kerfwright logo" width="96" height="96">
+
 # Kerfwright
 
-> **Kerfwright**: a pure-Rust, clean-room CAD/CAM/CAE/ECAD suite.
+**Sketch, machine, simulate and route in one program.**
 
-This repository holds the **research, specification and architecture blueprint** plus a Cargo workspace. **Phase 1 (math foundation, kernel skeleton, tessellator, exporters, wgpu viewer) is implemented** — see [`docs/phase1-report.md`](docs/phase1-report.md) for results against the acceptance criteria and a list of known gaps. **Phase 2 (sketcher & constraint solver, DXF, egui sketcher app) is implemented** — see [`docs/phase2-report.md`](docs/phase2-report.md). **Phase 3 (B-rep modelling kernel: SSI, Booleans, extrude/revolve/sweep/loft, fillet/chamfer, shell/offset/draft, mass properties, STEP, IGES) is implemented** — see [`docs/phase3-report.md`](docs/phase3-report.md) for the measured results, the criteria that are only partly met, and the oracle set-up. **Phase 4 (parametric engine: expressions with units, incremental evaluator with early cutoff, persistent topological names, `.kwf` file format, timeline edits, assemblies, sheet metal, SubD, scripting) is implemented** — see [`docs/phase4-report.md`](docs/phase4-report.md); two of its criteria are met only in part (cold replay of one long linear chain; exact G1 at SubD extraordinary vertices). **Phase 5 (CAM with adaptive clearing, drop-cutter, tri-dexel stock, five-axis kinematics and five post-processors; tetrahedral meshing and TET10 FEA with SIMP; ECAD with placement, routing, DRC, pour and fabrication outputs; OIT/GTAO/path-traced rendering with a denoiser) is implemented** — see [`docs/phase5-report.md`](docs/phase5-report.md); its criteria are met as measured, but the suites, simulators and viewers it uses are defined and written in this repository, the adaptive-clearing freedom-to-operate review is not done, and the IDF bottom-side convention is unverified. Phase 6 is not started. **The application** (`kw-app`: welcome page, projects, and the Sketch / Model / CAM / FEA / ECAD / Render workspaces) is described in [`docs/app-shell.md`](docs/app-shell.md); the Model workspace exposes only a few of the engine's features so far.
+A CAD, CAM, FEA and ECAD suite written in pure Rust, on its own B-rep kernel.
 
-## Read in this order
-| # | File | What it is |
-|---|---|---|
-| 0 | [`CLEAN_ROOM.md`](CLEAN_ROOM.md) | Rules on sources, licensing, naming; epistemic labels used in the docs |
-| 1 | [`docs/01-research/01-brep-kernel.md`](docs/01-research/01-brep-kernel.md) | B-rep topology, NURBS, SSI, Booleans, fillets, T-splines vs SubD |
-| 1 | [`docs/01-research/02-constraint-solver.md`](docs/01-research/02-constraint-solver.md) | 2D constraints, G0–G3, LM/Newton/BFGS, decomposition, DOF analysis |
-| 1 | [`docs/01-research/03-parametric-dag.md`](docs/01-research/03-parametric-dag.md) | Topological naming, feature DAG, incremental evaluation |
-| 1 | [`docs/01-research/04-multidomain.md`](docs/01-research/04-multidomain.md) | CAM, FEA, ECAD, `wgpu` rendering |
-| 1 | [`docs/01-research/05-rust-ecosystem.md`](docs/01-research/05-rust-ecosystem.md) | Crate evaluation and gap analysis |
-| 2 | [`docs/02-PRD.md`](docs/02-PRD.md) | Product requirements, 8 workspaces, SLAs, file formats |
-| 3 | [`docs/03-architecture.md`](docs/03-architecture.md) | Rust domain models, ASCII memory/state/thread diagrams |
-| 3 | [`docs/04-roadmap.md`](docs/04-roadmap.md) | 6-phase plan with acceptance criteria |
-| — | [`LICENSES/patent-watch.md`](LICENSES/patent-watch.md) | Patent items needing counsel review |
+[![CI](https://img.shields.io/github/actions/workflow/status/DwayneCrous/Kerfwright/ci.yml?branch=main&style=flat-square&label=CI&labelColor=16191d&color=7ba2ee)](https://github.com/DwayneCrous/Kerfwright/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-7ba2ee?style=flat-square&labelColor=16191d)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-7ba2ee?style=flat-square&labelColor=16191d)](rust-toolchain.toml)
+[![Status](https://img.shields.io/badge/status-pre--release-ef8a74?style=flat-square&labelColor=16191d)](docs/STATUS.md)
+[![Phases](https://img.shields.io/badge/phases-5%20of%206-7ba2ee?style=flat-square&labelColor=16191d)](#status)
 
-## Workspace layout
-```
-crates/
-  kw-math      tolerance, frames, transforms, AABB, robust predicates
-  kw-nurbs     knot vectors, NURBS curves/surfaces (derivatives, insertion/removal,
-               elevation, Bézier extraction, fitting, closest point), analytic geometry
-  kw-brep      slotmap B-rep (coedge + radial ring), validation, primitive builders, shape history
-  kw-tess      crack-free edge-first tessellator
-  kw-analysis  surface diagnostics: curvature, draft angle, zebra stripes, edge continuity (G0 / G1 / G2)
-  kw-io        STL / OBJ+MTL / glTF / GLB writers
-  kw-viewer    wgpu viewer (PBR, edges, ID-buffer picking); windowed + headless
-  kw-sketch    sketch entities, residual library + analytic Jacobians, DM decomposition,
-               sparse LM solver, DOF/redundancy/conflict analysis, drag solver,
-               trim/extend/offset, toolkit-independent Editor
-  kw-dxf       ASCII DXF (R2000) reader/writer + sketch adapters
-  kw-sketcher  egui sketcher application (binary)
-  kw-ssi       surface–surface intersection (exact quadric cases + certified level-set tracing, signed-distance field for free-form surfaces, pcurves on both surfaces)
-  kw-boolean   union / intersect / subtract (imprint, arrangement, classification, stitching, ShapeHistory)
-  kw-model     profiles → extrude / revolve / sweep / loft (open and closed); shell, offset, draft; rebuild engine; surfaces: sheet builders, Coons patch, ruled, stitch, offset, thicken, trim, extend, match
-  kw-blend     constant- and variable-radius (any law) fillets, tangent chains, vertex blends, chamfers (swept-tool Booleans)
-  kw-step      ISO 10303-21 parser, AP203/214/242 B-rep import and export (`step_tool` example for oracle checks)
-  kw-iges      IGES 5.3 import (trimmed surfaces → sewn solids)
-  kw-expr      expressions with units (dimension-checked), free-variable analysis
-  kw-feature   feature document + timeline, incremental engine (cache, early cutoff, parallel levels), persistent topological names, `.kwf` format, Phase 3 kernel executor
-  kw-sheet     sheet metal strips: exact B-rep, bend allowance, flat pattern + DXF, recognise / refold
-  kw-subd      Catmull–Clark + creases, Finish → B-rep of bicubic patches
-  kw-assembly  parts, instances, joints (kinematic tree), interference, mass, STEP
-  kw-script    rhai scripting over the document builder API
-  kw-job       cancel flag, progress, capped thread pool
-  kw-mesh3d    constrained Delaunay + refinement tetrahedral mesher, TET10, quality
-  kw-fem       TET10 static (direct/PCG), modal, stress recovery, SIMP, closed-form references
-  kw-cam       2.5-D ops, adaptive clearing + verifier, drop-cutter, tri-dexel, five-axis kinematics, swarf/3+2, post DSL
-  kw-gsim      independent interpreters for the five G-code / Klartext dialects
-  kw-ecad      board model, placement, router, DRC, pour, Gerber/Excellon/IDF/STEP/pick-and-place
-  kw-fabcheck  two Gerber viewers + Excellon parser used to check the outputs
-  kw-render    WBOIT + GTAO + edges frame, LBVH path tracer (WGSL), denoiser, f64 reference
-  kw-store     cam / fea / board / drawings entries inside the `.kwf` container
-  kw-drawing   2-D drawings: sheets, hidden-line views, sections, details, dimensions, annotation, parts list, PDF / DXF
-  kw-app       the application (egui): welcome page, projects, seven workspaces; Rayon ⇄ Tokio bridge, command/event types
-```
+[Features](#features) &nbsp;|&nbsp;
+[Screenshots](#screenshots) &nbsp;|&nbsp;
+[Quick start](#quick-start) &nbsp;|&nbsp;
+[Architecture](#architecture) &nbsp;|&nbsp;
+[Status](#status) &nbsp;|&nbsp;
+[Documentation](#documentation)
 
-## Try it
+<br>
+
+<img src="docs/images/design_extrude_preview.png" alt="The Design workspace with the Extrude dialog open over a live preview" width="900">
+
+</div>
+
+<br>
+
+## What it is
+
+Kerfwright keeps the whole job in one project file. The sketches, the parametric history, the toolpaths, the
+simulation studies and the circuit board all live in a single `.kwf` file, so changing a dimension in a sketch
+reaches the G-code and the stress plot without an export step in between.
+
+Everything is written in Rust, from the NURBS maths and the Boolean kernel up to the GPU renderer and the
+egui application. It is **pre-release software**: the engines of phases 1 to 5 are built and measured, the
+application is usable, and there are no installers yet.
+
+## Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### Design
+* Constraint sketcher with a sparse solver, snapping and region picking
+* Parametric timeline with rollback, reorder, suppress and named parameters
+* Extrude, revolve, sweep, loft, hole, shell, draft, offset, patterns
+* Fillets (constant and variable radius) and chamfers
+* Booleans with a verified heal stage
+* Sheet metal with flat patterns, SubD forms, surfaces with continuity analysis
+* Assemblies with joints, mechanisms, interference and bill of materials
+
+</td>
+<td width="50%" valign="top">
+
+### Manufacture
+* 2.5-D pocket, contour, face, drill and bore operations
+* Adaptive clearing with an engagement verifier
+* Drop-cutter 3-D finishing, waterline, rest and swarf
+* Tri-dexel stock simulation and holder collision checks
+* Five-axis kinematics and 3+2 setups
+* Five post-processors, each checked by an independent interpreter
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Simulate
+* Tetrahedral meshing with TET10 elements
+* Static (direct and PCG) and modal studies
+* Stress recovery and SIMP topology optimisation
+* Supports and loads picked directly on faces
+
+</td>
+<td width="50%" valign="top">
+
+### Electronics
+* Placement, routing and design-rule checking
+* Copper pour
+* Gerber, Excellon, IDF, STEP and pick-and-place output
+* Outputs cross-checked by two independent Gerber viewers
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Render and draw
+* Real-time frame with OIT, ambient occlusion and edges
+* Path tracer on a BVH, with a denoiser
+* Drawings with hidden-line views, sections, details, dimensions and a parts list, out to PDF and DXF
+
+</td>
+<td width="50%" valign="top">
+
+### Exchange
+* STEP (AP203, AP214, AP242) import and export
+* IGES 5.3 import
+* DXF, STL, OBJ with MTL, glTF and GLB
+* Rhai scripting over the document builder
+
+</td>
+</tr>
+</table>
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/cam.png" alt="Manufacture workspace: a pocket toolpath and Fanuc G-code"><br><sub><b>Manufacture.</b> A pocket toolpath with generated Fanuc G-code.</sub></td>
+<td width="50%"><img src="docs/images/fea.png" alt="Simulation workspace: von Mises stress on a loaded block"><br><sub><b>Simulation.</b> Von Mises stress on a loaded, fixed block.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/ecad.png" alt="Electronics workspace: a routed two-layer board"><br><sub><b>Electronics.</b> A routed two-layer board with 0 rule violations.</sub></td>
+<td width="50%"><img src="docs/images/render_path_traced.jpg" alt="Render workspace: a path-traced block on a ground plane"><br><sub><b>Render.</b> Path tracing at 128 samples per pixel.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/design_assembly.png" alt="Design workspace: two components on a revolute joint with an interference highlighted"><br><sub><b>Assemblies.</b> A revolute joint with the interference volume outlined.</sub></td>
+<td width="50%"><img src="docs/images/s3_surface-zebra.png" alt="Surface analysis: zebra stripes on a lofted surface"><br><sub><b>Surfaces.</b> Zebra analysis on a lofted surface and a solid.</sub></td>
+</tr>
+</table>
+
+<sub>Screenshots are taken from the real application by `scripts/app_acceptance.sh`.</sub>
+
+## Quick start
+
+You need Rust (the toolchain is pinned to stable by `rust-toolchain.toml`) and a GPU with a Vulkan, Metal or
+DX12 driver.
+
 ```bash
-# needs Rust (rustup) and a Vulkan/Metal/DX12 GPU
-cargo run --release -p kw-app                          # THE APPLICATION: welcome page -> project -> Sketch / Model / CAM / FEA / ECAD / Render (docs/app-shell.md)
-scripts/app_acceptance.sh                              # its tests and a screenshot of every screen
-cargo run --release -p kw-viewer                       # window: drag = orbit, right-drag = pan, wheel = zoom, E = edges, F = frame
-cargo run --release -p kw-viewer -- --scene million    # 1M-triangle scene
-cargo run --release -p kw-viewer -- --headless --scene primitives --pick-test
-cargo run -p kw-io --example export_primitives -- out/ # STL / OBJ / glTF / GLB of every primitive
-scripts/phase1_acceptance.sh                           # every automated Phase 1 check
-cargo run --release -p kw-sketcher -- --demo           # 2D sketcher (L line, R rectangle, C circle, D dimension, Ctrl+Z undo)
-scripts/phase2_acceptance.sh                           # every automated Phase 2 check
-scripts/phase3_acceptance.sh                           # every automated Phase 3 check (both 100,000-pair Boolean fuzzes: ~2.5 h)
-scripts/phase4_acceptance.sh                           # every automated Phase 4 check (~10 min)
-scripts/phase5_acceptance.sh                           # every automated Phase 5 check (~25 min; needs a GPU for the rendering steps)
+git clone https://github.com/DwayneCrous/Kerfwright.git
+cd Kerfwright
+cargo run --release -p kw-app
 ```
 
-## Status / caveats
-* Phase 3 meets its six acceptance criteria as measured (details and caveats in [`docs/phase3-report.md`](docs/phase3-report.md)): Boolean fuzz 100,000 pairs (99.90 % on valid-expected cases, 0 invalid outputs, 0 wrong results found by an independent point-classification check), free-form-body fuzz 100,000 pairs (99.61 %, 0 invalid, 0 identity violations), SSI (including spline/spline), fillet / chamfer benchmark 500/500 with tangent chains, vertex blends, variable-radius fillets, STEP round trip with OpenCASCADE, truck and Gmsh, 259/259 public-corpus files, and the Boolean (500 ms) and fillet (300 ms) SLAs. A Boolean *heal* stage retries failed or doubtful operations and only returns verified results. Not done: vertex blends beyond three equal-radius planar faces (other corners meet in a mitre by design), variable radius on ellipse / spline edges and on sphere / torus / spline faces, setback, and one fuzz seed (34267) where the point oracle and a free-form Boolean result disagree and the cause is not found.
-* Phase 2 meets all six automated criteria; the drag-latency SLA is asserted on decomposable sketches and is exceeded on row-coupled ones (8.6 ms p99 at 500 entities), G3/mirror/pattern are not done, and the sketcher window has been smoke-tested but not visually reviewed — details in the Phase 2 report.
-* Phase 1 is complete against its automated criteria; the exceptions (published Piegl–Tiller examples beyond Ex. 2.3, opening exports in third-party viewers, "reference GPU" undefined) are listed in the Phase 1 report.
-* Phase 4 results (details and caveats in [`docs/phase4-report.md`](docs/phase4-report.md)): naming corpus 1 716 scenarios, 0 silent wrong resolutions, 99.9 % correct; identical geometry and names on 1 / 4 / 32 threads; no-op edits re-execute nothing; cold replay of a 200-feature model of eight parts 0.34 s with a 53 ms tail edit, but **8.7 s / 0.2 s for one linear chain of 100 Booleans**; timeline refusals judged like an independent oracle in 100 % of 2 800+ cases; sheet-metal flat lengths exact to 1e-14 mm; SubD within 0.01 mm of the limit surface with 0.4–1.4° worst tangent mismatch at extraordinary vertices. The timeline UI was headless (engine + API) when Phase 4 was done; the application now has one (see below).
-* Phase 5 results (details and caveats in [`docs/phase5-report.md`](docs/phase5-report.md)): adaptive clearing 1.010 × target engagement on 50 seeded pockets; 0 gouges and 0 holder collisions on 21 parts; tri-dexel volumes within 0.13 %; FK(IK) 2.6e-12 on 5 machines; five dialects replay 50 five-axis programs; TET10 benchmarks within 0.1–1.8 %; 100 k DOF in 3.6 s and 1 M DOF PCG in 81 s; SIMP MBB 216.81; 1 023/1 023 nets routed with 0 DRC violations on 20 boards; STEP placement error 8e-8 mm; 1 M triangles at 2.6 ms p95 (1080p); path tracer 0.8 % relative MSE at 16 spp, denoised 30.5 dB at 64 spp.
-* Surfaces (the SURFACE tab, surface analysis, continuity): results, sources and limits in [`docs/surface-report.md`](docs/surface-report.md); `scripts/surface_acceptance.sh` runs its checks and takes the screenshots.
-* Statements about proprietary kernels (ASM, Parasolid, ACIS) are labelled **[Public]** or **[Inferred]** in the research docs; nothing here is derived from Autodesk code or binaries.
-* Performance numbers in the PRD are targets; measured Phase 1 numbers are in the report.
+That opens the welcome page: create a project, open a `.kwf` file, or open the demo part. Command-line
+options:
+
+| Option | Effect |
+|---|---|
+| `FILE.kwf` | Open a project directly |
+| `--demo` | Open the demo part |
+| `--workspace NAME` | Start in a given workspace |
+
+<details>
+<summary><b>More programs and acceptance scripts</b></summary>
+
+<br>
+
+```bash
+cargo run --release -p kw-viewer                        # standalone viewer: drag = orbit, right-drag = pan, wheel = zoom
+cargo run --release -p kw-viewer -- --scene million     # 1M-triangle scene
+cargo run --release -p kw-sketcher -- --demo            # 2D sketcher (L line, R rectangle, C circle, D dimension)
+cargo run -p kw-io --example export_primitives -- out/  # STL / OBJ / glTF / GLB of every primitive
+```
+
+Each phase has an acceptance script that runs every automated check for it:
+
+| Script | Covers | Rough time |
+|---|---|---|
+| `scripts/app_acceptance.sh` | Application tests and a screenshot of every screen | needs a display |
+| `scripts/phase1_acceptance.sh` | Maths, kernel skeleton, tessellator, exporters, viewer | |
+| `scripts/phase2_acceptance.sh` | Sketcher and constraint solver, DXF | |
+| `scripts/phase3_acceptance.sh` | B-rep kernel, including both 100,000-pair Boolean fuzzes | about 2.5 h |
+| `scripts/phase4_acceptance.sh` | Parametric engine, file format, assemblies, sheet metal, SubD | about 10 min |
+| `scripts/phase5_acceptance.sh` | CAM, FEA, ECAD, rendering (GPU needed for the rendering steps) | about 25 min |
+| `scripts/surface_acceptance.sh` | Surface tools and their screenshots | |
+
+</details>
+
+## By the numbers
+
+Measured by the acceptance scripts. Each figure has caveats; they are written down next to it in the linked
+report and collected in [`docs/STATUS.md`](docs/STATUS.md).
+
+| Area | Result | Report |
+|---|---|---|
+| Boolean kernel | 100,000 fuzzed pairs: 99.90 % on valid-expected cases, 0 invalid outputs | [Phase 3](docs/phase3-report.md) |
+| Fillets and chamfers | 500 of 500 benchmark cases, including tangent chains and variable radius | [Phase 3](docs/phase3-report.md) |
+| STEP | 259 of 259 public-corpus files; round trip with OpenCASCADE, truck and Gmsh | [Phase 3](docs/phase3-report.md) |
+| Persistent naming | 1,716 scenarios, 0 silent wrong resolutions | [Phase 4](docs/phase4-report.md) |
+| Sheet metal | Flat lengths exact to 1e-14 mm | [Phase 4](docs/phase4-report.md) |
+| Adaptive clearing | 1.010 x target engagement on 50 seeded pockets, 0 gouges | [Phase 5](docs/phase5-report.md) |
+| FEA | TET10 benchmarks within 0.1 to 1.8 %; 1 M DOF PCG in 81 s | [Phase 5](docs/phase5-report.md) |
+| Routing | 1,023 of 1,023 nets routed with 0 DRC violations on 20 boards | [Phase 5](docs/phase5-report.md) |
+| Rendering | 1 M triangles at 2.6 ms p95 (1080p) | [Phase 5](docs/phase5-report.md) |
+
+## Architecture
+
+The workspace is 34 crates. This is the rough layering, from the foundation up to the application; see the table below for every crate.
+
+```mermaid
+flowchart TD
+    A["Foundation<br/>kw-math, kw-nurbs, kw-brep, kw-tess"]
+    B["Kernel<br/>kw-ssi, kw-boolean, kw-blend, kw-model, kw-sketch"]
+    C["Parametric engine<br/>kw-expr, kw-feature, kw-assembly, kw-sheet, kw-subd, kw-script"]
+    D["Domains<br/>kw-cam, kw-mesh3d, kw-fem, kw-ecad, kw-render, kw-drawing"]
+    E["Interchange and storage<br/>kw-step, kw-iges, kw-dxf, kw-io, kw-store"]
+    F["Application<br/>kw-app"]
+    A --> B --> C --> D --> F
+    E --> C
+    E --> F
+```
+
+<details>
+<summary><b>All 34 crates</b></summary>
+
+<br>
+
+**Foundation**
+
+| Crate | Purpose |
+|---|---|
+| `kw-math` | Tolerance, frames, transforms, bounding boxes, robust predicates |
+| `kw-nurbs` | Knot vectors, NURBS curves and surfaces (derivatives, insertion and removal, elevation, Bezier extraction, fitting, closest point), analytic geometry |
+| `kw-brep` | Slotmap B-rep (coedge and radial ring), validation, primitive builders, shape history |
+| `kw-tess` | Crack-free, edge-first tessellator |
+| `kw-analysis` | Surface diagnostics: curvature, draft angle, zebra stripes, edge continuity (G0, G1, G2) |
+| `kw-job` | Cancel flag, progress, capped thread pool |
+| `kw-materials` | Material library shared by mass properties, FEA and CAM |
+
+**Kernel**
+
+| Crate | Purpose |
+|---|---|
+| `kw-ssi` | Surface-surface intersection: exact quadric cases, certified level-set tracing, signed-distance field for free-form surfaces |
+| `kw-boolean` | Union, intersect, subtract: imprint, arrangement, classification, stitching, shape history |
+| `kw-model` | Profiles to extrude, revolve, sweep and loft; shell, offset, draft; surface builders (Coons, ruled, stitch, offset, thicken, trim, extend, match) |
+| `kw-blend` | Constant and variable radius fillets, tangent chains, vertex blends, chamfers |
+| `kw-sketch` | Sketch entities, residual library with analytic Jacobians, decomposition, sparse LM solver, DOF and conflict analysis, drag solver |
+
+**Parametric engine**
+
+| Crate | Purpose |
+|---|---|
+| `kw-expr` | Dimension-checked expressions with units |
+| `kw-feature` | Feature document and timeline, incremental engine with early cutoff, persistent topological names, the `.kwf` format |
+| `kw-assembly` | Parts, instances, joints, kinematic loops, interference, mass |
+| `kw-sheet` | Sheet metal: exact B-rep strips, bend allowance, flat pattern, refold |
+| `kw-subd` | Catmull-Clark with creases, finished to a B-rep of bicubic patches |
+| `kw-script` | Rhai scripting over the document builder API |
+
+**Domains**
+
+| Crate | Purpose |
+|---|---|
+| `kw-cam` | 2.5-D operations, adaptive clearing and verifier, drop-cutter, tri-dexel stock, five-axis kinematics, post DSL |
+| `kw-gsim` | Independent interpreters for the five G-code and Klartext dialects |
+| `kw-mesh3d` | Constrained Delaunay and refinement tetrahedral mesher, TET10, quality metrics |
+| `kw-fem` | TET10 static (direct and PCG) and modal solvers, stress recovery, SIMP, closed-form references |
+| `kw-ecad` | Board model, placement, router, DRC, pour, Gerber, Excellon, IDF, STEP, pick-and-place |
+| `kw-fabcheck` | Two Gerber viewers and an Excellon parser used to check the outputs |
+| `kw-render` | WBOIT, GTAO and edges frame, LBVH path tracer in WGSL, denoiser, f64 reference |
+| `kw-drawing` | Sheets, hidden-line views, sections, details, dimensions, annotation, parts list, PDF and DXF |
+
+**Interchange and storage**
+
+| Crate | Purpose |
+|---|---|
+| `kw-step` | ISO 10303-21 parser, AP203, AP214 and AP242 B-rep import and export |
+| `kw-iges` | IGES 5.3 import, trimmed surfaces sewn into solids |
+| `kw-dxf` | ASCII DXF (R2000) reader and writer with sketch adapters |
+| `kw-io` | STL, OBJ with MTL, glTF and GLB writers |
+| `kw-store` | CAM, FEA, board and drawing entries inside the `.kwf` container |
+
+**Applications**
+
+| Crate | Purpose |
+|---|---|
+| `kw-app` | The application (egui): welcome page, projects, the workspaces, a Rayon and Tokio bridge |
+| `kw-viewer` | Standalone wgpu viewer with PBR, edges and ID-buffer picking, windowed and headless |
+| `kw-sketcher` | Standalone egui sketcher |
+
+</details>
+
+## Status
+
+Kerfwright is built in six phases. Each phase has acceptance criteria and a report that says what was measured
+and what fell short.
+
+| Phase | Scope | State | Report |
+|---|---|---|---|
+| 1 | Maths foundation, kernel skeleton, tessellator, exporters, wgpu viewer | Implemented | [report](docs/phase1-report.md) |
+| 2 | Sketcher and constraint solver, DXF, egui sketcher | Implemented | [report](docs/phase2-report.md) |
+| 3 | B-rep kernel: SSI, Booleans, extrude, revolve, sweep, loft, fillet, shell, STEP, IGES | Implemented | [report](docs/phase3-report.md) |
+| 4 | Parametric engine: expressions, incremental evaluation, persistent names, `.kwf`, assemblies, sheet metal, SubD, scripting | Implemented, two criteria partly met | [report](docs/phase4-report.md) |
+| 5 | CAM, FEA, ECAD, advanced rendering | Implemented | [report](docs/phase5-report.md) |
+| 6 | Not started | Planned | [roadmap](docs/04-roadmap.md) |
+
+Some things you should know before relying on it:
+
+* The Model workspace exposes only part of the engine's features so far.
+* Sketching happens on a flat 2-D canvas, and the model is evaluated on the UI thread, so a very heavy model
+  pauses the window.
+* The Phase 5 suites, simulators and viewers are written in this repository, the adaptive-clearing
+  freedom-to-operate review is not done, and the IDF bottom-side convention is unverified.
+* ECAD offers generated sample boards only.
+
+The full list of caveats, with numbers, is in [`docs/STATUS.md`](docs/STATUS.md). The application is described in
+[`docs/app-shell.md`](docs/app-shell.md) and its distance from Fusion 360 in
+[`docs/fusion-parity.md`](docs/fusion-parity.md).
+
+## Documentation
+
+Read in this order if you are new to the codebase.
+
+| | File | What it is |
+|---|---|---|
+| 0 | [`CLEAN_ROOM.md`](CLEAN_ROOM.md) | Rules on sources, licensing and naming; epistemic labels used in the docs |
+| 1 | [`docs/01-research/01-brep-kernel.md`](docs/01-research/01-brep-kernel.md) | B-rep topology, NURBS, SSI, Booleans, fillets, T-splines versus SubD |
+| 1 | [`docs/01-research/02-constraint-solver.md`](docs/01-research/02-constraint-solver.md) | 2-D constraints, G0 to G3, LM, Newton and BFGS, decomposition, DOF analysis |
+| 1 | [`docs/01-research/03-parametric-dag.md`](docs/01-research/03-parametric-dag.md) | Topological naming, feature DAG, incremental evaluation |
+| 1 | [`docs/01-research/04-multidomain.md`](docs/01-research/04-multidomain.md) | CAM, FEA, ECAD, wgpu rendering |
+| 1 | [`docs/01-research/05-rust-ecosystem.md`](docs/01-research/05-rust-ecosystem.md) | Crate evaluation and gap analysis |
+| 2 | [`docs/02-PRD.md`](docs/02-PRD.md) | Product requirements, workspaces, SLAs, file formats |
+| 3 | [`docs/03-architecture.md`](docs/03-architecture.md) | Rust domain models, memory, state and thread diagrams |
+| 3 | [`docs/04-roadmap.md`](docs/04-roadmap.md) | Six-phase plan with acceptance criteria |
+| | [`docs/app-shell.md`](docs/app-shell.md) | The application, screen by screen |
+| | [`docs/STATUS.md`](docs/STATUS.md) | Measured results and caveats for every phase |
+
+The `website/` directory holds the project site (Astro and Starlight), built from the same documents.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening one:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p <crate>          # prefer per-crate runs; see below
+```
+
+* `cargo test --workspace` is what CI runs, but locally it is slow: the FEA and feature performance tests run
+  for minutes, and the CAM, kernel and SubD suites want `--release`. Run the crate you changed.
+* Eight pointer-driven tests in `crates/kw-app/tests/shell.rs` fail with an egui `TexturesDelta` panic on a
+  clean checkout in at least one environment. Treat any other failure as new.
+* Every algorithm needs a source. [`CLEAN_ROOM.md`](CLEAN_ROOM.md) lists what you may read and what you may not;
+  read it before sending code that touches a solver, kernel or CAM routine.
+
+## Clean room and patents
+
+Kerfwright is an independent implementation of well-known CAD, CAM and CAE techniques. It is not affiliated with,
+derived from or endorsed by Autodesk, Siemens, Spatial or any other CAD vendor, and nothing in it comes from
+proprietary code or binaries. Statements about proprietary kernels in the research documents are labelled
+**[Public]** or **[Inferred]**. Items that need legal review before shipping are tracked in
+[`LICENSES/patent-watch.md`](LICENSES/patent-watch.md).
+
+## License
+
+Released under the [MIT License](LICENSE).
