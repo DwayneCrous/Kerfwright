@@ -3,7 +3,7 @@
   import type { KwViewer } from '../lib/viewer';
 
   let host: HTMLDivElement;
-  let viewer: KwViewer | null = null;
+  let viewer = $state.raw<KwViewer | null>(null);
   let failed = $state(false);
   let ready = $state(false);
 
@@ -26,9 +26,11 @@
   });
 
   // Changing a parameter rebuilds the model, the same idea as editing a dimension in the app.
-  $effect(() => { viewer?.setParams({ teeth, bolts }); });
-  $effect(() => { viewer?.setExploded(exploded); });
-  $effect(() => { viewer?.setWireframe(wire); });
+  // Read the state before the null check: `viewer?.f(x)` short-circuits and would leave
+  // the effect with no dependencies, so it would never re-run.
+  $effect(() => { const p = { teeth, bolts }; viewer?.setParams(p); });
+  $effect(() => { const on = exploded; viewer?.setExploded(on); });
+  $effect(() => { const on = wire; viewer?.setWireframe(on); });
 </script>
 
 <figure class="sheet m-0">
