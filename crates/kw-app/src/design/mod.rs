@@ -1124,14 +1124,33 @@ impl DesignWorkspace {
         let b = shown.clone();
         // while the assembly is shown the view draws the posed components (nothing in it can be picked)
         let asm_view = self.asm_display(project);
-        let key = asm_view.as_ref().map_or(key, |a| a.0);
+        // the design's own bodies (those not made components) are drawn with the posed components
+        let key = asm_view
+            .as_ref()
+            .map_or(key, |a| a.0 ^ geom_key.rotate_left(29));
         let out = self.viewport.show_with(
             ui,
             rs,
             key,
             move || {
                 let mut m = match (&asm_view, &b) {
-                    (Some((_, rep, cols)), _) => ModelScene::build_analysed(rep, cols, curvature),
+                    (Some((_, rep, cols)), own) => match own {
+                        Some(own) if !own.brep.bodies.is_empty() => {
+                            let mut rep = (**rep).clone();
+                            let mut cols = cols.clone();
+                            let own_cols = own.colours();
+                            for (i, body) in own.brep.bodies.keys().enumerate() {
+                                rep.copy_body_from(
+                                    &own.brep,
+                                    body,
+                                    &kw_brep::CopyOptions::default(),
+                                );
+                                cols.push(own_cols.get(i).copied().unwrap_or([180, 190, 205]));
+                            }
+                            ModelScene::build_analysed(&rep, &cols, curvature)
+                        }
+                        _ => ModelScene::build_analysed(rep, cols, curvature),
+                    },
                     (None, Some(b)) => ModelScene::build_analysed(&b.brep, &b.colours(), curvature),
                     (None, None) => ModelScene::empty(),
                 };

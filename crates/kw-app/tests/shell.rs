@@ -9367,3 +9367,72 @@ fn an_empty_component_does_not_hide_the_others_in_the_assembly_view() {
         assert_eq!(tops, if draw { 2 } else { 1 });
     }
 }
+
+#[test]
+fn the_designs_own_body_stays_visible_next_to_a_new_component() {
+    let (mut h, _d) = design_harness("own_body_and_component");
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    act(&mut h, Action::NewEmptyComponent);
+    sketch_block(&mut h, 5.0, 5.0, "30 mm");
+    commit(&mut h);
+    act(&mut h, Action::FinishComponent);
+    h.frame();
+    h.frame();
+    assert!(h.app.design.asm.view);
+    // the design's block was never made a component, yet it is drawn with the new component
+    let pts: Vec<[f64; 3]> = h
+        .app
+        .design
+        .viewport
+        .model()
+        .unwrap()
+        .edge_polylines()
+        .into_iter()
+        .flatten()
+        .collect();
+    let max = |k: usize| pts.iter().map(|p| p[k]).fold(f64::MIN, f64::max);
+    // the 20 x 20 block reaches x = 20, the 5 x 5 x 30 component reaches z = 30
+    assert!(
+        max(0) > 19.9,
+        "the design's block is drawn: x reaches {}",
+        max(0)
+    );
+    assert!(
+        max(2) > 29.9,
+        "the component is drawn: z reaches {}",
+        max(2)
+    );
+}
+
+#[test]
+fn clicking_the_designs_own_body_in_the_joint_command_makes_it_a_component() {
+    let (mut h, _d) = design_harness("joint_own_body");
+    sketch_block(&mut h, 20.0, 20.0, "10 mm");
+    commit(&mut h);
+    act(&mut h, Action::NewEmptyComponent);
+    sketch_block(&mut h, 5.0, 5.0, "30 mm");
+    commit(&mut h);
+    act(&mut h, Action::FinishComponent);
+    let Screen::Project { project, .. } = &mut h.app.screen else {
+        panic!()
+    };
+    assert_eq!(project.assembly.as_ref().unwrap().instances.len(), 1);
+    // without the Joint command the click only explains
+    h.app.design.asm_click_on_design_body(project);
+    assert_eq!(project.assembly.as_ref().unwrap().instances.len(), 1);
+    assert!(
+        h.app.design.status.contains("not a component"),
+        "{}",
+        h.app.design.status
+    );
+    // the Joint command needs two components; the design's block is the second once it is clicked
+    h.app.design.asm.dialog = Some(kw_app::design::asm_joint::JointDialog::new(false));
+    h.app.design.asm_click_on_design_body(project);
+    assert_eq!(project.assembly.as_ref().unwrap().instances.len(), 2);
+    assert!(
+        h.app.design.status.contains("Click it again"),
+        "{}",
+        h.app.design.status
+    );
+}

@@ -356,6 +356,10 @@ impl DesignWorkspace {
         if project.evaluation().final_solid().is_none() {
             return Err("the design has no solid to make a component of".into());
         }
+        // the component is a copy of the whole design: hide the design's bodies so they are not drawn twice
+        for b in crate::bodies::summaries(&doc) {
+            self.hidden_bodies.insert(doc.body_root(b.head));
+        }
         let name = self.asm.new_name.trim().to_string();
         let name = if name.is_empty() { "Part".into() } else { name };
         project.asm_checkpoint();

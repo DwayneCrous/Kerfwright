@@ -281,6 +281,8 @@ impl DesignWorkspace {
         match click {
             Some(pick) => {
                 let Some((top, _)) = self.asm_owner(*pick) else {
+                    // a body of the design that is not a component: say so instead of ignoring the click
+                    self.asm_click_on_design_body(project);
                     return;
                 };
                 if self.asm.dialog.is_some() {
@@ -296,6 +298,34 @@ impl DesignWorkspace {
                     self.asm.selected_joint = None;
                 }
             }
+        }
+    }
+
+    /// A click landed on a body of the design that is not a component, so no joint can use it. While the
+    /// Joint command is open a lone such body becomes a component (the user clicks it again); otherwise
+    /// the status line says what to do.
+    pub fn asm_click_on_design_body(&mut self, project: &mut Project) {
+        let doc = project.document();
+        let own: Vec<_> = crate::bodies::summaries(&doc)
+            .into_iter()
+            .filter(|b| !b.mesh && !self.hidden_bodies.contains(&b.root))
+            .collect();
+        if own.is_empty() {
+            return;
+        }
+        if self.asm.dialog.is_some() && own.len() == 1 {
+            let (head, name) = (own[0].head, own[0].name.clone());
+            match self.asm_component_from_body(project, head) {
+                Ok(_) => {
+                    self.status =
+                        format!("'{name}' was not a component: it is one now. Click it again.");
+                }
+                Err(e) => self.status = e,
+            }
+        } else {
+            self.status = "That body is not a component yet. Select it in the browser and use \
+                           Component from Body, then click it again."
+                .into();
         }
     }
 
