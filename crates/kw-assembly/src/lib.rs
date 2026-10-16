@@ -1547,12 +1547,8 @@ impl Assembly {
                         body,
                     });
                 }
-                if found.is_empty() {
-                    return Err(AssemblyError::Part {
-                        part: leaf.part.name.clone(),
-                        message: "it has no solid".into(),
-                    });
-                }
+                // a component with no solid yet (just made, or its sketch not extruded) places nothing; it
+                // must not take the other components out of the view with it
                 // a part of one body keeps the name of its component
                 if found.len() == 1 {
                     found[0].name = None;

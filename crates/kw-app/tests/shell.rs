@@ -1585,7 +1585,10 @@ fn revolving_a_profile_gives_the_closed_form_volume() {
 #[test]
 fn the_orientation_widget_and_camera_animation_and_plane_overlay_work() {
     use kw_app::chrome::orientation_widget;
-    assert_eq!(orientation_widget::face_view("TOP").map(|v| v.1 > 1.5), Some(true));
+    assert_eq!(
+        orientation_widget::face_view("TOP").map(|v| v.1 > 1.5),
+        Some(true)
+    );
     assert_eq!(
         orientation_widget::face_view("FRONT"),
         Some((-std::f64::consts::FRAC_PI_2, 0.0))
@@ -9321,4 +9324,46 @@ fn editing_an_existing_form_shows_its_cage_and_preview_in_place_of_the_finished_
     h.frame();
     assert!(h.app.design.bodies.is_some());
     assert!(h.app.design.form_edit.selected.is_empty());
+}
+
+#[test]
+fn an_empty_component_does_not_hide_the_others_in_the_assembly_view() {
+    for draw in [true, false] {
+        let (mut h, _d) = design_harness(if draw { "empty_comp_a" } else { "empty_comp_b" });
+        sketch_block(&mut h, 20.0, 20.0, "10 mm");
+        commit(&mut h);
+        let head = {
+            let doc = proj(&mut h).document();
+            kw_app::bodies::summaries(&doc).first().unwrap().head
+        };
+        act(&mut h, Action::ComponentFromBody(head));
+        act(&mut h, Action::NewEmptyComponent);
+        assert_eq!(proj(&mut h).editing(), Some(1));
+        if draw {
+            sketch_block(&mut h, 5.0, 5.0, "3 mm");
+            commit(&mut h);
+        }
+        act(&mut h, Action::FinishComponent);
+        h.frame();
+        let Screen::Project { project, .. } = &mut h.app.screen else {
+            panic!()
+        };
+        assert!(h.app.design.asm.view);
+        assert!(
+            h.app.design.asm_display(project).is_some(),
+            "the assembly is shown (second component drawn: {draw})"
+        );
+        let tops = h
+            .app
+            .design
+            .asm
+            .pose_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .tops
+            .len();
+        // the finished component and the first one; an empty one places nothing
+        assert_eq!(tops, if draw { 2 } else { 1 });
+    }
 }

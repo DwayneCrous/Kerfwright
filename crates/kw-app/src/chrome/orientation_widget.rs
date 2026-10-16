@@ -151,7 +151,11 @@ pub fn show(ui: &mut Ui, rect: Rect, cam: &OrbitCamera) -> CubeOut {
     let s = rect.width().min(rect.height()) * 0.23;
     let to_screen = |p: (f32, f32, f64)| -> Pos2 { pos2(c.x + p.0 * s, c.y - p.1 * s) };
     let cube_rect = Rect::from_center_size(c, vec2(rect.width() * 0.62, rect.height() * 0.62));
-    let resp = ui.interact(cube_rect, ui.id().with("orientation_widget"), Sense::click());
+    let resp = ui.interact(
+        cube_rect,
+        ui.id().with("orientation_widget"),
+        Sense::click(),
+    );
     let painter = ui.painter_at(rect.expand(4.0));
     painter.circle_filled(
         c,

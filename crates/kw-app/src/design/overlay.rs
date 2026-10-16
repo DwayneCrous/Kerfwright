@@ -4,7 +4,7 @@
 use super::tools::Tool;
 use super::{geom, DesignWorkspace, Mode};
 use crate::chrome::theme::{ACCENT, ACCENT_SOFT, BORDER, CHROME, TEXT};
-use crate::chrome::{ribbon as rb, orientation_widget, Icon};
+use crate::chrome::{orientation_widget, ribbon as rb, Icon};
 use crate::model::{param_text, parse_param};
 use crate::project::Project;
 use crate::viewport::ViewOut;
@@ -471,6 +471,16 @@ impl DesignWorkspace {
         if self.asm.view {
             self.draw_joint_markers(&painter, project, o3, radius * 0.18);
             self.draw_overlaps(&painter, o3);
+            // when the components cannot be posed the view shows the design instead: say why
+            if let Some(Err(e)) = self.asm.pose_ref() {
+                painter.text(
+                    rect.left_top() + vec2(12.0, 10.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("The assembly is not shown: {e}"),
+                    egui::FontId::proportional(12.0),
+                    crate::chrome::theme::BAD,
+                );
+            }
         }
         // ---- the cage of the Form being edited
         self.draw_cage(&painter);
@@ -492,7 +502,9 @@ impl DesignWorkspace {
             Some(orientation_widget::CubeMenu::Fit) => self.viewport.fit(),
             Some(orientation_widget::CubeMenu::Previous) => self.viewport.previous_view(now),
             Some(orientation_widget::CubeMenu::Shaded) => self.shaded = !self.shaded,
-            Some(orientation_widget::CubeMenu::Edges) => self.viewport.show_edges = !self.viewport.show_edges,
+            Some(orientation_widget::CubeMenu::Edges) => {
+                self.viewport.show_edges = !self.viewport.show_edges
+            }
             Some(orientation_widget::CubeMenu::Section) => {
                 self.section = match self.section {
                     Some(_) => None,

@@ -2,8 +2,8 @@
 
 pub mod icons;
 mod icons_more;
+pub mod orientation_widget;
 pub mod ribbon;
 pub mod theme;
-pub mod orientation_widget;
 
 pub use icons::Icon;
