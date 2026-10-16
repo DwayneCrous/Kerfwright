@@ -19,7 +19,7 @@
 //!   the uncut material at the target engagement. Links stay down inside the cleared area, otherwise the tool
 //!   retracts.
 //!
-//! Clean-room note: this follows the textbook idea of engagement-angle control; no code or patent text was
+//! Provenance note: this follows the textbook idea of engagement-angle control; no code or patent text was
 //! used. A freedom-to-operate review of adaptive clearing (several patents cover constant-engagement
 //! toolpaths) has not been done — see `LICENSES/patent-watch.md`.
 

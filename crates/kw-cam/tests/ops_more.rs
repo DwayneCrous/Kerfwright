@@ -420,6 +420,7 @@ fn every_operation_posts_in_every_dialect_and_the_simulators_run_it() {
     for kind in [
         OpKind::Face,
         OpKind::Pocket,
+        #[cfg(feature = "adaptive-clearing")]
         OpKind::Adaptive,
         OpKind::ContourOutside,
         OpKind::ContourInside,

@@ -224,6 +224,7 @@ impl CamWorkspace {
                     &[
                         (OpKind::Face, Icon::Plane, "Face"),
                         (OpKind::Pocket, Icon::Rectangle, "Pocket"),
+                        #[cfg(feature = "adaptive-clearing")]
                         (OpKind::Adaptive, Icon::Offset, "Adaptive Clearing"),
                         (OpKind::ContourOutside, Icon::Spline, "2D Contour"),
                         (OpKind::ContourInside, Icon::Trim, "Inside Contour"),

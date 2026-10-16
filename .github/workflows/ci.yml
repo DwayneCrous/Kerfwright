@@ -126,6 +126,18 @@ jobs:
           KW_BLEND_PARTS: "500"
       - run: cargo test -p kw-blend --release --test basic --test history
 
+  gated-features:
+    # Features withheld pending a patent review (LICENSES/patent-watch.md) are off in the default build.
+    # They are still built and tested here so the code does not rot.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/check_gated_features.sh
+      - run: cargo test -p kw-cam --release --features adaptive-clearing --test adaptive
+      - run: cargo test -p kw-blend --release --features vertex-blend --test vertex --test corners
+
   step-iges:
     # Phase 3 acceptance (5): STEP / IGES readers and writers (the external-tool and public-corpus
     # checks need the dev-only oracle environment, see docs/phase3-report.md)

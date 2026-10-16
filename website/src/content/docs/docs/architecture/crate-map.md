@@ -32,7 +32,7 @@ kw-app        egui shell, Rayon ⇄ Tokio bridge, Command / Event, cancellation
 | Kernel | `kw-ssi` | Surface–surface intersection: exact quadric cases and certified level-set tracing |
 | | `kw-boolean` | Union, intersection and subtraction with verification and healing |
 | | `kw-model` | Profiles to extrude, revolve, sweep and loft; shell, offset, draft; the surface builders |
-| | `kw-blend` | Constant and variable radius fillets, chamfers, vertex blends |
+| | `kw-blend` | Constant and variable radius fillets, chamfers |
 | | `kw-analysis` | Curvature, draft angle, zebra stripes, edge continuity (G0, G1, G2) |
 | Sketching | `kw-sketch` | Sketch entities, the residual library and solver, DOF analysis, drag, trim, extend, offset, the toolkit-independent `Editor` |
 | | `kw-dxf` | ASCII DXF R2000 reader and writer with sketch adapters |
@@ -47,7 +47,7 @@ kw-app        egui shell, Rayon ⇄ Tokio bridge, Command / Event, cancellation
 | Exchange | `kw-step` | ISO 10303-21 parser, AP203, AP214 and AP242 B-rep import and export |
 | | `kw-iges` | IGES 5.3 import |
 | | `kw-io` | STL, OBJ with MTL, glTF and GLB writers |
-| Manufacture | `kw-cam` | 2.5-D operations, adaptive clearing, drop-cutter, tri-dexel stock, five-axis kinematics, posts |
+| Manufacture | `kw-cam` | 2.5-D operations, drop-cutter, tri-dexel stock, five-axis kinematics, posts |
 | | `kw-gsim` | Independent interpreters for five G-code dialects |
 | Simulate | `kw-mesh3d` | Tetrahedral mesher, TET10, quality |
 | | `kw-fem` | TET10 static, modal, thermal, nonlinear and SIMP, stress recovery |
@@ -68,6 +68,6 @@ Several crates exist only to *check* others, and they deliberately share no code
 - **Coedge with radial ring B-rep** in slotmap arenas, and every entity has a typed, generational id.
 - **The kernel returns `Result`.** Failures in Booleans and importers are reported errors, never panics, and a `catch_unwind` at the evaluator boundary turns any remaining panic into a failed feature.
 - **Determinism.** Same inputs give bit-identical results on 1 to 32 threads. See [Determinism](/docs/concepts/determinism/).
-- **Clean-room.** See [Clean-room policy](/docs/project/clean-room/).
+- **Independent implementation.** See [Provenance and IP policy](/docs/project/clean-room/).
 
 The full architecture document, with memory, state and thread diagrams, is [`docs/03-architecture.md`](https://github.com/DwayneCrous/Kerfwright/blob/main/docs/03-architecture.md).

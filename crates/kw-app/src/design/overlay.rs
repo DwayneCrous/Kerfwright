@@ -1,10 +1,10 @@
-//! Things drawn over the 3-D view: origin planes, the view cube, the navigation bar, the Extrude drag arrow,
+//! Things drawn over the 3-D view: origin planes, the orientation widget, the navigation bar, the Extrude drag arrow,
 //! and the parameters window.
 
 use super::tools::Tool;
 use super::{geom, DesignWorkspace, Mode};
 use crate::chrome::theme::{ACCENT, ACCENT_SOFT, BORDER, CHROME, TEXT};
-use crate::chrome::{ribbon as rb, viewcube, Icon};
+use crate::chrome::{ribbon as rb, orientation_widget, Icon};
 use crate::model::{param_text, parse_param};
 use crate::project::Project;
 use crate::viewport::ViewOut;
@@ -476,24 +476,24 @@ impl DesignWorkspace {
         self.draw_cage(&painter);
         // ---- the regions of the Extrude dialog's sketch
         self.draw_regions(ui, &painter, rect, o3);
-        // ---- view cube
+        // ---- orientation widget
         let cube =
             egui::Rect::from_min_size(rect.right_top() + vec2(-146.0, 8.0), vec2(136.0, 148.0));
-        let cube_out = viewcube::show(ui, cube, &self.viewport.camera);
+        let cube_out = orientation_widget::show(ui, cube, &self.viewport.camera);
         let now = ui.ctx().input(|i| i.time);
         if let Some((yaw, pitch)) = cube_out.look {
             self.viewport.look(yaw, pitch, now);
         }
         match cube_out.menu {
-            Some(viewcube::CubeMenu::Isometric) => {
+            Some(orientation_widget::CubeMenu::Isometric) => {
                 self.viewport.look(-0.8, 0.45, now);
                 self.viewport.fit();
             }
-            Some(viewcube::CubeMenu::Fit) => self.viewport.fit(),
-            Some(viewcube::CubeMenu::Previous) => self.viewport.previous_view(now),
-            Some(viewcube::CubeMenu::Shaded) => self.shaded = !self.shaded,
-            Some(viewcube::CubeMenu::Edges) => self.viewport.show_edges = !self.viewport.show_edges,
-            Some(viewcube::CubeMenu::Section) => {
+            Some(orientation_widget::CubeMenu::Fit) => self.viewport.fit(),
+            Some(orientation_widget::CubeMenu::Previous) => self.viewport.previous_view(now),
+            Some(orientation_widget::CubeMenu::Shaded) => self.shaded = !self.shaded,
+            Some(orientation_widget::CubeMenu::Edges) => self.viewport.show_edges = !self.viewport.show_edges,
+            Some(orientation_widget::CubeMenu::Section) => {
                 self.section = match self.section {
                     Some(_) => None,
                     None => Some(super::section::SectionState::new()),

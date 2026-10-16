@@ -69,7 +69,7 @@ Constraint graph: bipartite (variables ↔ equations) or entity graph with const
 At a (near-)solution `x*`:
 * `r = rank(J)` via column-pivoted QR / SVD with tolerance `ε·σ₁·max(m,n)`.
 * `DOF = n − r − (number of unremoved rigid-body motions, 3 if the sketch is not anchored)`.
-* Null space of `J` (last `n − r` right singular vectors) gives the **motion directions** → UI colours entities that can still move (Fusion-style "blue vs. black").
+* Null space of `J` (last `n − r` right singular vectors) gives the **motion directions** → UI colours entities that can still move (conventional "blue vs. black").
 * Redundancy: `m − r > 0` ⇒ some constraints dependent.
   * Residual `‖F(x*)‖ ≈ 0` ⇒ **redundant but consistent** (warn).
   * Residual `> tol` ⇒ **conflicting** (error); find a minimal conflicting set by a *deletion filter* (drop each constraint, re-solve; keep those whose removal restores solvability) or via pivoted-QR ordering of rows (the rows that fall in the dependent tail are the suspects).

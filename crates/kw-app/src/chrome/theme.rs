@@ -1,4 +1,4 @@
-//! The Fusion-style light theme.
+//! The light theme.
 
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 

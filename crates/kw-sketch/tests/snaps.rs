@@ -9,9 +9,9 @@ fn click(ed: &mut Editor, x: f64, y: f64) {
     ed.handle(Input::Click((x, y)));
 }
 
-fn fusion() -> Editor {
+fn all_snaps() -> Editor {
     let mut ed = Editor::default();
-    ed.snaps = SnapSettings::fusion();
+    ed.snaps = SnapSettings::all_on();
     ed.snaps.grid = false;
     ed.tolerance = 0.3;
     ed
@@ -64,7 +64,7 @@ fn default_settings_keep_the_first_behaviour() {
 
 #[test]
 fn midpoint_snap_places_a_point_with_a_midpoint_constraint() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.sketch.add_line_xy(0.0, 0.0, 10.0, 4.0);
     ed.refresh();
     let s = ed.snap((5.1, 2.05));
@@ -85,7 +85,7 @@ fn midpoint_snap_places_a_point_with_a_midpoint_constraint() {
 
 #[test]
 fn endpoint_beats_midpoint_of_a_short_line() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.sketch.add_line_xy(0.0, 0.0, 0.4, 0.0);
     ed.refresh();
     assert!(matches!(ed.snap((0.35, 0.0)), Snap::Point(..)));
@@ -93,7 +93,7 @@ fn endpoint_beats_midpoint_of_a_short_line() {
 
 #[test]
 fn intersection_of_two_lines_and_of_line_and_circle() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.sketch.add_line_xy(0.0, 0.0, 12.0, 8.0);
     ed.sketch.add_line_xy(0.0, 10.0, 12.0, 2.0);
     ed.sketch.add_circle_xy(20.0, 20.0, 5.0);
@@ -135,7 +135,7 @@ fn intersection_of_two_lines_and_of_line_and_circle() {
 
 #[test]
 fn origin_snap_makes_one_fixed_point() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.set_tool(Tool::Line);
     click(&mut ed, 0.1, -0.1);
     click(&mut ed, 10.0, 7.0);
@@ -170,7 +170,7 @@ fn polar_snap_rounds_the_angle_and_keeps_the_length() {
         (-61.0, -60.0),
         (136.0, 135.0),
     ] {
-        let mut ed = fusion();
+        let mut ed = all_snaps();
         ed.set_tool(Tool::Line);
         click(&mut ed, 100.0, 100.0);
         let len = 10.0;
@@ -194,7 +194,7 @@ fn polar_snap_rounds_the_angle_and_keeps_the_length() {
 
 #[test]
 fn polar_snap_adds_h_v_constraints_on_the_axes_and_ignores_off_angles() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.set_tool(Tool::Line);
     click(&mut ed, 50.0, 50.0);
     click(&mut ed, 50.15, 60.0); // ~0.9 degrees off vertical
@@ -205,7 +205,7 @@ fn polar_snap_adds_h_v_constraints_on_the_axes_and_ignores_off_angles() {
     let (a, b) = last_line(&ed);
     assert!((a.0 - b.0).abs() < 1e-9);
     // 37 degrees is more than 3 degrees from any multiple of 15: free
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.set_tool(Tool::Line);
     click(&mut ed, 0.0, 30.0);
     let probe = (
@@ -228,7 +228,7 @@ fn polar_snap_adds_h_v_constraints_on_the_axes_and_ignores_off_angles() {
 
 #[test]
 fn parallel_and_perpendicular_to_an_existing_line() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.snaps.polar = None;
     let base = ed.sketch.add_line_xy(0.0, 0.0, 20.0, 7.3); // not a multiple of any step
     ed.refresh();
@@ -273,7 +273,7 @@ fn parallel_and_perpendicular_to_an_existing_line() {
 
 #[test]
 fn acquired_points_give_alignment_lines_and_a_crossing() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     let a = ed.sketch.add_point(0.0, 10.0);
     let b = ed.sketch.add_point(25.0, 0.0);
     ed.refresh();
@@ -314,7 +314,7 @@ fn acquired_points_give_alignment_lines_and_a_crossing() {
 
 #[test]
 fn alignment_crossing_with_a_polar_ray() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     let a = ed.sketch.add_point(40.0, 10.0);
     ed.refresh();
     ed.set_tool(Tool::Line);
@@ -332,7 +332,7 @@ fn alignment_crossing_with_a_polar_ray() {
 
 #[test]
 fn grid_snap_rounds_and_loses_to_everything_else() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.snaps.grid = true;
     ed.snaps.grid_step = 5.0;
     ed.set_tool(Tool::Point);
@@ -355,7 +355,7 @@ fn grid_snap_rounds_and_loses_to_everything_else() {
 
 #[test]
 fn rectangle_corners_snap_to_the_origin_and_midpoints() {
-    let mut ed = fusion();
+    let mut ed = all_snaps();
     ed.sketch.add_line_xy(10.0, -20.0, 10.0, 30.0);
     ed.refresh();
     ed.set_tool(Tool::Rectangle);
@@ -382,7 +382,7 @@ fn random_clicks_with_every_snap_on_never_conflict_or_panic() {
         (state >> 11) as f64 / (1u64 << 53) as f64
     };
     for round in 0..20 {
-        let mut ed = fusion();
+        let mut ed = all_snaps();
         ed.snaps.grid = round % 2 == 0;
         ed.snaps.grid_step = 2.0;
         ed.tolerance = 0.5;

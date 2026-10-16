@@ -53,7 +53,7 @@ pub const CONSTRAINTS: &[(ConstraintTool, &str)] = &[
 
 fn state_color(s: EntityState) -> Color32 {
     match s {
-        // black, as in Fusion 360: nothing left to move
+        // black, as is usual in parametric sketchers: nothing left to move
         EntityState::Constrained => Color32::from_rgb(25, 25, 30),
         EntityState::Free => Color32::from_rgb(90, 160, 255),
         EntityState::Redundant => Color32::from_rgb(235, 200, 60),
@@ -269,7 +269,7 @@ impl Default for SketcherApp {
             reference: Vec::new(),
             editor: {
                 let mut e = Editor::default();
-                e.snaps = SnapSettings::fusion();
+                e.snaps = SnapSettings::all_on();
                 e
             },
             view: View::default(),

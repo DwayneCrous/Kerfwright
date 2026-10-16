@@ -1,4 +1,4 @@
-//! Dragging a component with the pointer, as in Fusion 360: a free component follows the pointer in a plane
+//! Dragging a component with the pointer: a free component follows the pointer in a plane
 //! facing the camera; a component on a joint moves the joint's values so that the grabbed point stays as
 //! near the pointer ray as the joint allows (within its limits).
 

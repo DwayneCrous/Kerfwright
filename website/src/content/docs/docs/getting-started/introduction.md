@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-Kerfwright is a CAD, CAM, FEA and ECAD suite written in Rust. It runs as one desktop program, `kerfwright`, built on its own B-rep modelling kernel. The kernel and the applications on top of it were written clean-room, from papers, standards and published documentation (see [Clean-room policy](/docs/project/clean-room/)).
+Kerfwright is a CAD, CAM, FEA and ECAD suite written in Rust. It runs as one desktop program, `kerfwright`, built on its own B-rep modelling kernel. The kernel and the applications on top of it were written independently, from papers, standards and published documentation (see [Provenance and IP policy](/docs/project/clean-room/)).
 
 The name is the job: a *kerf* is the width of material a cut removes, and a *wright* makes things. The program follows a part from the first sketch to the program that cuts it.
 

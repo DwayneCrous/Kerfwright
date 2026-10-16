@@ -1,5 +1,5 @@
 //! The planar arrangement of a sketch: every curve is cut where it crosses or touches another one, and the
-//! pieces form a planar graph whose faces are the regions of the sketch (as in Fusion 360 and Onshape).
+//! pieces form a planar graph whose faces are the regions of the sketch (as in common parametric CAD).
 //!
 //! * Lines, arcs and circles are intersected in closed form; ellipses and splines are intersected by
 //!   sampling and refined with Newton's method, so every crossing is a vertex shared by both curves.

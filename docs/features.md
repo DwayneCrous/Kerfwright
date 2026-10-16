@@ -1,10 +1,10 @@
 # Kerfwright: everything the program does today
 
-A pure-Rust, clean-room CAD suite. Everything below is implemented and covered by tests unless marked *(limit)*. Real mouse interaction and native file dialogs could not be driven where it was built, so they need a hand test.
+A pure-Rust CAD suite written independently from public sources. Everything below is implemented and covered by tests unless marked *(limit)*. Real mouse interaction and native file dialogs could not be driven where it was built, so they need a hand test.
 
 ## 1. Application shell
 * Welcome page: New design (name + folder, saved at once as `<name>.kwf`), Open project, Open demo part, ten most recent projects (missing files marked, "Forget").
-* Fusion-style frame: light theme, application bar (home, File, Undo, Redo, Save, project name with `*` when unsaved), workspace menu (DESIGN, MANUFACTURE, SIMULATION, ELECTRONICS, RENDER), ribbon with tabs, browser, timeline, status line.
+* Application frame: light theme, application bar (home, File, Undo, Redo, Save, project name with `*` when unsaved), workspace menu (DESIGN, MANUFACTURE, SIMULATION, ELECTRONICS, RENDER), ribbon with tabs, browser, timeline, status line.
 * Unsaved-changes prompts when closing, opening another project, opening the demo or quitting; the window closes after the answer.
 * `.kwf` project file: feature document plus CAM, FEA, board and assembly data as extra entries; unknown fields and entries survive a save; three schema versions migrate; files from newer versions are read, files that need a newer reader are refused cleanly.
 * File ▸ Import STEP / IGES / STL (kept inside the project), Export STEP / STL / OBJ (+MTL) / GLB.
@@ -14,7 +14,7 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 * Icon buttons in groups, each with a `TITLE ▾` dropdown listing every command with icon, name, shortcut and category headings; split buttons for variants; disabled commands explain why; the ribbon scrolls sideways in a narrow window.
 * Tabs: SOLID (CREATE, MODIFY, CONSTRUCT, INSPECT, ASSEMBLE, SELECT), SURFACE (CREATE, MODIFY, INSPECT), SHEET METAL, FORM, TOOLS, and SKETCH while sketching (CREATE, MODIFY, PROJECT, CONSTRAINTS, OPTIONS, FINISH). MESH is not shown.
 * Painter-drawn icon set (no image files).
-* View cube: bevelled cube with clickable faces, edges and corners, turn arrows (quarter turn, 45° up/down), menu (Isometric, Zoom to fit, Previous view, Shaded/wireframe, Show edges, Section view).
+* Orientation widget: bevelled cube with clickable faces, edges and corners, turn arrows (quarter turn, 45° up/down), menu (Isometric, Zoom to fit, Previous view, Shaded/wireframe, Show edges, Section view).
 * Navigation: orbit, pan, zoom, home, fit, shaded/wireframe, edges on/off, origin planes; clip planes follow the model so panning never cuts it.
 * Browser tree: Document Settings, Origin (planes with eye toggles), Sketches (eye), Construction (eye), Bodies (eye, rename, colour, material), Features; context menus (Edit, Suppress, Roll back, Delete with a count of dependent steps).
 * Timeline: a chip per feature, drag to reorder (refused with a message when something depends on it), rollback marker, suppress, edit in place, undo / redo.
@@ -26,7 +26,7 @@ A pure-Rust, clean-room CAD suite. Everything below is implemented and covered b
 **Drawing tools:** line, rectangle (corner, centre, 3-point/aligned), circle (centre, 3-point), arc (centre, 3-point), spline (control points), fit spline, polygon (n sides), slot, ellipse, point, text (letters from fonts as profiles).
 **Modify tools:** trim, extend, offset, corner fillet, corner chamfer, mirror, rectangular pattern, circular pattern, Project (model edges, locked, purple), Intersect (where the plane cuts the model).
 **Constraints (13):** coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, fix, midpoint, concentric, collinear, point on curve, symmetric.
-**Dimensions (Fusion-style):** one line = length; two parallel lines = distance; two meeting lines = angle; point + line = perpendicular distance; two points = distance; circle = diameter; arc = radius. Driven (reference) dimensions in grey brackets when the sketch is already determined; names `d1, d2 …`; formulas over document parameters (live) and over other dimensions (evaluated once); double-click a label to edit.
+**Dimensions:** one line = length; two parallel lines = distance; two meeting lines = angle; point + line = perpendicular distance; two points = distance; circle = diameter; arc = radius. Driven (reference) dimensions in grey brackets when the sketch is already determined; names `d1, d2 …`; formulas over document parameters (live) and over other dimensions (evaluated once); double-click a label to edit.
 **Snapping and inference:** points, origin, midpoints, intersections, on-curve, tracking lines (horizontal/vertical/polar angle steps/parallel/perpendicular/alignment with rested-on points), grid, auto-constraints, Alt to ignore.
 **Visual language:** blue under-constrained, black fully constrained, red conflicting, yellow redundant, purple projected; closed regions shaded light blue (per region, holes clear); constraint icons beside geometry; Display toggles (grid, profiles, constraints, dimensions); drag-select box (window left→right, crossing right→left, Shift adds).
 **Solver:** constraint solver with degrees-of-freedom report, redundancy and conflict detection, drag of free geometry.
@@ -74,7 +74,7 @@ Box, cylinder, sphere, torus cages; the cage is drawn in the view and edited the
 Measure, Section Analysis, Appearance, Parameters, Import, Export.
 
 ## 9. Manufacture (CAM)
-Pocket, Adaptive Clearing (constant engagement), 2D Contour, 3D finishing (exact drop-cutter with shank/holder collision checks), stock simulation (dexel), multi-axis kinematics (5 machine types, 3+2, swarf, tool-centre-point), five G-code post dialects with a post template language, G-code replay interpreters for all five.
+Pocket, 2D Contour, 3D finishing (exact drop-cutter with shank/holder collision checks), stock simulation (dexel), multi-axis kinematics (5 machine types, 3+2, swarf, tool-centre-point), five G-code post dialects with a post template language, G-code replay interpreters for all five.
 
 ## 10. Simulation (FEA)
 Tetrahedral meshing of solids, linear static analysis (second-order elements), modal analysis, topology optimisation (SIMP), supports and loads on picked faces, von Mises / displacement colouring, validated against closed-form solutions.
@@ -98,4 +98,4 @@ Realtime PBR viewport (ambient occlusion, edge lines, picking buffer), CPU/GPU p
 * **kw-cam / kw-gsim / kw-fem / kw-mesh3d / kw-ecad / kw-fabcheck / kw-render / kw-job:** the manufacturing, simulation, electronics and rendering engines.
 
 ## 14. Known limits
-assembly joints form a tree (no closed kinematic loops) and components are copies in the project (no linked files); no Mesh tab (surfaces are in `docs/surface-report.md`); Form cages cannot get new faces or edges (only their vertices and creases move); ellipse/spline crossings that only graze can be missed when splitting sketches; chosen regions that touch only at a corner become separate pieces of one body; CAM and FEA use the last solid only; STL meshes convert to faceted solids only (no cylinder / sphere fitting, 150 000 triangle cap, FEA and CAM need the converted solid); drawing limits are listed in `docs/fusion-parity.md`, no collaboration.
+assembly joints form a tree (no closed kinematic loops) and components are copies in the project (no linked files); no Mesh tab (surfaces are in `docs/surface-report.md`); Form cages cannot get new faces or edges (only their vertices and creases move); ellipse/spline crossings that only graze can be missed when splitting sketches; chosen regions that touch only at a corner become separate pieces of one body; CAM and FEA use the last solid only; STL meshes convert to faceted solids only (no cylinder / sphere fitting, 150 000 triangle cap, FEA and CAM need the converted solid); drawing limits are listed in `docs/reference-workflow-comparison.md`, no collaboration.

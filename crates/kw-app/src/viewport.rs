@@ -731,7 +731,7 @@ impl Viewport3d {
         let now = ui.ctx().input(|i| i.time);
         if let Some(a) = self.anim {
             let t = ((now - a.start) / 0.35).clamp(0.0, 1.0);
-            let (yaw, pitch) = crate::chrome::viewcube::lerp_view(a.from, a.to, t);
+            let (yaw, pitch) = crate::chrome::orientation_widget::lerp_view(a.from, a.to, t);
             self.camera.yaw = yaw;
             self.camera.pitch = pitch;
             if t >= 1.0 {

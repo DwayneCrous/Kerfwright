@@ -307,7 +307,7 @@ fn menu_rows(ui: &mut Ui, sections: &[Section]) -> Option<&'static str> {
     picked
 }
 
-/// A group like Fusion's: big icon buttons for the commonly used commands, and the group title as a
+/// A ribbon group: big icon buttons for the commonly used commands, and the group title as a
 /// `TITLE ▾` button that opens a dropdown with every command of the group, under category headings.
 /// Returns the id of whatever was clicked, in the buttons or in the dropdown.
 pub fn menu_group(

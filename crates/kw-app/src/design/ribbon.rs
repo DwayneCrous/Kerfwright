@@ -1,4 +1,4 @@
-//! The Design ribbon, laid out like Fusion 360's: icon buttons for the common commands and, under every group
+//! The Design ribbon, laid out as a conventional CAD ribbon: icon buttons for the common commands and, under every group
 //! title, a dropdown (`CREATE ▾`) listing all of the group's commands under category headings. The SOLID tab
 //! is always there; the SKETCH tab appears while a sketch is being drawn.
 

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
-    /// Sketch and Model together, like Fusion's Design environment.
+    /// Sketch and Model together, as one design environment.
     Design,
     Cam,
     Fea,

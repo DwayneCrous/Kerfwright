@@ -1,4 +1,4 @@
-//! Assemblies: instances of parts placed by joints, as in Fusion 360.
+//! Assemblies: instances of parts placed by joints.
 //!
 //! * A [`Part`] is a feature [`Document`] plus named connection frames (origin, z axis, x axis in the
 //!   part's own coordinates); or a whole sub-[`Assembly`] (`Part::sub`), whose inner frames are named

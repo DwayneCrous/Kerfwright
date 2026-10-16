@@ -15,7 +15,7 @@ Design is where parts are made. Sketch and Model are one workspace: you sketch o
 | Ribbon | The workspace menu at the left, then the tabs and tool groups of the current workspace. Each group has big icon buttons and a `TITLE ▾` dropdown listing every command with its icon, name and shortcut. A command that cannot run says why in its tooltip. |
 | Browser (left) | Document Settings, Origin, Sketches, Construction, Bodies, Features. |
 | Timeline (bottom) | One chip per feature. |
-| View | The view cube, orbit, pan, zoom and a navigation bar. |
+| View | The orientation widget, orbit, pan, zoom and a navigation bar. |
 
 Closing a project, opening another, or quitting asks first if there are unsaved changes.
 

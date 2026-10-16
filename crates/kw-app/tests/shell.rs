@@ -603,7 +603,7 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
     // the four operations
     for (op, tool) in [
         (OpKind::Pocket, ToolChoice::Flat),
-        (OpKind::Adaptive, ToolChoice::Flat),
+        (OpKind::Face, ToolChoice::Flat),
         (OpKind::ContourOutside, ToolChoice::Flat),
         (OpKind::Finish3d, ToolChoice::Ball),
     ] {
@@ -611,7 +611,7 @@ fn the_cam_workspace_plans_operations_posts_every_dialect_and_simulates_the_stoc
         h.app.cam.settings.tool = tool;
         h.app.cam.fit_to_workpiece(project);
         let st = &mut h.app.cam.settings;
-        if matches!(op, OpKind::Pocket | OpKind::Adaptive) {
+        if matches!(op, OpKind::Pocket | OpKind::Face) {
             st.x0 += 5.0;
             st.y0 += 5.0;
             st.x1 -= 5.0;
@@ -1050,7 +1050,7 @@ fn an_empty_model_renders_without_a_crash() {
     );
 }
 
-// ------------------------------------------------------------------------- Design workspace (Fusion-style)
+// ------------------------------------------------------------------------- Design workspace
 
 use kw_app::design::{geom, tools::Tool, Action, Mode};
 use kw_app::viewport::ViewOut;
@@ -1164,7 +1164,7 @@ fn click(h: &mut Harness, pick: Option<Pick>) {
 
 #[test]
 fn sketch_on_a_plane_then_straight_into_a_previewed_extrude() {
-    let (mut h, _d) = design_harness("fusion_flow");
+    let (mut h, _d) = design_harness("design_flow");
     sketch_block(&mut h, 30.0, 20.0, "5 mm");
     // the live preview shows the new solid before OK
     let pv = h.app.design.preview.clone().expect("a preview");
@@ -1583,19 +1583,19 @@ fn revolving_a_profile_gives_the_closed_form_volume() {
 }
 
 #[test]
-fn the_view_cube_and_camera_animation_and_plane_overlay_work() {
-    use kw_app::chrome::viewcube;
-    assert_eq!(viewcube::face_view("TOP").map(|v| v.1 > 1.5), Some(true));
+fn the_orientation_widget_and_camera_animation_and_plane_overlay_work() {
+    use kw_app::chrome::orientation_widget;
+    assert_eq!(orientation_widget::face_view("TOP").map(|v| v.1 > 1.5), Some(true));
     assert_eq!(
-        viewcube::face_view("FRONT"),
+        orientation_widget::face_view("FRONT"),
         Some((-std::f64::consts::FRAC_PI_2, 0.0))
     );
-    assert!(viewcube::face_view("NOPE").is_none());
+    assert!(orientation_widget::face_view("NOPE").is_none());
     // yaw turns the short way round
-    let (y, _) = viewcube::lerp_view((3.0, 0.0), (-3.0, 0.0), 0.5);
+    let (y, _) = orientation_widget::lerp_view((3.0, 0.0), (-3.0, 0.0), 0.5);
     assert!(y.abs() > 3.0 && y.abs() < 3.3, "{y}");
-    let (y0, p0) = viewcube::lerp_view((0.2, 0.3), (1.0, 0.9), 0.0);
-    let (y1, p1) = viewcube::lerp_view((0.2, 0.3), (1.0, 0.9), 1.0);
+    let (y0, p0) = orientation_widget::lerp_view((0.2, 0.3), (1.0, 0.9), 0.0);
+    let (y1, p1) = orientation_widget::lerp_view((0.2, 0.3), (1.0, 0.9), 1.0);
     assert!(
         (y0 - 0.2).abs() < 1e-12
             && (p0 - 0.3).abs() < 1e-12
@@ -1639,7 +1639,7 @@ fn a_profile_drawn_with_snaps_extrudes_to_the_exact_solid() {
         let ed = &mut h.app.design.sketch.app.editor;
         assert!(
             ed.snaps.midpoints && ed.snaps.polar.is_some(),
-            "Fusion snaps are the default"
+            "all snaps are the default"
         );
         ed.set_tool(SkTool::Line);
         ed.handle(Input::Click((0.05, 0.05))); // origin
@@ -5403,8 +5403,8 @@ fn a_rollback_bar_at_the_end_of_the_timeline_does_not_block_new_features() {
 }
 
 #[test]
-fn the_view_cube_looks_from_faces_edges_and_corners() {
-    use kw_app::chrome::viewcube::direction_view;
+fn the_orientation_widget_looks_from_faces_edges_and_corners() {
+    use kw_app::chrome::orientation_widget::direction_view;
     use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
     // faces agree with the named views
     assert_eq!(direction_view([0, -1, 0]), (-FRAC_PI_2, 0.0));

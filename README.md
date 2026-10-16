@@ -59,7 +59,6 @@ application is usable, and there are no installers yet.
 
 ### Manufacture
 * 2.5-D pocket, contour, face, drill and bore operations
-* Adaptive clearing with an engagement verifier
 * Drop-cutter 3-D finishing, waterline, rest and swarf
 * Tri-dexel stock simulation and holder collision checks
 * Five-axis kinematics and 3+2 setups
@@ -185,7 +184,6 @@ report and collected in [`docs/STATUS.md`](docs/STATUS.md).
 | STEP | 259 of 259 public-corpus files; round trip with OpenCASCADE, truck and Gmsh | [Phase 3](docs/phase3-report.md) |
 | Persistent naming | 1,716 scenarios, 0 silent wrong resolutions | [Phase 4](docs/phase4-report.md) |
 | Sheet metal | Flat lengths exact to 1e-14 mm | [Phase 4](docs/phase4-report.md) |
-| Adaptive clearing | 1.010 x target engagement on 50 seeded pockets, 0 gouges | [Phase 5](docs/phase5-report.md) |
 | FEA | TET10 benchmarks within 0.1 to 1.8 %; 1 M DOF PCG in 81 s | [Phase 5](docs/phase5-report.md) |
 | Routing | 1,023 of 1,023 nets routed with 0 DRC violations on 20 boards | [Phase 5](docs/phase5-report.md) |
 | Rendering | 1 M triangles at 2.6 ms p95 (1080p) | [Phase 5](docs/phase5-report.md) |
@@ -231,7 +229,7 @@ flowchart TD
 | `kw-ssi` | Surface-surface intersection: exact quadric cases, certified level-set tracing, signed-distance field for free-form surfaces |
 | `kw-boolean` | Union, intersect, subtract: imprint, arrangement, classification, stitching, shape history |
 | `kw-model` | Profiles to extrude, revolve, sweep and loft; shell, offset, draft; surface builders (Coons, ruled, stitch, offset, thicken, trim, extend, match) |
-| `kw-blend` | Constant and variable radius fillets, tangent chains, vertex blends, chamfers |
+| `kw-blend` | Constant and variable radius fillets, tangent chains, chamfers |
 | `kw-sketch` | Sketch entities, residual library with analytic Jacobians, decomposition, sparse LM solver, DOF and conflict analysis, drag solver |
 
 **Parametric engine**
@@ -249,7 +247,7 @@ flowchart TD
 
 | Crate | Purpose |
 |---|---|
-| `kw-cam` | 2.5-D operations, adaptive clearing and verifier, drop-cutter, tri-dexel stock, five-axis kinematics, post DSL |
+| `kw-cam` | 2.5-D operations, drop-cutter, tri-dexel stock, five-axis kinematics, post DSL |
 | `kw-gsim` | Independent interpreters for the five G-code and Klartext dialects |
 | `kw-mesh3d` | Constrained Delaunay and refinement tetrahedral mesher, TET10, quality metrics |
 | `kw-fem` | TET10 static (direct and PCG) and modal solvers, stress recovery, SIMP, closed-form references |
@@ -297,13 +295,13 @@ Some things you should know before relying on it:
 * The Model workspace exposes only part of the engine's features so far.
 * Sketching happens on a flat 2-D canvas, and the model is evaluated on the UI thread, so a very heavy model
   pauses the window.
-* The Phase 5 suites, simulators and viewers are written in this repository, the adaptive-clearing
-  freedom-to-operate review is not done, and the IDF bottom-side convention is unverified.
+* The Phase 5 suites, simulators and viewers are written in this repository, adaptive clearing is withheld
+  from the default build (the `adaptive-clearing` cargo feature) until its freedom-to-operate review is recorded, and the IDF bottom-side convention is unverified.
 * ECAD offers generated sample boards only.
 
 The full list of caveats, with numbers, is in [`docs/STATUS.md`](docs/STATUS.md). The application is described in
-[`docs/app-shell.md`](docs/app-shell.md) and its distance from Fusion 360 in
-[`docs/fusion-parity.md`](docs/fusion-parity.md).
+[`docs/app-shell.md`](docs/app-shell.md) and its distance from a conventional parametric CAD workflow in
+[`docs/reference-workflow-comparison.md`](docs/reference-workflow-comparison.md).
 
 ## Documentation
 
@@ -311,7 +309,7 @@ Read in this order if you are new to the codebase.
 
 | | File | What it is |
 |---|---|---|
-| 0 | [`CLEAN_ROOM.md`](CLEAN_ROOM.md) | Rules on sources, licensing and naming; epistemic labels used in the docs |
+| 0 | [`CLEAN_ROOM.md`](CLEAN_ROOM.md) | Provenance and IP policy: rules on sources, licensing and naming; epistemic labels used in the docs |
 | 1 | [`docs/01-research/01-brep-kernel.md`](docs/01-research/01-brep-kernel.md) | B-rep topology, NURBS, SSI, Booleans, fillets, T-splines versus SubD |
 | 1 | [`docs/01-research/02-constraint-solver.md`](docs/01-research/02-constraint-solver.md) | 2-D constraints, G0 to G3, LM, Newton and BFGS, decomposition, DOF analysis |
 | 1 | [`docs/01-research/03-parametric-dag.md`](docs/01-research/03-parametric-dag.md) | Topological naming, feature DAG, incremental evaluation |
@@ -342,13 +340,20 @@ cargo test -p <crate>          # prefer per-crate runs; see below
 * Every algorithm needs a source. [`CLEAN_ROOM.md`](CLEAN_ROOM.md) lists what you may read and what you may not;
   read it before sending code that touches a solver, kernel or CAM routine.
 
-## Clean room and patents
+## Provenance and patents
 
 Kerfwright is an independent implementation of well-known CAD, CAM and CAE techniques. It is not affiliated with,
-derived from or endorsed by Autodesk, Siemens, Spatial or any other CAD vendor, and nothing in it comes from
-proprietary code or binaries. Statements about proprietary kernels in the research documents are labelled
+derived from or endorsed by Autodesk, Siemens, Spatial or any other CAD vendor. Its rules forbid proprietary code,
+binaries and leaked source as inputs, and every non-trivial algorithm cites its source. Kerfwright does not claim
+to be a "clean room" implementation in the legal sense, because no one can audit what an AI model used in drafting
+code has seen. Statements about proprietary kernels in the research documents are labelled
 **[Public]** or **[Inferred]**. Items that need legal review before shipping are tracked in
 [`LICENSES/patent-watch.md`](LICENSES/patent-watch.md).
+
+## Trademarks
+
+See [`TRADEMARKS.md`](TRADEMARKS.md): vendor names are used only descriptively, and the Kerfwright name has no
+trademark search recorded yet.
 
 ## License
 

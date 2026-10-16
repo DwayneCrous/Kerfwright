@@ -235,8 +235,8 @@ impl Default for SnapSettings {
 }
 
 impl SnapSettings {
-    /// Everything on, as in Fusion 360.
-    pub fn fusion() -> Self {
+    /// Every snap kind switched on (the default of the application).
+    pub fn all_on() -> Self {
         Self {
             points: true,
             origin: true,
@@ -1917,7 +1917,7 @@ impl Editor {
             _ => Cls::Other,
         };
         let cls: Vec<Cls> = got.iter().map(|e| class(*e)).collect();
-        // what the selection means, as Fusion 360 reads it
+        // what the selection means, as common parametric CAD reads it
         let kind: Option<DimKind> = if got.len() == 1 {
             match cls[0] {
                 // one line: its length, unless a second pick follows (a parallel line, a line to
@@ -2222,7 +2222,7 @@ impl Editor {
     }
 
     /// Lock the selected curves where they are (their points and sizes become constants for the
-    /// solver), as projected geometry is in Fusion. Undoable.
+    /// solver), as projected geometry is in common parametric CAD. Undoable.
     pub fn pin_selection(&mut self) {
         self.checkpoint();
         let mut vars = Vec::new();

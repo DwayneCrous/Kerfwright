@@ -1,4 +1,4 @@
-//! Fillets, variable-radius fillets, vertex blends and chamfers.
+//! Fillets, variable-radius fillets and chamfers (vertex blends behind the `vertex-blend` feature).
 //!
 //! Each edge blend is realised as a boolean with a swept "spandrel" tool: the region between the
 //! sharp corner and the blend profile, extended by a margin so that no tool face is coincident with
@@ -13,7 +13,8 @@
 //!   the whole run. Each edge gets its own tool ending in an exact cap at the junction; the tools of a
 //!   chain are united first (their caps coincide) and applied in one Boolean, which needs the exact
 //!   cylinder / torus and plane / cone tangent contacts of `kw-ssi`.
-//! * **Vertex blends** (in [`fillet`]): where three planar faces meet at a vertex whose three straight
+//! * **Vertex blends** (feature `vertex-blend`, off by default pending the patent search in
+//!   `LICENSES/patent-watch.md`; in [`fillet`]): where three planar faces meet at a vertex whose three straight
 //!   edges are all filleted with the same radius and convexity, a rolling-ball sphere patch replaces
 //!   the mitre of the three edge blends.
 //!
@@ -32,6 +33,7 @@
 
 mod blend;
 mod glue;
+#[cfg(feature = "vertex-blend")]
 mod vertex;
 
 pub use blend::{

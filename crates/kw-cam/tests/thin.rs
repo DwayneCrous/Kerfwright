@@ -268,6 +268,7 @@ fn contour_and_drilling_replay_in_every_dialect() {
     }
 }
 
+#[cfg(feature = "adaptive-clearing")]
 #[test]
 fn adaptive_clearing_replays_in_every_dialect() {
     // helical entry, many short feeds and arcs: the heaviest post input of the 2.5-D operations

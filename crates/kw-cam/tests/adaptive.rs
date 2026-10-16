@@ -1,3 +1,4 @@
+#![cfg(feature = "adaptive-clearing")]
 #![allow(clippy::needless_range_loop)]
 //! Adaptive clearing, checked by the independent verifier.
 

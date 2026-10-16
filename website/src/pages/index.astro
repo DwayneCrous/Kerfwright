@@ -19,8 +19,8 @@ const evidence = [
     caveat: 'The corpus is generated, and the thresholds were tuned on the same generator.', src: 'phase4-report.md', n: 'Phase 4' },
   { area: 'Incremental rebuild', result: '200-feature, 8-part model: 335 ms cold replay, 53 ms for an edit near the end.',
     caveat: 'One chain of 100 Booleans takes 8.7 s cold. That target is not met.', src: 'phase4-report.md', n: 'Phase 4' },
-  { area: 'Adaptive clearing', result: 'Worst engagement 1.010× the target over 50 pockets. 0 gouges and 0 holder collisions on 21 parts.',
-    caveat: 'The planner and its verifier share an author. The patent freedom-to-operate review is not done.', src: 'phase5-report.md', n: 'Phase 5' },
+  { area: 'Toolpath verification', result: '0 gouges and 0 holder collisions on 21 parts, checked by two independent checkers.',
+    caveat: 'The checkers were written in this project, and the machine housing is not modelled.', src: 'phase5-report.md', n: 'Phase 5' },
   { area: 'Finite elements', result: 'Cantilever tip deflection −0.015 % against the closed-form answer. One million DOF solved in 81 s.',
     caveat: 'References are closed-form elasticity solutions. The million-DOF run uses a structured mesh.', src: 'phase5-report.md', n: 'Phase 5' },
   { area: 'Board routing', result: '1,023 of 1,023 nets routed with 0 DRC violations on 20 boards.',
@@ -30,7 +30,7 @@ const evidence = [
 const workspaces = [
   { name: 'Design', body: 'Constrained sketches, extrude, revolve, sweep, loft, fillet, shell, patterns, assemblies with joints, sheet metal, subdivision forms and surfaces.',
     engines: 'kw-sketch · kw-model · kw-feature · kw-assembly', href: '/docs/workspaces/design/' },
-  { name: 'Manufacture', body: 'Setups with stock and work coordinates, pocket, adaptive clearing, contour, drill, 3-D finishing, stock simulation and five G-code dialects.',
+  { name: 'Manufacture', body: 'Setups with stock and work coordinates, pocket, contour, drill, 3-D finishing, stock simulation and five G-code dialects.',
     engines: 'kw-cam · kw-gsim', href: '/docs/workspaces/manufacture/' },
   { name: 'Simulation', body: 'Supports and loads picked on faces, static and modal studies, topology optimisation, results coloured on the model.',
     engines: 'kw-mesh3d · kw-fem', href: '/docs/workspaces/simulation/' },
@@ -179,7 +179,7 @@ const workspaces = [
             <li>Phase 6: collaboration, a WASM client and hardening.</li>
             <li>Testing on Windows and macOS. Development and testing so far were on Linux.</li>
             <li>G-code posts have not run on a real controller. The simulators that check them were written here.</li>
-            <li>Adaptive clearing needs its patent review before it ships.</li>
+            <li>Adaptive clearing is withheld from the default build until its patent review is recorded.</li>
             <li>Heavy models are evaluated on the UI thread and can pause the window.</li>
           </ul>
         </div>

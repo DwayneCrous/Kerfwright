@@ -8,6 +8,11 @@ license.workspace = true
 [lib]
 bench = false
 
+[features]
+# Off by default: adaptive clearing must not ship until a freedom-to-operate review is recorded in
+# LICENSES/patent-watch.md.
+adaptive-clearing = []
+
 [dependencies]
 rayon.workspace = true
 serde.workspace = true

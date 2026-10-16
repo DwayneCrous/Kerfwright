@@ -1,5 +1,5 @@
 //! Joint origins on geometry: what a click on a face or an edge of a component offers as the origin of a
-//! joint (Fusion's snap points), in world coordinates.
+//! joint (the joint snap points), in world coordinates.
 
 use super::geom;
 use crate::viewport::Pick;

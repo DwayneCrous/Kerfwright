@@ -1,4 +1,4 @@
-//! The view cube: a small cube that shows the camera orientation; clicking a face turns the view to it.
+//! The orientation widget: a small cube that shows the camera orientation; clicking a face turns the view to it.
 
 use super::theme::{ACCENT, BORDER, TEXT};
 use eframe::egui::{
@@ -49,7 +49,7 @@ pub enum CubeMenu {
     Section,
 }
 
-/// What the view cube reports for a frame.
+/// What the orientation widget reports for a frame.
 #[derive(Debug, Default)]
 pub struct CubeOut {
     /// The (yaw, pitch) to animate to: a face, an edge, a corner or an arrow was clicked.
@@ -151,7 +151,7 @@ pub fn show(ui: &mut Ui, rect: Rect, cam: &OrbitCamera) -> CubeOut {
     let s = rect.width().min(rect.height()) * 0.23;
     let to_screen = |p: (f32, f32, f64)| -> Pos2 { pos2(c.x + p.0 * s, c.y - p.1 * s) };
     let cube_rect = Rect::from_center_size(c, vec2(rect.width() * 0.62, rect.height() * 0.62));
-    let resp = ui.interact(cube_rect, ui.id().with("viewcube"), Sense::click());
+    let resp = ui.interact(cube_rect, ui.id().with("orientation_widget"), Sense::click());
     let painter = ui.painter_at(rect.expand(4.0));
     painter.circle_filled(
         c,
@@ -247,9 +247,9 @@ pub fn show(ui: &mut Ui, rect: Rect, cam: &OrbitCamera) -> CubeOut {
     if arrow(ui, c + vec2(0.0, m), vec2(0.0, 1.0), "Look from lower") {
         out.look = Some((cam.yaw, (pitch - std::f64::consts::FRAC_PI_4).max(-1.55)));
     }
-    // ---- the menu button under the cube, as in Onshape
+    // ---- the menu button under the cube
     let mb = Rect::from_center_size(rect.right_bottom() - vec2(14.0, 6.0), vec2(26.0, 16.0));
-    let mresp = ui.interact(mb, ui.id().with("viewcube_menu"), Sense::click());
+    let mresp = ui.interact(mb, ui.id().with("orientation_widget_menu"), Sense::click());
     painter.rect(
         mb,
         3.0,

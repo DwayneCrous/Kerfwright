@@ -1,4 +1,4 @@
-//! Computer-aided manufacturing: 2.5-D toolpaths (contour, pocket, drill, adaptive clearing), 3-D finishing
+//! Computer-aided manufacturing: 2.5-D toolpaths (contour, pocket, drill), 3-D finishing
 //! (drop-cutter), tri-dexel stock simulation, five-axis kinematics, and the post-processor that turns
 //! cutter-location events into the G-code of a controller.
 
@@ -8,6 +8,8 @@
     clippy::type_complexity
 )]
 
+// Constant-engagement clearing is withheld until its patent review is recorded (LICENSES/patent-watch.md).
+#[cfg(feature = "adaptive-clearing")]
 pub mod adaptive;
 pub mod bvh;
 pub mod dexel;

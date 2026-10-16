@@ -34,7 +34,7 @@ After Phase 5 the application shell, drawings and surfaces were added. See the [
 ## By area
 
 ### Kernel
-- Vertex blends cover three-face corners with equal radii and convexity on planar faces. Other corners meet in a mitre.
+- Corners meet in a mitre. Vertex blends are withheld behind the off-by-default `vertex-blend` feature until their patent search is recorded.
 - Variable radius fillets cover straight and circular-rim edges only. Setback is not done.
 - One free-form Boolean fuzz seed (34267) disagrees with the independent point-classification check. The cause is not found.
 
@@ -50,7 +50,7 @@ After Phase 5 the application shell, drawings and surfaces were added. See the [
 - No cache entries or thumbnails are written to the `.kwf`.
 
 ### CAM
-- Adaptive clearing's patent freedom-to-operate review is **not done**, and it must not ship before it is.
+- Adaptive clearing is withheld. It sits behind the off-by-default `adaptive-clearing` cargo feature and is not in releases until its patent freedom-to-operate review is recorded.
 - Posts and interpreters come from public manuals. Nothing ran on a real controller.
 - The machine housing is not modelled. Turning and additive are not built.
 

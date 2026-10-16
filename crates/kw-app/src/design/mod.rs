@@ -1,4 +1,4 @@
-//! The Design workspace: Sketch and Model as one thing, like Fusion's Design environment. A ribbon on top,
+//! The Design workspace: Sketch and Model as one design environment. A ribbon on top,
 //! the browser at the left, the timeline at the bottom and the 3-D view in the middle; *Create Sketch* picks
 //! a plane or a planar face, the view turns into the flat sketch canvas, *Finish Sketch* drops straight into
 //! the Extrude dialog with a live preview.
@@ -339,7 +339,7 @@ impl DesignWorkspace {
             self.model.selected = Some(id);
             self.status.clear();
             if was_new {
-                // straight into Extrude, as in Fusion
+                // straight into Extrude
                 let has_body = project.evaluation().final_solid().is_some();
                 self.open_tool(
                     project,

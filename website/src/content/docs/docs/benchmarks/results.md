@@ -47,7 +47,7 @@ The PRD sets performance **targets**. This page lists what has been **measured**
 | Boolean, 10k × 10k-face prismatic | ≤ 500 ms | union 0.48 s, intersect 0.34 s, subtract 0.37 s | Union is closest to the budget (0.50–0.55 s when busier) |
 | Boolean, outlines crossing everywhere (stress) | not a target | 0.45 s at 1,600 faces, ~2.0 s at 3,200, ~3.5 s at 4,000; `Err` from ~5,000 faces | A degenerate stress case |
 | Fillet, 50 edges on a 2,002-face body | ≤ 300 ms | ~170 ms | |
-| Fillet benchmark | ≥ 95 % | 500 of 500 | Tangent chains and vertex blends included |
+| Fillet benchmark | ≥ 95 % | 500 of 500 | Tangent chains included; vertex-blend cases run only with the `vertex-blend` feature |
 | STEP import, 50 MB | ≤ 5 s | 28.3 MB in 1.39 s, ≈ 2.5 s scaled to 50 MB | Scaled, not measured at 50 MB |
 | Public STEP corpus | ≥ 95 % valid | 259 of 259 | |
 | NURBS point, 32 control points, p = 3, rational | none | 31 ns | Micro-benchmark |
@@ -70,7 +70,6 @@ The PRD sets performance **targets**. This page lists what has been **measured**
 
 | Check | Target | Measured | Caveat |
 |---|---|---|---|
-| Adaptive clearing engagement | ≤ 1.05× target | worst **1.010×** over 50 pockets | Excludes entry, links and finish (13 % of length). Planner and verifier share an author |
 | Gouges and holder collisions | 0 | 0 on 21 parts and ≈ 1 M poses | Machine housing not modelled |
 | Stock volume vs analytic | ≤ 0.5 % | +0.002 %, +0.042 %, +0.012 %, −0.128 %, −0.051 % | Five cases |
 | G-code replay in an independent simulator | all five dialects | Met | Simulators written in this project. Nothing run on a real controller |

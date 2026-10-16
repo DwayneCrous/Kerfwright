@@ -1,3 +1,4 @@
+#![cfg(feature = "vertex-blend")]
 #![allow(
     unused_imports,
     dead_code,

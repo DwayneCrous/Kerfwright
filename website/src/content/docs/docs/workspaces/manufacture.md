@@ -10,7 +10,7 @@ Manufacture (CAM) turns a model into a program a machine can run. Start it from 
 ## The flow
 
 1. **New Setup**: say how the part sits on the machine.
-2. **Add operations**: face, pocket, adaptive clearing, contour, drill and so on.
+2. **Add operations**: face, pocket, contour, drill and so on.
 3. **Simulate**: cut a virtual stock with every operation and look for gouges, leftover material and collisions.
 4. **Post**: write one G-code program per setup, and a setup sheet.
 
@@ -33,7 +33,6 @@ A project can hold several setups, so a part cut on its top and then flipped to 
 |---|---|
 | Face | Mills the top of the stock flat |
 | Pocket | Clears the inside of a closed outline, leaving islands |
-| Adaptive clearing | Clears material while holding the tool's engagement angle near constant |
 | Contour (outside, inside) | Follows an outline |
 | Chamfer | V-tool; the width on the top edge sets the depth |
 | Drill | Plain or pecked, with holes found from the model's cylindrical faces |
@@ -48,13 +47,9 @@ A project can hold several setups, so a part cut on its top and then flipped to 
 
 An operation keeps its settings and a **hash of what it was made from**. If the model, the tool, the stock, the work system or an earlier operation changes, the operation shows as *out of date*, and **Regenerate** remakes it.
 
-### Adaptive clearing
+### Adaptive clearing (withheld)
 
-Adaptive clearing follows boundaries and steers a spiral from a helical entry so that the **radial engagement stays near a target angle**. Over 50 seeded pockets (convex, concave, with islands and slots) the worst measured engagement was 1.010× the target, outside the entry, links and finish moves (13 % of path length on average). Coverage was 93.5 % to 100 %, and the rest is left for the finish pass.
-
-:::caution[Patent review pending]
-The method was derived from public literature, and it deliberately avoids the medial-axis method of US 9,164,503. The freedom-to-operate review is **not done**, and `LICENSES/patent-watch.md` records that adaptive clearing must not ship until it is.
-:::
+Constant-engagement clearing is **not part of the default build**. The code is in the repository behind the `adaptive-clearing` cargo feature, which is off. It stays off, and out of releases, until a freedom-to-operate review is recorded in `LICENSES/patent-watch.md`.
 
 ## Libraries
 

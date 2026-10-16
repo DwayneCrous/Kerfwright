@@ -12,6 +12,10 @@ bench = false
 name = "kerfwright"
 path = "src/main.rs"
 
+[features]
+# Forwarded from kw-cam; off by default (see LICENSES/patent-watch.md).
+adaptive-clearing = ["kw-cam/adaptive-clearing"]
+
 [dependencies]
 rayon.workspace = true
 tokio.workspace = true

@@ -46,9 +46,9 @@ A **heal** stage handles failed, suspect or doubtful results. It re-runs the ope
 
 ## Blends
 
-`kw-blend` makes constant-radius fillets, two-distance chamfers, vertex blends and variable-radius fillets. Naming one edge blends its whole tangent chain (lines and circular arcs, convex and concave, open or closed). Fillets are realised as Booleans with a swept tool, so they inherit the verification above.
+`kw-blend` makes constant-radius fillets, two-distance chamfers and variable-radius fillets. Naming one edge blends its whole tangent chain (lines and circular arcs, convex and concave, open or closed). Fillets are realised as Booleans with a swept tool, so they inherit the verification above.
 
-**Limits:** vertex blends cover three-face corners with equal radii on planar faces; other corners meet in a mitre. Variable radius covers straight edges and circular rims, not ellipse or spline edges, and not sphere, torus or spline faces. Setback is not done.
+**Limits:** corners meet in a mitre. A rolling-ball vertex blend for three-face corners exists in the source behind the off-by-default `vertex-blend` feature, withheld until its patent search is recorded. Variable radius covers straight edges and circular rims, not ellipse or spline edges, and not sphere, torus or spline faces. Setback is not done.
 
 ## Exchange
 

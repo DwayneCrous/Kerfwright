@@ -2,6 +2,7 @@
 //! the function that turns them and a tool into a toolpath. Storing the settings next to the toolpath is
 //! what lets an operation be regenerated after the model changes.
 
+#[cfg(feature = "adaptive-clearing")]
 use crate::adaptive::{adaptive, AdaptiveParams};
 use crate::bvh::TriMesh;
 use crate::dexel::TriDexel;
@@ -18,6 +19,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpKind {
     Pocket,
+    /// Constant-engagement clearing. The variant stays so saved projects still load, but generating it needs
+    /// the `adaptive-clearing` feature, which is off until the patent review in `LICENSES/patent-watch.md`.
     Adaptive,
     ContourOutside,
     Finish3d,
@@ -42,10 +45,29 @@ pub enum OpKind {
 }
 
 impl OpKind {
+    /// The operations a user can add. Adaptive clearing is listed only when the feature is on.
+    #[cfg(feature = "adaptive-clearing")]
     pub const ALL: [OpKind; 13] = [
         OpKind::Face,
         OpKind::Pocket,
         OpKind::Adaptive,
+        OpKind::ContourOutside,
+        OpKind::ContourInside,
+        OpKind::Chamfer,
+        OpKind::Drill,
+        OpKind::Bore,
+        OpKind::Finish3d,
+        OpKind::Waterline,
+        OpKind::RestFinish,
+        OpKind::Swarf,
+        OpKind::TiltedContour,
+    ];
+
+    /// The operations a user can add. Adaptive clearing is listed only when the feature is on.
+    #[cfg(not(feature = "adaptive-clearing"))]
+    pub const ALL: [OpKind; 12] = [
+        OpKind::Face,
+        OpKind::Pocket,
         OpKind::ContourOutside,
         OpKind::ContourInside,
         OpKind::Chamfer,
@@ -377,6 +399,12 @@ impl OpParams {
             }
         }
         let region = || self.region.region();
+        #[cfg(not(feature = "adaptive-clearing"))]
+        if kind == OpKind::Adaptive {
+            return Err(
+                "adaptive clearing is not available in this build (patent review pending)".into(),
+            );
+        }
         match kind {
             OpKind::Pocket | OpKind::Adaptive => {
                 if w <= tool.diameter || h <= tool.diameter {
@@ -385,11 +413,11 @@ impl OpParams {
                         tool.diameter
                     ));
                 }
-                Ok(if kind == OpKind::Pocket {
-                    pocket(&region(), tool, &cut)
-                } else {
-                    adaptive(&region(), tool, &cut, &AdaptiveParams::default()).0
-                })
+                #[cfg(feature = "adaptive-clearing")]
+                if kind == OpKind::Adaptive {
+                    return Ok(adaptive(&region(), tool, &cut, &AdaptiveParams::default()).0);
+                }
+                Ok(pocket(&region(), tool, &cut))
             }
             OpKind::ContourOutside => Ok(contour(&region(), tool, Side::Outside, &cut)),
             OpKind::ContourInside => {

@@ -41,8 +41,8 @@ cpu cargo test -p kw-fem --release --test basic --test benchmarks --test simp --
 step "(3) FEA performance: 100k DOF direct, 1M DOF PCG to 1e-8"
 cpu cargo test -p kw-fem --release --test perf -- --nocapture --test-threads=1 2>&1 | tee "$OUT/fem_perf.log"
 
-step "(4) CAM: adaptive clearing, 50 seeded pockets, independent verifier"
-cpu cargo test -p kw-cam --release --test adaptive -- --nocapture 2>&1 | tee "$OUT/adaptive.log"
+step "(4) CAM: adaptive clearing (feature-gated, patent review pending), 50 seeded pockets, independent verifier"
+cpu cargo test -p kw-cam --release --features adaptive-clearing --test adaptive -- --nocapture 2>&1 | tee "$OUT/adaptive.log"
 
 step "(5) CAM: drop-cutter vs closed forms and brute force; tri-dexel vs 5 closed-form volumes"
 cpu cargo test -p kw-cam --release --test dropcutter --test dexel -- --nocapture --test-threads=1 2>&1 | tee "$OUT/dropcutter_dexel.log"

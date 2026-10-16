@@ -1,3 +1,4 @@
+#[cfg(feature = "vertex-blend")]
 use crate::vertex::{analyse_corner, build_corner_tool};
 use kw_boolean::{boolean, BoolOptions, BooleanError, Op};
 use kw_brep::{BRep, BodyId, EdgeId, EntityRef, FaceId, Origin, Sense, ShapeHistory, VertexId};
@@ -1414,6 +1415,8 @@ fn run(
         );
     }
     // vertex blends: the rolling-ball patch where three equal-radius fillets of three planes meet
+    // (withheld from the default build until its patent search is recorded)
+    #[cfg(feature = "vertex-blend")]
     if let Style::Fillet(r) = style {
         let mut verts: Vec<VertexId> = Vec::new();
         for &e in edges {

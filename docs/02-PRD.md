@@ -3,11 +3,11 @@
 Derived from `docs/01-research/`. Priorities: **P0** = required for the workspace to be usable, **P1** = expected by professional users, **P2** = differentiator / later.
 
 ## 1. Product statement
-Kerfwright is a pure-Rust, cross-platform (Linux, macOS, Windows, WebGPU/WASM) integrated CAD/CAM/CAE/ECAD application for mechanical product design, built on its own B-rep kernel, parametric history engine, and GPU renderer. It is a clean-room implementation (see `CLEAN_ROOM.md`); it targets *workflow familiarity* with modern all-in-one tools, not file- or UI-level cloning.
+Kerfwright is a pure-Rust, cross-platform (Linux, macOS, Windows, WebGPU/WASM) integrated CAD/CAM/CAE/ECAD application for mechanical product design, built on its own B-rep kernel, parametric history engine, and GPU renderer. It is an independent implementation from public sources (see `CLEAN_ROOM.md`); it targets *workflow familiarity* with modern all-in-one tools, not file- or UI-level cloning.
 
 **Target users:** hobbyists/makers, small manufacturers, and product designers who want one tool from sketch to G-code, with an open, scriptable, auditable core.
 
-**Non-goals (v1):** full Class-A surfacing, large-assembly PDM, explicit FEA (nonlinear static FEA — large displacement and plasticity at moderate strain — is built, see `docs/fusion-parity.md`), full-featured EDA schematic capture, cloud CAM post libraries for every machine, parity with any vendor's feature count.
+**Non-goals (v1):** full Class-A surfacing, large-assembly PDM, explicit FEA (nonlinear static FEA — large displacement and plasticity at moderate strain — is built, see `docs/reference-workflow-comparison.md`), full-featured EDA schematic capture, cloud CAM post libraries for every machine, parity with any vendor's feature count.
 
 ## 2. Workspaces
 

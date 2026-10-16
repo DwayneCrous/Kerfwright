@@ -9,6 +9,11 @@ description = "Edge blends: constant-radius fillets and chamfers"
 [lib]
 bench = false
 
+[features]
+# Off by default: vertex blends must not ship until a freedom-to-operate search is recorded in
+# LICENSES/patent-watch.md.
+vertex-blend = []
+
 [dependencies]
 nalgebra.workspace = true
 kw-math.workspace = true

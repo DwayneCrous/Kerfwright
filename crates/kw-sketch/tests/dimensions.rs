@@ -1,4 +1,4 @@
-//! The dimension tool reads its selection the way Fusion 360 does, and makes reference (driven) dimensions
+//! The dimension tool reads its selection the way common parametric CAD does, and makes reference (driven) dimensions
 //! when the sketch is already determined.
 
 use kw_sketch::constraint::ConstraintKind;

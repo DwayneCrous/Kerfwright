@@ -1,4 +1,4 @@
-//! Joints made by clicking geometry (Fusion's Joint and As-Built Joint commands), the properties window of a
+//! Joints made by clicking geometry (the Joint and As-Built Joint commands), the properties window of a
 //! joint, and picking components in the assembly view.
 
 use super::asm_snap::{self, Origin};

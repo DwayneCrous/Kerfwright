@@ -399,7 +399,7 @@ impl DesignWorkspace {
         Frame::new("origin", [0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
     }
 
-    /// A new component with nothing in it, opened for editing (Fusion's New Component).
+    /// A new component with nothing in it, opened for editing (the New Component command).
     pub fn asm_new_empty_component(&mut self, project: &mut Project) -> Result<usize, String> {
         let name = {
             let n = self.asm.new_name.trim();
